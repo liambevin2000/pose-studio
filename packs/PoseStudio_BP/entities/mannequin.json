@@ -1,0 +1,195 @@
+{
+  "format_version": "1.20.80",
+  "minecraft:entity": {
+    "description": {
+      "identifier": "pose:mannequin",
+      "is_spawnable": true,
+      "is_summonable": true,
+      "properties": {
+        "pose:root_x": {
+          "type": "float",
+          "range": [-180.0, 180.0],
+          "default": 0.0,
+          "client_sync": true
+        },
+        "pose:root_y": {
+          "type": "float",
+          "range": [-180.0, 180.0],
+          "default": 0.0,
+          "client_sync": true
+        },
+        "pose:root_z": {
+          "type": "float",
+          "range": [-180.0, 180.0],
+          "default": 0.0,
+          "client_sync": true
+        },
+        "pose:head_x": {
+          "type": "float",
+          "range": [-180.0, 180.0],
+          "default": 0.0,
+          "client_sync": true
+        },
+        "pose:head_y": {
+          "type": "float",
+          "range": [-180.0, 180.0],
+          "default": 0.0,
+          "client_sync": true
+        },
+        "pose:head_z": {
+          "type": "float",
+          "range": [-180.0, 180.0],
+          "default": 0.0,
+          "client_sync": true
+        },
+        "pose:body_x": {
+          "type": "float",
+          "range": [-180.0, 180.0],
+          "default": 0.0,
+          "client_sync": true
+        },
+        "pose:body_y": {
+          "type": "float",
+          "range": [-180.0, 180.0],
+          "default": 0.0,
+          "client_sync": true
+        },
+        "pose:body_z": {
+          "type": "float",
+          "range": [-180.0, 180.0],
+          "default": 0.0,
+          "client_sync": true
+        },
+        "pose:right_arm_x": {
+          "type": "float",
+          "range": [-180.0, 180.0],
+          "default": 0.0,
+          "client_sync": true
+        },
+        "pose:right_arm_y": {
+          "type": "float",
+          "range": [-180.0, 180.0],
+          "default": 0.0,
+          "client_sync": true
+        },
+        "pose:right_arm_z": {
+          "type": "float",
+          "range": [-180.0, 180.0],
+          "default": 0.0,
+          "client_sync": true
+        },
+        "pose:left_arm_x": {
+          "type": "float",
+          "range": [-180.0, 180.0],
+          "default": 0.0,
+          "client_sync": true
+        },
+        "pose:left_arm_y": {
+          "type": "float",
+          "range": [-180.0, 180.0],
+          "default": 0.0,
+          "client_sync": true
+        },
+        "pose:left_arm_z": {
+          "type": "float",
+          "range": [-180.0, 180.0],
+          "default": 0.0,
+          "client_sync": true
+        },
+        "pose:right_leg_x": {
+          "type": "float",
+          "range": [-180.0, 180.0],
+          "default": 0.0,
+          "client_sync": true
+        },
+        "pose:right_leg_y": {
+          "type": "float",
+          "range": [-180.0, 180.0],
+          "default": 0.0,
+          "client_sync": true
+        },
+        "pose:right_leg_z": {
+          "type": "float",
+          "range": [-180.0, 180.0],
+          "default": 0.0,
+          "client_sync": true
+        },
+        "pose:left_leg_x": {
+          "type": "float",
+          "range": [-180.0, 180.0],
+          "default": 0.0,
+          "client_sync": true
+        },
+        "pose:left_leg_y": {
+          "type": "float",
+          "range": [-180.0, 180.0],
+          "default": 0.0,
+          "client_sync": true
+        },
+        "pose:left_leg_z": {
+          "type": "float",
+          "range": [-180.0, 180.0],
+          "default": 0.0,
+          "client_sync": true
+        },
+        "pose:skin": {
+          "type": "int",
+          "range": [
+            0,
+            16
+          ],
+          "default": 0,
+          "client_sync": true
+        },
+        "pose:slim": {
+          "type": "bool",
+          "default": false,
+          "client_sync": true
+        },
+        "pose:hidden": {
+          "type": "bool",
+          "default": false,
+          "client_sync": true
+        }
+      }
+    },
+    "components": {
+      "minecraft:type_family": {
+        "family": [
+          "pose_mannequin",
+          "pose_studio",
+          "inanimate"
+        ]
+      },
+      "minecraft:collision_box": {
+        "width": 0.6,
+        "height": 1.8
+      },
+      "minecraft:health": {
+        "value": 20,
+        "max": 20
+      },
+      "minecraft:physics": {
+        "has_gravity": false,
+        "has_collision": false
+      },
+      "minecraft:pushable": {
+        "is_pushable": false,
+        "is_pushable_by_piston": false
+      },
+      "minecraft:knockback_resistance": {
+        "value": 1
+      },
+      "minecraft:damage_sensor": {
+        "triggers": [
+          {
+            "cause": "all",
+            "deals_damage": false
+          }
+        ]
+      },
+      "minecraft:fire_immune": {},
+      "minecraft:persistent": {}
+    }
+  }
+}

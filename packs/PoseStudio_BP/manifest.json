@@ -1,0 +1,28 @@
+{
+  "format_version": 2,
+  "header": {
+    "name": "Pose Studio BP",
+    "description": "Receives poses from the Pose Studio Blockbench plugin.",
+    "uuid": "3be8e9c9-16d7-4881-afb9-0d6ba618b678",
+    "version": [1, 0, 1],
+    "min_engine_version": [1, 21, 90]
+  },
+  "modules": [
+    {
+      "type": "data",
+      "uuid": "fc679e78-b86e-491c-8b8b-6954a69f7ac5",
+      "version": [1, 0, 1]
+    },
+    {
+      "type": "script",
+      "language": "javascript",
+      "uuid": "04d8314f-7da4-4c8d-b212-08da89c56df2",
+      "version": [1, 0, 1],
+      "entry": "scripts/main.js"
+    }
+  ],
+  "dependencies": [
+    { "module_name": "@minecraft/server", "version": "2.0.0" },
+    { "uuid": "c77895d6-9e9f-4fab-bf87-0f4ef5875b87", "version": [1, 0, 1] }
+  ]
+}

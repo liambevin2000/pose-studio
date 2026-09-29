@@ -1,0 +1,17 @@
+{
+  "format_version": "1.8.0",
+  "animations": {
+    "animation.pose_studio.mannequin.pose": {
+      "loop": true,
+      "bones": {
+        "pose_root": { "rotation": ["query.property('pose:root_x')", "query.property('pose:root_y')", "query.property('pose:root_z')"] },
+        "head":     { "rotation": ["query.property('pose:head_x')", "query.property('pose:head_y')", "query.property('pose:head_z')"] },
+        "body":     { "rotation": ["query.property('pose:body_x')", "query.property('pose:body_y')", "query.property('pose:body_z')"] },
+        "rightArm": { "rotation": ["query.property('pose:right_arm_x')", "query.property('pose:right_arm_y')", "query.property('pose:right_arm_z')"] },
+        "leftArm":  { "rotation": ["query.property('pose:left_arm_x')", "query.property('pose:left_arm_y')", "query.property('pose:left_arm_z')"] },
+        "rightLeg": { "rotation": ["query.property('pose:right_leg_x')", "query.property('pose:right_leg_y')", "query.property('pose:right_leg_z')"] },
+        "leftLeg":  { "rotation": ["query.property('pose:left_leg_x')", "query.property('pose:left_leg_y')", "query.property('pose:left_leg_z')"] }
+      }
+    }
+  }
+}

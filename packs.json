@@ -1,0 +1,141 @@
+{
+  "version": "0.20.0",
+  "revision": "618aca073429",
+  "files": [
+    {
+      "path": "PoseStudio_BP/entities/mannequin.json",
+      "size": 4783,
+      "sha1": "2c48d5cf23f98ebdda0576c3e12e80c5a48a83aa"
+    },
+    {
+      "path": "PoseStudio_BP/manifest.json",
+      "size": 753,
+      "sha1": "11d5fae6f5f99f255b511026816cd896f37d63a4"
+    },
+    {
+      "path": "PoseStudio_BP/scripts/main.js",
+      "size": 21731,
+      "sha1": "92b504805b0352daa56fb96d3cd8b01ffee5d5d6"
+    },
+    {
+      "path": "PoseStudio_RP/animations/mannequin.animation.json",
+      "size": 1165,
+      "sha1": "530cd206a18203819f6166671a7424680afd9d1f"
+    },
+    {
+      "path": "PoseStudio_RP/entity/mannequin.entity.json",
+      "size": 1685,
+      "sha1": "f4f0b252e4ed665b025d34945cd63e41bf27a8e6"
+    },
+    {
+      "path": "PoseStudio_RP/manifest.json",
+      "size": 440,
+      "sha1": "f29a6f8fba045ffe0b6291f67b4af7926edd8754"
+    },
+    {
+      "path": "PoseStudio_RP/models/entity/mannequin.geo.json",
+      "size": 8036,
+      "sha1": "7af08bf85d98eb78281802e74721e49aadbfb873"
+    },
+    {
+      "path": "PoseStudio_RP/render_controllers/mannequin.render_controllers.json",
+      "size": 1332,
+      "sha1": "b172b8272fb8d9b592613d9d87ae52432db7a9be"
+    },
+    {
+      "path": "PoseStudio_RP/texts/en_US.lang",
+      "size": 105,
+      "sha1": "5a6e340fa1bfbb32d3b681e1c8a22aa72f5c5605"
+    },
+    {
+      "path": "PoseStudio_RP/texts/languages.json",
+      "size": 10,
+      "sha1": "a132d5620ca2f490c046b5da103e659aa765fdb9"
+    },
+    {
+      "path": "PoseStudio_RP/textures/entity/pose_studio/clear.png",
+      "size": 96,
+      "sha1": "c87109385ad878a6551ce0e84a5a9a53c4248819"
+    },
+    {
+      "path": "PoseStudio_RP/textures/entity/pose_studio/skin_1.png",
+      "size": 210,
+      "sha1": "bc20f79e1b64df5ed417e914358aeea9dda7e0b3"
+    },
+    {
+      "path": "PoseStudio_RP/textures/entity/pose_studio/skin_10.png",
+      "size": 210,
+      "sha1": "bc20f79e1b64df5ed417e914358aeea9dda7e0b3"
+    },
+    {
+      "path": "PoseStudio_RP/textures/entity/pose_studio/skin_11.png",
+      "size": 210,
+      "sha1": "bc20f79e1b64df5ed417e914358aeea9dda7e0b3"
+    },
+    {
+      "path": "PoseStudio_RP/textures/entity/pose_studio/skin_12.png",
+      "size": 210,
+      "sha1": "bc20f79e1b64df5ed417e914358aeea9dda7e0b3"
+    },
+    {
+      "path": "PoseStudio_RP/textures/entity/pose_studio/skin_13.png",
+      "size": 210,
+      "sha1": "bc20f79e1b64df5ed417e914358aeea9dda7e0b3"
+    },
+    {
+      "path": "PoseStudio_RP/textures/entity/pose_studio/skin_14.png",
+      "size": 210,
+      "sha1": "bc20f79e1b64df5ed417e914358aeea9dda7e0b3"
+    },
+    {
+      "path": "PoseStudio_RP/textures/entity/pose_studio/skin_15.png",
+      "size": 210,
+      "sha1": "bc20f79e1b64df5ed417e914358aeea9dda7e0b3"
+    },
+    {
+      "path": "PoseStudio_RP/textures/entity/pose_studio/skin_16.png",
+      "size": 210,
+      "sha1": "bc20f79e1b64df5ed417e914358aeea9dda7e0b3"
+    },
+    {
+      "path": "PoseStudio_RP/textures/entity/pose_studio/skin_2.png",
+      "size": 210,
+      "sha1": "bc20f79e1b64df5ed417e914358aeea9dda7e0b3"
+    },
+    {
+      "path": "PoseStudio_RP/textures/entity/pose_studio/skin_3.png",
+      "size": 210,
+      "sha1": "bc20f79e1b64df5ed417e914358aeea9dda7e0b3"
+    },
+    {
+      "path": "PoseStudio_RP/textures/entity/pose_studio/skin_4.png",
+      "size": 210,
+      "sha1": "bc20f79e1b64df5ed417e914358aeea9dda7e0b3"
+    },
+    {
+      "path": "PoseStudio_RP/textures/entity/pose_studio/skin_5.png",
+      "size": 210,
+      "sha1": "bc20f79e1b64df5ed417e914358aeea9dda7e0b3"
+    },
+    {
+      "path": "PoseStudio_RP/textures/entity/pose_studio/skin_6.png",
+      "size": 210,
+      "sha1": "bc20f79e1b64df5ed417e914358aeea9dda7e0b3"
+    },
+    {
+      "path": "PoseStudio_RP/textures/entity/pose_studio/skin_7.png",
+      "size": 210,
+      "sha1": "bc20f79e1b64df5ed417e914358aeea9dda7e0b3"
+    },
+    {
+      "path": "PoseStudio_RP/textures/entity/pose_studio/skin_8.png",
+      "size": 210,
+      "sha1": "bc20f79e1b64df5ed417e914358aeea9dda7e0b3"
+    },
+    {
+      "path": "PoseStudio_RP/textures/entity/pose_studio/skin_9.png",
+      "size": 210,
+      "sha1": "bc20f79e1b64df5ed417e914358aeea9dda7e0b3"
+    }
+  ]
+}

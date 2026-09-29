@@ -1,0 +1,56 @@
+{
+  "format_version": "1.8.0",
+  "render_controllers": {
+    "controller.render.pose_studio.mannequin": {
+      "arrays": {
+        "textures": {
+          "Array.skins": [
+            "Texture.default",
+            "Texture.skin1",
+            "Texture.skin2",
+            "Texture.skin3",
+            "Texture.skin4",
+            "Texture.skin5",
+            "Texture.skin6",
+            "Texture.skin7",
+            "Texture.skin8",
+            "Texture.skin9",
+            "Texture.skin10",
+            "Texture.skin11",
+            "Texture.skin12",
+            "Texture.skin13",
+            "Texture.skin14",
+            "Texture.skin15",
+            "Texture.skin16"
+          ]
+        }
+      },
+      "geometry": "Geometry.default",
+      "materials": [
+        {
+          "*": "Material.default"
+        }
+      ],
+      "textures": [
+        "q.property('pose:hidden') ? Texture.clear : Array.skins[q.property('pose:skin')]"
+      ],
+      "part_visibility": [
+        {
+          "*": true
+        },
+        {
+          "rightArmClassic": "!q.property('pose:slim')"
+        },
+        {
+          "leftArmClassic": "!q.property('pose:slim')"
+        },
+        {
+          "rightArmSlim": "q.property('pose:slim')"
+        },
+        {
+          "leftArmSlim": "q.property('pose:slim')"
+        }
+      ]
+    }
+  }
+}

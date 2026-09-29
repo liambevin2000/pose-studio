@@ -1,0 +1,50 @@
+{
+  "format_version": "1.10.0",
+  "minecraft:client_entity": {
+    "description": {
+      "identifier": "pose:mannequin",
+      "materials": {
+        "default": "entity_alphatest"
+      },
+      "textures": {
+        "default": "textures/entity/steve",
+        "skin1": "textures/entity/pose_studio/skin_1",
+        "skin2": "textures/entity/pose_studio/skin_2",
+        "skin3": "textures/entity/pose_studio/skin_3",
+        "skin4": "textures/entity/pose_studio/skin_4",
+        "skin5": "textures/entity/pose_studio/skin_5",
+        "skin6": "textures/entity/pose_studio/skin_6",
+        "skin7": "textures/entity/pose_studio/skin_7",
+        "skin8": "textures/entity/pose_studio/skin_8",
+        "skin9": "textures/entity/pose_studio/skin_9",
+        "skin10": "textures/entity/pose_studio/skin_10",
+        "skin11": "textures/entity/pose_studio/skin_11",
+        "skin12": "textures/entity/pose_studio/skin_12",
+        "skin13": "textures/entity/pose_studio/skin_13",
+        "skin14": "textures/entity/pose_studio/skin_14",
+        "skin15": "textures/entity/pose_studio/skin_15",
+        "skin16": "textures/entity/pose_studio/skin_16",
+        "clear": "textures/entity/pose_studio/clear"
+      },
+      "geometry": {
+        "default": "geometry.pose_studio.mannequin"
+      },
+      "animations": {
+        "pose": "animation.pose_studio.mannequin.pose"
+      },
+      "scripts": {
+        "animate": [
+          "pose"
+        ]
+      },
+      "render_controllers": [
+        "controller.render.pose_studio.mannequin"
+      ],
+      "spawn_egg": {
+        "base_color": "#d9c7a5",
+        "overlay_color": "#4a6fa5"
+      },
+      "enable_attachables": true
+    }
+  }
+}
