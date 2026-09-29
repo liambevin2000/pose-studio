@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.20.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.20.1'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -819,13 +819,32 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
       autoAnchor();
     };
     if (!tickTimer) tickTimer = setInterval(tick, TICK_MS);
-    Blockbench.showMessageBox({
-      title: 'Pose Studio',
-      message:
-        `Listening on 127.0.0.1:${PORT}.\n\nIn Minecraft (cheats on), open chat and run:\n` +
-        `/connect 127.0.0.1:${PORT}\n\nAn empty scene is centred on wherever you're standing in Minecraft.`,
-    });
+    const command = `/connect 127.0.0.1:${PORT}`;
+    Blockbench.showMessageBox(
+      {
+        title: 'Pose Studio',
+        message:
+          `Listening on 127.0.0.1:${PORT}.\n\nIn Minecraft (cheats on), open chat and run:\n` +
+          `${command}\n\nAn empty scene is centred on wherever you're standing in Minecraft.`,
+        buttons: ['Copy Command', 'OK'],
+        confirm: 0,
+        cancel: 1,
+      },
+      (button) => {
+        if (button === 0) copyText(command);
+      }
+    );
     return true;
+  }
+
+  function copyText(text) {
+    try {
+      if (typeof Clipbench !== 'undefined' && Clipbench.setText) Clipbench.setText(text);
+      else navigator.clipboard.writeText(text);
+      Blockbench.showQuickMessage('Copied: paste it into Minecraft chat (Ctrl+V)', 2500);
+    } catch (e) {
+      showError('Pose Studio: copying the command', e);
+    }
   }
 
   // ---- Placement ----
@@ -3850,6 +3869,13 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.20.1",
+      "date": "2026-09-30",
+      "changes": [
+        "Connect to Minecraft has a Copy Command button: paste the /connect command straight into Minecraft chat."
+      ]
+    },
     {
       "version": "0.20.0",
       "date": "2026-09-30",

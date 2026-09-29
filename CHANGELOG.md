@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.20.1 (2026-09-30)
+
+- Connect to Minecraft has a Copy Command button: paste the /connect command straight into Minecraft chat.
+
 ## 0.20.0 (2026-09-30)
 
 - Pose Studio can now be shared from GitHub: install it with File > Plugins > Load Plugin from URL and Blockbench fetches the latest version every time it starts.

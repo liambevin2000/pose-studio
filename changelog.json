@@ -1,5 +1,12 @@
 [
   {
+    "version": "0.20.1",
+    "date": "2026-09-30",
+    "changes": [
+      "Connect to Minecraft has a Copy Command button: paste the /connect command straight into Minecraft chat."
+    ]
+  },
+  {
     "version": "0.20.0",
     "date": "2026-09-30",
     "changes": [
