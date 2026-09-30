@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.30.2 (2026-09-30)
+
+- Scenes line themselves up automatically: when a linked scene connects or opens, Pose Studio compares its imported terrain with the terrain around you and moves it back if it is clearly offset. It only acts when you are standing in the scene's area and the match is unmistakable, and saves the corrected position into the scene file.
+
 ## 0.30.1 (2026-09-30)
 
 - Fixed: opening a saved scene could put it in the wrong place in Minecraft. Connecting with an empty scene moved the world anchor to where you stood before the saved scene opened. Worlds with a scene now keep their anchor.

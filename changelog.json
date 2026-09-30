@@ -1,5 +1,12 @@
 [
   {
+    "version": "0.30.2",
+    "date": "2026-09-30",
+    "changes": [
+      "Scenes line themselves up automatically: when a linked scene connects or opens, Pose Studio compares its imported terrain with the terrain around you and moves it back if it is clearly offset. It only acts when you are standing in the scene's area and the match is unmistakable, and saves the corrected position into the scene file."
+    ]
+  },
+  {
     "version": "0.30.1",
     "date": "2026-09-30",
     "changes": [

@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.30.1'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.30.2'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -5446,7 +5446,12 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
 
   // Switching to (or opening) a scene of this world puts it back in place.
   function onProjectSelected() {
-    if (link.connected && connectedWorld) setTimeout(() => restoreSceneAnchor().catch(() => {}), 300);
+    if (!link.connected || !connectedWorld) return;
+    setTimeout(async () => {
+      await restoreSceneAnchor().catch(() => {});
+      const linked = typeof Project !== 'undefined' && Project && Project.pose_world;
+      if (linked && linked.id === connectedWorld.id) await realignScene({ auto: true }).catch(() => false);
+    }, 300);
   }
 
   // Scene ▸ Save Scene: saves the scene (to Documents\Pose Studio\Scenes\<world>.bbmodel the first
@@ -5587,24 +5592,27 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
       if (!second || c.quality > second.quality) second = c;
     }
     const rate = (c) => (c ? (c.overlap - c.score) / c.overlap : 1);
-    return Object.assign(best, { errorRate: rate(best), secondErrorRate: rate(second), cells: cells.length });
+    const here = candidates.find((c) => c.dx === 0 && c.dz === 0);
+    return Object.assign(best, { errorRate: rate(best), secondErrorRate: rate(second), hereErrorRate: rate(here), hereOverlap: here ? here.overlap : 0, cells: cells.length });
   }
 
-  async function realignScene() {
-    if (!requireConnection()) return;
+  // auto: run quietly when a scene opens. It only moves the scene when it clearly doesn't line up
+  // where it is and the match elsewhere is unmistakable; otherwise it leaves everything alone.
+  async function realignScene({ auto = false } = {}) {
+    if (auto ? !link.connected : !requireConnection()) return false;
     const scene = sceneHeights();
     if (!scene || scene.size < 30) {
-      Blockbench.showMessageBox({ title: 'Pose Studio', message: 'Realigning needs imported terrain in the scene (Import World…) to compare with Minecraft.' });
-      return;
+      if (!auto) Blockbench.showMessageBox({ title: 'Pose Studio', message: 'Realigning needs imported terrain in the scene (Import World…) to compare with Minecraft.' });
+      return false;
     }
     let world;
     let items;
     try {
       world = await readWorldScene();
-      items = await runGameQuery('pose:scan', { radius: REALIGN_RADIUS, rays: 0, dist: 8 }, 'Reading the terrain around you');
+      items = await runGameQuery('pose:scan', { radius: REALIGN_RADIUS, rays: 0, dist: 8 }, auto ? 'Checking the scene lines up' : 'Reading the terrain around you');
     } catch (e) {
-      showError('Pose Studio: realign', e);
-      return;
+      if (!auto) showError('Pose Studio: realign', e);
+      return false;
     }
     const { blocks } = parseScanItems(items);
     const now = new Map();
@@ -5616,6 +5624,14 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     realignDebug = { found, scene: scene.size, now: now.size }; // for troubleshooting
     // a clear match: few mismatching columns, and clearly fewer than anywhere else
     const clear = found && found.errorRate <= 0.2 && found.secondErrorRate >= Math.max(found.errorRate * 2, found.errorRate + 0.01);
+    if (auto) {
+      // only when you're standing in the scene's area (so there's something to compare), the scene
+      // clearly doesn't fit where it is, and one spot clearly fits
+      const inArea = found && found.hereOverlap >= 60;
+      const fitsHere = found && found.hereErrorRate <= Math.max(0.1, found.errorRate * 2);
+      const sure = clear && found.overlap >= 150 && found.errorRate <= 0.1;
+      if (!inArea || fitsHere || !sure || (!found.dx && !found.dy && !found.dz)) return false;
+    }
     if (!clear) {
       Blockbench.showMessageBox({
         title: 'Pose Studio',
@@ -5632,12 +5648,26 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     }
     resync();
     const moved = Math.round(Math.hypot(found.dx, found.dy, found.dz));
-    Blockbench.showMessageBox({
-      title: 'Pose Studio',
-      message: moved
-        ? `Found where the scene was built (${moved} blocks from where it was showing) and put it back. Use Scene ▸ Save Scene to keep this.`
-        : 'The scene already lines up with the world.',
-    });
+    // keep it in the scene file straight away if the file was otherwise saved
+    let kept = false;
+    if (moved && Project && Project.save_path && Project.saved !== false && typeof Codecs !== 'undefined') {
+      try {
+        Codecs.project.write(Codecs.project.compile(), Project.save_path);
+        kept = true;
+      } catch (e) {
+        kept = false;
+      }
+    }
+    const keep = kept ? '' : ' Use Scene ▸ Save Scene to keep this.';
+    if (auto) {
+      Blockbench.showQuickMessage(`Pose Studio: moved the scene ${moved} blocks to line up with the world.${keep}`, 6000);
+    } else {
+      Blockbench.showMessageBox({
+        title: 'Pose Studio',
+        message: moved ? `Found where the scene was built (${moved} blocks from where it was showing) and put it back.${keep}` : 'The scene already lines up with the world.',
+      });
+    }
+    return !!moved;
   }
 
   // Scene ▸ Unlink Scene from World
@@ -5666,9 +5696,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
       if (projectPath() && !samePath(projectPath(), world.path)) tellWorldScene(projectPath(), worldName);
       const moved = await restoreSceneAnchor();
       Blockbench.showQuickMessage(`Scene linked to ${worldName}${moved ? ': put back where it was built' : ''}`, 3000);
-      if (!linked.anchor) {
-        Blockbench.showQuickMessage(`Scene linked to ${worldName}. If it doesn't line up in Minecraft, use Scene ▸ Realign Scene with World, then Save Scene.`, 6000);
-      }
+      await realignScene({ auto: true }).catch(() => false);
       return;
     }
     // the world has a scene: open it (or switch to its tab)
@@ -5736,6 +5764,13 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.30.2",
+      "date": "2026-09-30",
+      "changes": [
+        "Scenes line themselves up automatically: when a linked scene connects or opens, Pose Studio compares its imported terrain with the terrain around you and moves it back if it is clearly offset. It only acts when you are standing in the scene's area and the match is unmistakable, and saves the corrected position into the scene file."
+      ]
+    },
     {
       "version": "0.30.1",
       "date": "2026-09-30",
