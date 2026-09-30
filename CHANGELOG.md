@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.32.0 (2026-09-30)
+
+- The day/night and weather cycles are frozen while Blockbench is connected (doDaylightCycle and doWeatherCycle off), and turned back on when it disconnects. There is a setting to turn this off.
+- New time of day slider and clear/rain/thunder buttons in the camera view, and Camera ▸ Time & Weather… with presets.
+- Each location saves its time and weather, and puts them back when it opens or you switch to it.
+
 ## 0.31.0 (2026-09-30)
 
 - Locations: one world can hold several set-ups, each a scene of its own with its own imported terrain, entities, cameras and position in the world. The Scene menu is now Locations.

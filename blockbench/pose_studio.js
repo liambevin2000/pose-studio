@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.31.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.32.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -594,6 +594,7 @@
       povNav = null;
       if (povFov) povFov.box.remove();
       povFov = null;
+      removePovTimeBox();
       if (povPreview) {
         if (povPreview.controls) povPreview.controls.enabled = true;
         povPreview.aspect_ratio = undefined;
@@ -686,6 +687,7 @@
     }
     node.appendChild(bar);
     createPovFovSlider(node);
+    createPovTimeBox(node);
     return bar;
   }
 
@@ -1208,7 +1210,11 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
       if (playerHidden) setPlayerHidden(true);
       // match the open scene with the world first; an empty scene is only centred on the player
       // when the world has no scene of its own
-      setTimeout(() => checkWorldScene().catch(() => {}).then(() => autoAnchor()), 1000);
+      setTimeout(async () => {
+        await freezeWorldClock().catch(() => {});
+        await checkWorldScene().catch(() => {});
+        await autoAnchor();
+      }, 1000);
     };
     if (!tickTimer) tickTimer = setInterval(tick, TICK_MS);
     const command = `/connect 127.0.0.1:${PORT}`;
@@ -1337,6 +1343,7 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
     // Give the player their model and camera back before the socket goes away.
     if (playerHidden && link.connected) await link.command('scriptevent pose:hideplayer {"hide":false}').catch(logFailure);
     if (cameraSync && link.connected) await link.command('scriptevent pose:camclear').catch(logFailure);
+    await unfreezeWorldClock().catch(() => {});
     if (tickTimer) clearInterval(tickTimer);
     tickTimer = null;
     link.onConnect = null;
@@ -5352,6 +5359,250 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     if (!startLink()) setTimeout(() => linkToggle && linkToggle.set(false), 0);
   }
 
+  // ---- Time of day and weather --------------------------------------------------------------------
+  // While Blockbench is connected, the day/night and weather cycles are frozen (the previous
+  // gamerules come back on disconnect), so a shot looks the same every time. Each location keeps
+  // its own time and weather (Project.pose_env) and puts them back when it opens. Set them with the
+  // slider and buttons in the camera view, or Camera ▸ Time & Weather….
+  const WEATHERS = [
+    { id: 'clear', icon: 'wb_sunny', title: 'Clear' },
+    { id: 'rain', icon: 'water_drop', title: 'Rain' },
+    { id: 'thunder', icon: 'thunderstorm', title: 'Thunder' },
+  ];
+  let envProperty = null;
+  let frozenRules = null; // the gamerules as they were before we froze them
+  let freezeEnabled = true;
+  let pendingTime = null;
+  let timeTimer = null;
+  let povTime = null; // { box, input, label, buttons }
+  const envListeners = new Set();
+
+  // Minecraft time (0 = 6:00 in the morning, 24000 ticks a day) as a clock time.
+  function clockTime(ticks) {
+    const hours = ((Number(ticks) || 0) / 1000 + 6) % 24;
+    const h = Math.floor(hours);
+    const m = Math.floor((hours - h) * 60);
+    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+  }
+
+  const firstNumber = (body) => {
+    const m = String((body && body.statusMessage) || '').match(/-?\d+/);
+    return m ? Number(m[0]) : null;
+  };
+
+  async function readGamerule(name) {
+    const body = await link.command(`gamerule ${name}`).catch(() => null);
+    const m = String((body && body.statusMessage) || '').match(/\b(true|false)\b/i);
+    return m ? m[1].toLowerCase() === 'true' : null;
+  }
+
+  // On connect: freeze the day/night and weather cycles (remembering how they were).
+  async function freezeWorldClock() {
+    if (!freezeEnabled || !link.connected) return;
+    if (!frozenRules) {
+      frozenRules = { dodaylightcycle: await readGamerule('dodaylightcycle'), doweathercycle: await readGamerule('doweathercycle') };
+    }
+    await link.command('gamerule dodaylightcycle false').catch(logFailure);
+    await link.command('gamerule doweathercycle false').catch(logFailure);
+  }
+
+  // On disconnect (or when the setting is turned off): the cycles run again if they did before.
+  async function unfreezeWorldClock() {
+    if (!frozenRules || !link.connected) {
+      frozenRules = null;
+      return;
+    }
+    for (const [rule, value] of Object.entries(frozenRules)) {
+      if (value === true) await link.command(`gamerule ${rule} true`).catch(logFailure); // only what we know was on
+    }
+    frozenRules = null;
+  }
+
+  async function readEnvironment() {
+    if (!link.connected) return null;
+    const time = firstNumber(await link.command('time query daytime').catch(() => null));
+    const body = await link.command('weather query').catch(() => null);
+    const w = String((body && body.statusMessage) || '').toLowerCase();
+    const weather = /thunder/.test(w) ? 'thunder' : /rain/.test(w) ? 'rain' : /clear/.test(w) ? 'clear' : null;
+    return { time: time === null ? null : ((time % 24000) + 24000) % 24000, weather };
+  }
+
+  function projectEnv() {
+    return (typeof Project !== 'undefined' && Project && Project.pose_env) || null;
+  }
+  function setProjectEnv(change) {
+    if (typeof Project === 'undefined' || !Project) return;
+    Project.pose_env = Object.assign({}, Project.pose_env || {}, change);
+    if (Project.saved !== undefined) Project.saved = false;
+    for (const fn of envListeners) fn(Project.pose_env);
+  }
+
+  // Sends the time (throttled while a slider is dragged).
+  function setTimeOfDay(ticks) {
+    const t = Math.round(((Number(ticks) % 24000) + 24000) % 24000);
+    setProjectEnv({ time: t });
+    pendingTime = t;
+    if (timeTimer) return;
+    const flush = () => {
+      timeTimer = null;
+      if (pendingTime === null || !link.connected) return;
+      send(`time set ${pendingTime}`);
+      pendingTime = null;
+      timeTimer = setTimeout(() => {
+        timeTimer = null;
+        if (pendingTime !== null) flush();
+      }, 120);
+    };
+    flush();
+  }
+
+  function setWeather(weather) {
+    if (!WEATHERS.some((w) => w.id === weather)) return;
+    setProjectEnv({ weather });
+    if (link.connected) send(`weather ${weather}`);
+  }
+
+  // Puts the open location's time and weather into the world.
+  function applySceneEnvironment() {
+    const env = projectEnv();
+    if (!env || !link.connected) return;
+    if (Number.isFinite(env.time)) send(`time set ${env.time}`);
+    if (env.weather) send(`weather ${env.weather}`);
+    for (const fn of envListeners) fn(env);
+  }
+
+  // Remembers the world's current time and weather in the open scene (on Save Location).
+  async function captureSceneEnvironment() {
+    const env = await readEnvironment().catch(() => null);
+    if (!env || typeof Project === 'undefined' || !Project) return;
+    const keep = {};
+    if (env.time !== null) keep.time = env.time;
+    if (env.weather) keep.weather = env.weather;
+    Project.pose_env = Object.assign({}, Project.pose_env || {}, keep);
+  }
+
+  // Time slider and weather buttons, bottom right of the camera view.
+  function createPovTimeBox(node) {
+    const box = document.createElement('div');
+    box.className = 'pose_studio_pov_time';
+    Object.assign(box.style, {
+      position: 'absolute', bottom: '8px', right: '8px', zIndex: 6, display: 'flex', alignItems: 'center', gap: '6px',
+      padding: '3px 8px', borderRadius: '6px', background: 'rgba(0, 0, 0, 0.55)', color: '#fff', font: '600 12px sans-serif',
+    });
+    const icon = document.createElement('i');
+    icon.className = 'material-icons';
+    icon.textContent = 'schedule';
+    icon.style.fontSize = '16px';
+    const label = document.createElement('span');
+    label.style.minWidth = '38px';
+    const input = document.createElement('input');
+    input.type = 'range';
+    input.min = '0';
+    input.max = '23999';
+    input.step = '50';
+    input.title = 'Time of day in Minecraft';
+    input.style.width = '140px';
+    input.addEventListener('pointerdown', (e) => e.stopPropagation());
+    input.addEventListener('input', () => {
+      label.textContent = clockTime(input.value);
+      setTimeOfDay(Number(input.value));
+    });
+    box.appendChild(icon);
+    box.appendChild(label);
+    box.appendChild(input);
+    const buttons = {};
+    for (const w of WEATHERS) {
+      const b = document.createElement('div');
+      b.title = w.title;
+      Object.assign(b.style, { width: '22px', height: '22px', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: '4px', cursor: 'pointer' });
+      b.innerHTML = `<i class="material-icons" style="font-size: 16px; pointer-events: none;">${w.icon}</i>`;
+      b.addEventListener('pointerdown', (e) => e.stopPropagation());
+      b.addEventListener('click', () => setWeather(w.id));
+      box.appendChild(b);
+      buttons[w.id] = b;
+    }
+    node.appendChild(box);
+    povTime = { box, input, label, buttons };
+    envListeners.add(syncPovTimeBox);
+    syncPovTimeBox(projectEnv());
+    return box;
+  }
+
+  function syncPovTimeBox(env) {
+    if (!povTime) return;
+    env = env || projectEnv() || {};
+    if (Number.isFinite(env.time) && String(povTime.input.value) !== String(env.time) && pendingTime === null) povTime.input.value = String(env.time);
+    povTime.label.textContent = Number.isFinite(env.time) ? clockTime(env.time) : '--:--';
+    for (const [id, b] of Object.entries(povTime.buttons)) b.style.background = env.weather === id ? 'rgba(255, 255, 255, 0.3)' : '';
+  }
+
+  function removePovTimeBox() {
+    if (povTime) povTime.box.remove();
+    envListeners.delete(syncPovTimeBox);
+    povTime = null;
+  }
+
+  // Camera ▸ Time & Weather…
+  async function timeWeatherDialog() {
+    if (!requireConnection()) return;
+    const now = (await readEnvironment().catch(() => null)) || {};
+    const env = Object.assign({ time: 6000, weather: 'clear' }, now, projectEnv() || {});
+    let vm = null;
+    const listener = (e) => {
+      if (vm && e) {
+        if (Number.isFinite(e.time)) vm.time = e.time;
+        if (e.weather) vm.weather = e.weather;
+      }
+    };
+    envListeners.add(listener);
+    new Dialog({
+      id: 'pose_studio_time_weather',
+      title: 'Time & Weather',
+      width: 440,
+      buttons: ['Done'],
+      component: {
+        data: () => ({ time: env.time, weather: env.weather, weathers: WEATHERS, presets: [['Sunrise', 23000], ['Morning', 1000], ['Noon', 6000], ['Sunset', 12000], ['Night', 18000]] }),
+        mounted() {
+          vm = this;
+        },
+        methods: {
+          clock: clockTime,
+          slide(v) {
+            this.time = Number(v);
+            setTimeOfDay(this.time);
+          },
+          pick(id) {
+            this.weather = id;
+            setWeather(id);
+          },
+        },
+        template: `
+          <div>
+            <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 8px;">
+              <b style="min-width: 48px;">{{ clock(time) }}</b>
+              <input type="range" min="0" max="23999" step="50" :value="time" @input="slide($event.target.value)" style="flex: 1;">
+            </div>
+            <div style="display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px;">
+              <button v-for="p in presets" :key="p[0]" @click="slide(p[1])" style="min-width: 0; padding: 0 10px;">{{ p[0] }}</button>
+            </div>
+            <div style="display: flex; gap: 6px;">
+              <button v-for="w in weathers" :key="w.id" @click="pick(w.id)"
+                      :style="{ minWidth: 0, padding: '0 12px', display: 'flex', alignItems: 'center', gap: '4px', background: weather === w.id ? 'var(--color-selected)' : '' }">
+                <i class="material-icons" style="font-size: 16px;">{{ w.icon }}</i>{{ w.title }}
+              </button>
+            </div>
+            <p style="opacity: 0.65; margin-top: 10px;">The day/night and weather cycles are frozen while Blockbench is connected. Save Location keeps the time and weather with the location.</p>
+          </div>`,
+      },
+      onButton() {
+        envListeners.delete(listener);
+      },
+      onCancel() {
+        envListeners.delete(listener);
+      },
+    }).show();
+  }
+
   // ---- Locations: scenes linked to worlds ---------------------------------------------------------
   // A world can hold several set-ups ("locations"), each a scene file of its own with its own
   // imported terrain, entities, cameras and anchor (where in the world it sits). The scene
@@ -5475,7 +5726,11 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     setTimeout(async () => {
       await restoreSceneAnchor().catch(() => {});
       const linked = projectLink();
-      if (linked && linked.id === connectedWorld.id) await realignScene({ auto: true }).catch(() => false);
+      if (linked && linked.id === connectedWorld.id) {
+        applySceneEnvironment();
+        await realignScene({ auto: true }).catch(() => false);
+      }
+      for (const fn of envListeners) fn(projectEnv());
     }, 300);
   }
 
@@ -5507,6 +5762,8 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
         anchor: world.anchor || (old && old.anchor) || null,
       };
     }
+    // the world's time and weather go with the location
+    if (link.connected && world && (!old || old.id === world.id)) await captureSceneEnvironment();
     const l = projectLink();
     let path = projectPath();
     if (!path) {
@@ -5835,6 +6092,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
       const mine = locations.find((l) => l.loc === (linked.loc || 'main'));
       if (projectPath() && (!mine || !samePath(projectPath(), mine.path))) tellWorldLocation();
       const moved = await restoreSceneAnchor();
+      applySceneEnvironment();
       const where = linked.loc && linked.loc !== 'main' ? `${linked.locName} (${worldName})` : worldName;
       Blockbench.showQuickMessage(`Location: ${where}${moved ? ', put back in place' : ''}`, 3000);
       await realignScene({ auto: true }).catch(() => false);
@@ -5908,6 +6166,15 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.32.0",
+      "date": "2026-09-30",
+      "changes": [
+        "The day/night and weather cycles are frozen while Blockbench is connected (doDaylightCycle and doWeatherCycle off), and turned back on when it disconnects. There is a setting to turn this off.",
+        "New time of day slider and clear/rain/thunder buttons in the camera view, and Camera ▸ Time & Weather… with presets.",
+        "Each location saves its time and weather, and puts them back when it opens or you switch to it."
+      ]
+    },
     {
       "version": "0.31.0",
       "date": "2026-09-30",
@@ -6275,7 +6542,10 @@ ${PLUGIN_URL}`,
 
     onload() {
       fovProperty = new Property(Group, 'number', 'pose_fov', { default: 0 });
-      if (typeof ModelProject !== 'undefined') worldProperty = new Property(ModelProject, 'object', 'pose_world', { default: null, exposed: false });
+      if (typeof ModelProject !== 'undefined') {
+        worldProperty = new Property(ModelProject, 'object', 'pose_world', { default: null, exposed: false });
+        envProperty = new Property(ModelProject, 'object', 'pose_env', { default: null, exposed: false });
+      }
       skinProperties = [
         new Property(Group, 'object', 'pose_entity'),
         new Property(Group, 'object', 'pose_equipment'),
@@ -6347,6 +6617,10 @@ ${PLUGIN_URL}`,
           description: 'Saves your current in-game view as a cam_ group.',
         }),
         savecam: new Action('pose_studio_savecam', { name: 'From Blockbench View', icon: 'switch_video', click: saveViewportAsCamera }),
+        timeweather: new Action('pose_studio_time_weather', {
+          name: 'Time & Weather…', icon: 'schedule', click: timeWeatherDialog,
+          description: 'Time of day and weather in Minecraft, kept with each location.',
+        }),
         fov: new Action('pose_studio_fov', {
           name: 'Camera FOV…', icon: 'camera', click: fovDialog,
           description: 'Field of view of the active camera (or the viewport).',
@@ -6386,6 +6660,15 @@ ${PLUGIN_URL}`,
             entityHeldItems = value;
           },
         }),
+        setting('pose_studio_freeze_clock', {
+          name: 'Pose Studio: Freeze Time and Weather', type: 'toggle', value: true,
+          description: 'Turns off the day/night and weather cycles (doDaylightCycle, doWeatherCycle) while Blockbench is connected, and turns them back on when it disconnects.',
+          onChange: (value) => {
+            freezeEnabled = value;
+            if (value) freezeWorldClock().catch(() => {});
+            else unfreezeWorldClock().catch(() => {});
+          },
+        }),
         setting('pose_studio_check_updates', {
           name: 'Pose Studio: Check for Updates', type: 'click', icon: 'update', click: () => checkForUpdates(true),
           description: 'Updates this plugin and installs or updates the Pose Studio Minecraft packs.',
@@ -6396,6 +6679,7 @@ ${PLUGIN_URL}`,
         }),
       ];
       entityHeldItems = !!pluginSettings[0].value;
+      freezeEnabled = pluginSettings[1].value !== false;
       // The plugin page's Changelog tab shows this; Blockbench otherwise looks for it in its plugin store.
       const self = typeof Plugins !== 'undefined' && Plugins.registered && Plugins.registered.pose_studio;
       if (self) {
@@ -6416,7 +6700,7 @@ ${PLUGIN_URL}`,
         { name: 'Add Camera', id: 'pose_studio_add_camera', icon: 'videocam', children: [a.grabcam, a.savecam] },
         {
           name: 'Camera', id: 'pose_studio_camera_menu', icon: 'photo_camera_front',
-          children: [a.pov, a.camera, '_', a.fov, { name: 'Aspect Ratio', id: 'pose_studio_aspect', icon: 'aspect_ratio', children: aspectMenuItems }, '_', a.lookcam, a.follow],
+          children: [a.pov, a.camera, '_', a.fov, { name: 'Aspect Ratio', id: 'pose_studio_aspect', icon: 'aspect_ratio', children: aspectMenuItems }, a.timeweather, '_', a.lookcam, a.follow],
         },
         '_',
         a.scan,
@@ -6463,6 +6747,8 @@ ${PLUGIN_URL}`,
       browserVm = null;
       if (worldProperty) worldProperty.delete();
       worldProperty = null;
+      if (envProperty) envProperty.delete();
+      envProperty = null;
       if (fovProperty) fovProperty.delete();
       fovProperty = null;
     },
