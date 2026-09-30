@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.22.0 (2026-09-30)
+
+- Add Camera now opens the camera view on the new camera and makes the Minecraft camera follow it.
+- From Minecraft View while the game camera is synced first gives you your own view back to frame the next shot; choose it again to save.
+- Tidier menu: the camera options are grouped under Camera (view, sync, FOV, aspect ratio, look through, follow viewport).
+- The changelog is now in File > Plugins > Pose Studio > Changelog. Check for Updates, Debug Info and Held Items on Entities moved to that page's Settings tab.
+
 ## 0.21.0 (2026-09-30)
 
 - Simpler menu: with no mannequin selected it shows Add Mannequin; select a mannequin and the same spot becomes Skin & Equipment…, one window with a Skin tab and an Equipment tab.

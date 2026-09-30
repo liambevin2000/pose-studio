@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.22.0",
+    "date": "2026-09-30",
+    "changes": [
+      "Add Camera now opens the camera view on the new camera and makes the Minecraft camera follow it.",
+      "From Minecraft View while the game camera is synced first gives you your own view back to frame the next shot; choose it again to save.",
+      "Tidier menu: the camera options are grouped under Camera (view, sync, FOV, aspect ratio, look through, follow viewport).",
+      "The changelog is now in File > Plugins > Pose Studio > Changelog. Check for Updates, Debug Info and Held Items on Entities moved to that page's Settings tab."
+    ]
+  },
+  {
     "version": "0.21.0",
     "date": "2026-09-30",
     "changes": [

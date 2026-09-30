@@ -14,7 +14,7 @@ Blockbench plugin ──websocket──► Minecraft (/connect) ──/scripteve
 1. **Load the plugin from its link:** Blockbench desktop → File → Plugins → **Load Plugin from URL** → paste
    `https://raw.githubusercontent.com/liambevin2000/pose-studio/main/blockbench/pose_studio.js`.
    Blockbench downloads it again every time it starts, so updates arrive by themselves.
-2. **Install the Minecraft packs:** Pose Studio → More → **Check for Updates** → **Update**. This copies the packs into
+2. **Install the Minecraft packs:** File → Plugins → Pose Studio → **Settings** → **Pose Studio: Check for Updates** → **Update**. This copies the packs into
    Minecraft's development pack folders (or double-click `dist/PoseStudio.mcaddon` instead).
 3. **Create a test world:** Cheats ON, then add *Pose Studio* under Behavior Packs and Resource Packs.
 4. **Enable Vibrant Visuals:** Settings → Video → Graphics Mode → Vibrant Visuals.
@@ -22,11 +22,11 @@ Blockbench plugin ──websocket──► Minecraft (/connect) ──/scripteve
 
 ## Updates and changelog
 
-- **Getting updates:** restart Blockbench (or File → Plugins → Pose Studio → Reload), or use Pose Studio → More →
-  **Check for Updates**, which also updates the Minecraft packs when they've changed. Blockbench also checks by itself
+- **Getting updates:** restart Blockbench (or File → Plugins → Pose Studio → Reload), or use File → Plugins → Pose Studio →
+  Settings → **Pose Studio: Check for Updates**, which also updates the Minecraft packs when they've changed. Blockbench also checks by itself
   a few seconds after it starts and asks when something is out of date.
-- **What changed:** after an update, a "Pose Studio updated" window lists what's new since the version you last used.
-  More → **What's New** shows the whole changelog, which is also in [CHANGELOG.md](CHANGELOG.md).
+- **What changed:** File → Plugins → Pose Studio → **Changelog** tab (also in [CHANGELOG.md](CHANGELOG.md)). After an update,
+  a short notice says which version you now have.
 - Your skin library is kept when packs update.
 
 ### Publishing a new version (maintainer)
@@ -49,15 +49,16 @@ Everything is in the **Pose Studio** menu, next to Tools:
 | **Add Entity…** | Opens a floating panel you can move, resize or dock, which stays open while you work: every entity in the world you're in, with thumbnails: Minecraft's own (read from your install) plus the world's resource packs, with pack models and textures replacing vanilla ones where a pack provides them. Search or filter by source, pick a world, or **Rescan** after editing a pack. Clicking an entity adds its real model as an `ent_…` group where the viewport is looking, facing the camera: move or turn the group to place it, and rotate its bones to pose it. In Minecraft it appears as a posable copy: one generated entity (`pose:proxy`) that can show any model in the world. Opening Add Entity… prepares it for the world's entities; reload Minecraft's packs once when asked (only again when the world's packs change), and after that every import is instant. Up to 19 bones per entity can be posed in game, and the whole group can be turned and tilted on all three axes. Store-bought Marketplace packs are encrypted and can't be read. |
 | **Skin tab** (also **More ▸ Skin Library…**) | 16 skin slots shared by all projects. **Import Folder…** fills the empty slots with every 64×64 PNG in a folder (in name order; duplicates, other sizes and anything past 16 skins are skipped and listed). Or click an empty slot to add a single 64×64 skin PNG (slim or classic arms are detected; click the arm label to switch). With a mannequin selected, click a skin to dress it: instant in Blockbench and Minecraft, and several mannequins can wear the same skin. New or replaced skins show **needs reload** until Minecraft loads them: press **Reload Minecraft Packs** once (it runs `/reload all`, which briefly closes and reopens the world). **Take skin off** returns the mannequin to Steve. |
 | **Equipment tab** / **Equipment…** | With an entity selected, **Equipment…** appears under Add Entity.  Armour (leather, chainmail, iron, gold, diamond, netherite, copper, turtle helmet) and held items for the selected mannequin or entity (entities need hand bones and humanoid body bones, like zombies, skeletons and piglins; the dialog warns otherwise): pick from the icon grid or type any item id, including items from your packs. Minecraft puts the real items in the mannequin's slots, so they render and follow the pose like on a mob. Blockbench shows a preview: the real armour models, and a flat icon card for held items. |
-| **More ▸ Held Items on Entities** | Shows held items on entity copies in Minecraft. Each copy can't draw what it holds, so an invisible mannequin is placed with its hand on the copy's hand and holds the item (in its main hand, since Bedrock's off hand refuses most items). On by default; turn it off if Minecraft disconnects (the choice is remembered). |
-| **Add Camera ▸** | **From Minecraft View** saves your in-game view as a `cam_N` group. **From Blockbench View** saves the viewport as one. |
-| **Camera FOV…** | Slider for the active camera's field of view (or the viewport's, if there's no camera). |
-| **Camera POV Viewport** | Splits the view top and bottom. The top is for working; the bottom is labelled **CAMERA VIEW** and locked to the active camera. While it's on, your player is invisible in game so it doesn't end up in shots (held items and armour still show). |
-| **Camera Aspect Ratio ▸** | **Fill View**: the camera view fills its half. **Match Minecraft Window**: it takes the Minecraft window's shape, updating within a second when you resize it. **16:9, 21:9, 3:2, 4:3, 1:1, 4:5, 9:16**: resizes the Minecraft window to that shape (as large as fits its monitor, centred) and frames the camera view to match. Minecraft must not be in fullscreen (F11) for resizing to work. |
-| **Sync Game Camera** | The Minecraft camera follows the active camera (or the viewport, if there's none). |
+| **Held Items on Entities** (plugin page → Settings) | Shows held items on entity copies in Minecraft. Each copy can't draw what it holds, so an invisible mannequin is placed with its hand on the copy's hand and holds the item (in its main hand, since Bedrock's off hand refuses most items). On by default; turn it off if Minecraft disconnects (the choice is remembered). |
+| **Add Camera ▸** | **From Minecraft View** saves your in-game view as a `cam_N` group. **From Blockbench View** saves the viewport as one. Either way the new camera becomes the active one: the camera view opens on it and the Minecraft camera follows it. |
+| **Camera ▸ Camera FOV…** | Slider for the active camera's field of view (or the viewport's, if there's no camera). |
+| **Camera ▸ Camera POV Viewport** | Splits the view top and bottom. The top is for working; the bottom is labelled **CAMERA VIEW** and locked to the active camera. While it's on, your player is invisible in game so it doesn't end up in shots (held items and armour still show). |
+| **Camera ▸ Aspect Ratio ▸** | **Fill View**: the camera view fills its half. **Match Minecraft Window**: it takes the Minecraft window's shape, updating within a second when you resize it. **16:9, 21:9, 3:2, 4:3, 1:1, 4:5, 9:16**: resizes the Minecraft window to that shape (as large as fits its monitor, centred) and frames the camera view to match. Minecraft must not be in fullscreen (F11) for resizing to work. |
+| **Camera ▸ Sync Game Camera** | The Minecraft camera follows the active camera (or the viewport, if there's none). |
+| **Camera ▸ Look Through Camera / Follow Viewport** | Moves the working view to the active camera / makes the game camera follow the viewport instead of a camera. |
 | **Scan World…** | Brings the terrain around you into Blockbench as a `world_scan` mesh. |
 | **Capture Screenshot** | Hides the HUD and saves the Minecraft window to `Pictures/Pose Studio`. |
-| **More ▸** | Recenter Scene on Me, Look Through Camera, Follow Viewport (No Active Camera), Skin Library… (manage skins with nothing selected), Remove Mannequins from World, Check for Updates, What's New, Debug Info. |
+| **More ▸** | Recenter Scene on Me, Skin Library… (manage skins with nothing selected), Reload Minecraft Packs, Remove Mannequins from World. Check for Updates, Debug Info and Held Items on Entities are on the plugin page (File → Plugins → Pose Studio → Settings). |
 
 The **active camera** is the last `cam_N` group you selected. It stays active while you select and pose other things, until you pick another camera or choose **More ▸ Follow Viewport**.
 
@@ -66,7 +67,7 @@ The **active camera** is the last `cam_N` group you selected. It stays active wh
 1. Create a **Generic Model** project in Blockbench, turn on **Connect to Minecraft**, and run `/connect 127.0.0.1:19131` in Minecraft.
 2. Walk to a spot you like. With an empty scene, connecting, scanning or grabbing a camera centres the scene on where you're standing, so there's no anchor to set. (**More ▸ Recenter Scene on Me** does it manually.)
 3. **Scan World…** traces the ground from above in a circle around you (so there are no gaps, including under trees and down cliff sides), then casts rays from your eyes to pick up trunks, walls and overhangs. The result is one `world_scan` mesh, with neighbouring faces merged so the viewport stays smooth. It can't be clicked in the viewport; select or delete it from the outliner. Scanning again replaces it, and Undo removes it.
-4. Look at the shot you want and choose **Add Camera ▸ From Minecraft View**. Grab cameras with **Sync Game Camera** off, because the grab reads your player's own view.
+4. Look at the shot you want and choose **Add Camera ▸ From Minecraft View**. The camera view opens on it and the game camera follows it. For another shot choose **From Minecraft View** again: the first click gives you your own view back to frame it, the second saves it.
 5. Turn on **Camera POV Viewport** and **Sync Game Camera**. Add and pose mannequins in one half while the other half (and Minecraft) shows the camera's view. Move or rotate the `cam_N` group, or use **Camera FOV…**, to adjust the shot.
 6. **Capture Screenshot**.
 

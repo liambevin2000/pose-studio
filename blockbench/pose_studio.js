@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.21.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.22.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -1113,6 +1113,17 @@ Write-Output $Out
   // ---- Camera actions ------------------------------------------------------------------------
   async function grabCameraFromPlayer() {
     if (!requireConnection()) return;
+    // The grab reads the player's own view, which the synced game camera hides: give the view
+    // back first so the next shot can be framed.
+    if (cameraSync) {
+      if (cameraToggle) cameraToggle.set(false);
+      else setCameraSync(false);
+      Blockbench.showMessageBox({
+        title: 'Pose Studio',
+        message: 'The game camera is back to your own view. Frame the next shot in Minecraft, then choose Add Camera ▸ From Minecraft View again.',
+      });
+      return;
+    }
     try {
       await autoAnchor();
       const items = await runGameQuery('pose:grabcam', {}, 'Grabbing camera');
@@ -1126,10 +1137,20 @@ Write-Output $Out
       const dir = new THREE.Vector3(-worldDir[0], worldDir[1], -worldDir[2]);
       const cam = createCamera(toModel([x, y, z]), dir);
       lookThroughCamera(cam);
-      Blockbench.showQuickMessage(`Pose Studio: saved ${cam.name}`, 2000);
+      useNewCamera(cam);
     } catch (e) {
       showError('Pose Studio: grab camera failed', e);
     }
+  }
+
+  // A new camera becomes the active one: the camera view opens on it and Minecraft's camera
+  // follows it.
+  function useNewCamera(cam) {
+    activeCam = cam;
+    if (povToggle && !povToggle.value) povToggle.set(true);
+    if (cameraToggle && !cameraToggle.value) cameraToggle.set(true);
+    lastCamera = null; // send it to the game on the next tick
+    Blockbench.showQuickMessage(`Pose Studio: saved ${cam.name}: camera view and game camera now follow it`, 2500);
   }
 
   function saveViewportAsCamera() {
@@ -1143,7 +1164,7 @@ Write-Output $Out
       space.worldToLocal(target);
     }
     const cam = createCamera(pos.toArray().map((v) => round(v, 2)), target.sub(pos));
-    Blockbench.showQuickMessage(`Pose Studio: saved ${cam.name}`, 2000);
+    useNewCamera(cam);
   }
 
   // Moves the Blockbench viewport so it looks through the camera.
@@ -3896,7 +3917,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   let linkToggle = null;
   let cameraToggle = null;
   let povToggle = null;
-  let heldToggle = null;
+  let pluginSettings = [];
   let fovProperty = null;
   let skinProperties = [];
   let pickTimer = null;
@@ -3913,6 +3934,16 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.22.0",
+      "date": "2026-09-30",
+      "changes": [
+        "Add Camera now opens the camera view on the new camera and makes the Minecraft camera follow it.",
+        "From Minecraft View while the game camera is synced first gives you your own view back to frame the next shot; choose it again to save.",
+        "Tidier menu: the camera options are grouped under Camera (view, sync, FOV, aspect ratio, look through, follow viewport).",
+        "The changelog is now in File > Plugins > Pose Studio > Changelog. Check for Updates, Debug Info and Held Items on Entities moved to that page's Settings tab."
+      ]
+    },
     {
       "version": "0.21.0",
       "date": "2026-09-30",
@@ -4027,7 +4058,16 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     }).show();
   }
 
-  // After an update, lists what changed since the version this person last used.
+  // CHANGELOG in the shape of the plugin page's Changelog tab (newest first).
+  function pluginPageChangelog() {
+    const out = {};
+    for (const e of CHANGELOG) {
+      out[e.version] = { title: e.version, date: e.date || undefined, categories: [{ title: 'Changes', list: e.changes || [] }] };
+    }
+    return out;
+  }
+
+  // After an update, says so once and points to the Changelog tab.
   function showWhatsNewOnce() {
     let seen = null;
     try {
@@ -4037,8 +4077,8 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
       return;
     }
     if (!seen || compareVersions(PLUGIN_VERSION, seen) <= 0) return;
-    const entries = CHANGELOG.filter((e) => compareVersions(e.version, seen) > 0);
-    if (entries.length) showChangelog(`Pose Studio updated to ${PLUGIN_VERSION}`, entries);
+    // just a note: the full list is on the plugin page
+    Blockbench.showQuickMessage(`Pose Studio updated to ${PLUGIN_VERSION}. See what changed in File > Plugins > Pose Studio > Changelog`, 6000);
   }
 
   function installedPacks() {
@@ -4212,26 +4252,35 @@ ${PLUGIN_URL}`,
           name: 'Reload Minecraft Packs', icon: 'refresh', click: reloadMinecraftPacks,
           description: 'Runs /reload all so Minecraft loads new skin images (the world briefly closes and reopens).',
         }),
-        held: (heldToggle = new Toggle('pose_studio_entity_held_items', {
-          name: 'Held Items on Entities', icon: 'back_hand', value: entityHeldItems,
+      };
+      actions = Object.values(a);
+
+      // Rarely needed options live on the plugin's page (File > Plugins > Pose Studio > Settings).
+      const setting = (id, options) => new Setting(id, Object.assign({ category: 'general', plugin: 'pose_studio' }, options));
+      pluginSettings = [
+        setting('pose_studio_entity_held_items', {
+          name: 'Pose Studio: Held Items on Entities', type: 'toggle', value: entityHeldItems,
           description: 'Shows held items on entity copies in Minecraft using invisible mannequins. Turn off if Minecraft disconnects.',
           onChange: (value) => {
             entityHeldItems = value;
-            try {
-              localStorage.setItem('pose_studio_entity_held_items', value ? 'on' : 'off');
-            } catch (e) {
-              // storage unavailable
-            }
           },
-        })),
-        debug: new Action('pose_studio_debug', { name: 'Debug Info', icon: 'bug_report', click: showDebug }),
-        updates: new Action('pose_studio_updates', {
-          name: 'Check for Updates', icon: 'update', click: () => checkForUpdates(true),
+        }),
+        setting('pose_studio_check_updates', {
+          name: 'Pose Studio: Check for Updates', type: 'click', icon: 'update', click: () => checkForUpdates(true),
           description: 'Updates this plugin and installs or updates the Pose Studio Minecraft packs.',
         }),
-        changelog: new Action('pose_studio_changelog', { name: "What's New", icon: 'new_releases', click: () => showChangelog('Pose Studio changelog', CHANGELOG) }),
-      };
-      actions = Object.values(a);
+        setting('pose_studio_debug_info', {
+          name: 'Pose Studio: Debug Info', type: 'click', icon: 'bug_report', click: showDebug,
+          description: 'What Blockbench is sending to Minecraft, for troubleshooting.',
+        }),
+      ];
+      entityHeldItems = !!pluginSettings[0].value;
+      // The plugin page's Changelog tab shows this; Blockbench otherwise looks for it in its plugin store.
+      const self = typeof Plugins !== 'undefined' && Plugins.registered && Plugins.registered.pose_studio;
+      if (self) {
+        self.has_changelog = true;
+        self.changelog = pluginPageChangelog();
+      }
 
       menu = new BarMenu('pose_studio', [
         a.link,
@@ -4241,16 +4290,15 @@ ${PLUGIN_URL}`,
         a.entity,
         a.equipment,
         { name: 'Add Camera', id: 'pose_studio_add_camera', icon: 'videocam', children: [a.grabcam, a.savecam] },
-        a.fov,
-        '_',
-        a.pov,
-        { name: 'Camera Aspect Ratio', id: 'pose_studio_aspect', icon: 'aspect_ratio', children: aspectMenuItems },
-        a.camera,
+        {
+          name: 'Camera', id: 'pose_studio_camera_menu', icon: 'photo_camera_front',
+          children: [a.pov, a.camera, '_', a.fov, { name: 'Aspect Ratio', id: 'pose_studio_aspect', icon: 'aspect_ratio', children: aspectMenuItems }, '_', a.lookcam, a.follow],
+        },
         '_',
         a.scan,
         a.capture,
         '_',
-        { name: 'More', id: 'pose_studio_more', icon: 'more_horiz', children: [a.anchor, a.lookcam, a.follow, '_', a.skin, a.held, a.reloadpacks, a.clear, '_', a.updates, a.changelog, a.debug] },
+        { name: 'More', id: 'pose_studio_more', icon: 'more_horiz', children: [a.anchor, a.skin, a.reloadpacks, a.clear] },
       ], { name: 'Pose Studio' });
       MenuBar.addMenu(menu, 'tools');
       startupTimer = setTimeout(() => {
@@ -4274,7 +4322,9 @@ ${PLUGIN_URL}`,
       pickTimer = null;
       for (const action of actions) action.delete();
       actions = [];
-      linkToggle = cameraToggle = povToggle = heldToggle = null;
+      linkToggle = cameraToggle = povToggle = null;
+      for (const s of pluginSettings) s.delete();
+      pluginSettings = [];
       if (menu) {
         delete MenuBar.menus.pose_studio;
         MenuBar.update();
