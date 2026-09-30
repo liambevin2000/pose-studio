@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.27.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.27.1'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -3586,9 +3586,26 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
       return;
     }
     const groups = [...target.groups.values()];
-    // the pose it has now: animations add to this
+    const byId = new Map(animations.map((a) => [a.id, a]));
+    // the pose it has now (restored on Cancel)
     const current = new Map([...target.groups].map(([k, g]) => [k, g.rotation.slice()]));
-    Undo.initEdit({ groups });
+    // Animations applied earlier are remembered on the model (pose_animation). The pose they were
+    // added to is worked out again from the current pose, so any bones turned by hand since then
+    // keep that change.
+    const saved = root.pose_animation && Array.isArray(root.pose_animation.layers) ? root.pose_animation : null;
+    const savedLayers = saved ? saved.layers.filter((l) => byId.has(l.id)) : [];
+    let base = current;
+    if (savedLayers.length) {
+      const savedBase = new Map(Object.entries(saved.base || {}).map(([k, r]) => [k, r.slice()]));
+      for (const [k, r] of current) if (!savedBase.has(k)) savedBase.set(k, r.slice());
+      const applied = composePose(target, content, savedBase, savedLayers.map((l) => ({ anim: byId.get(l.id), frame: l.frame })));
+      base = new Map([...current].map(([k, r]) => {
+        const a = applied.get(k) || savedBase.get(k);
+        const b = savedBase.get(k);
+        return [k, r.map((v, i) => v - (a[i] - b[i]))];
+      }));
+    }
+    Undo.initEdit({ groups: [root].concat(groups) });
     let timer = null;
     const stop = () => {
       if (timer) clearInterval(timer);
@@ -3597,13 +3614,13 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     let preview = null;
     let vm = null;
     let uid = 0;
-    const byId = new Map(animations.map((a) => [a.id, a]));
+    const baseNow = () => (vm && vm.fromRest ? target.rest : base);
     const update = () => {
       if (!vm) return;
-      const base = vm.fromRest ? target.rest : current;
       const layers = vm.layers.map((l) => ({ anim: byId.get(l.id), frame: l.frame }));
-      applyPose(target, composePose(target, content, base, layers));
+      applyPose(target, composePose(target, content, baseNow(), layers));
     };
+    const frameCount = (a) => Math.max(1, Math.round(a.length * ANIM_FPS));
     const dialog = new Dialog({
       id: 'pose_studio_animation_frames',
       title: `Animation: ${root.name}`,
@@ -3612,10 +3629,10 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
       cancelIndex: 1,
       component: {
         data: () => ({
-          animations: animations.map((a) => ({ name: a.name, id: a.id, frames: Math.max(1, Math.round(a.length * ANIM_FPS)), keyframed: a.keyframed })),
+          animations: animations.map((a) => ({ name: a.name, id: a.id, frames: frameCount(a), keyframed: a.keyframed })),
           search: '',
-          layers: [],
-          active: 0,
+          layers: savedLayers.map((l) => ({ uid: ++uid, id: l.id, name: byId.get(l.id).name, frames: frameCount(byId.get(l.id)), frame: Math.min(l.frame, frameCount(byId.get(l.id))) })),
+          active: uid,
           playing: false,
           fromRest: false,
           hasPreview: false,
@@ -3641,11 +3658,11 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
           inStack(a) {
             return this.layers.some((l) => l.id === a.id);
           },
-          // clicking an animation adds it to the stack (or selects it if it's already there)
+          // clicking an animation adds it to the stack, clicking it again takes it off
           pick(a) {
             const found = this.layers.find((l) => l.id === a.id);
             if (found) {
-              this.active = found.uid;
+              this.remove(found);
               return;
             }
             const layer = { uid: ++uid, id: a.id, name: a.name, frames: a.frames, frame: 0 };
@@ -3690,7 +3707,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
             <div style="flex: 1; min-width: 0; display: flex; flex-direction: column;">
               <input type="text" v-model="search" placeholder="Search animations…" class="dark_bordered" style="width: 100%; margin-bottom: 6px;">
               <div style="flex: 1; max-height: 340px; overflow-y: auto; border: 1px solid var(--color-border); border-radius: 4px;">
-                <div v-for="a in shown" :key="a.id" @click="pick(a)" :title="'Add ' + a.id + ' to the stack'"
+                <div v-for="a in shown" :key="a.id" @click="pick(a)" :title="(inStack(a) ? 'Take ' : 'Add ') + a.id + (inStack(a) ? ' off the stack' : ' to the stack')"
                      :style="{ padding: '4px 8px', cursor: 'pointer', display: 'flex', justifyContent: 'space-between', gap: '8px',
                                background: inStack(a) ? 'var(--color-selected)' : '' }">
                   <span>{{ inStack(a) ? '✓ ' : '' }}{{ a.name }}</span>
@@ -3706,14 +3723,11 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
                 <b>Stack</b>
                 <button @click="toggle()" :disabled="!activeLayer" style="min-width: 70px;">{{ playing ? 'Pause' : 'Play' }}</button>
               </div>
-              <p v-if="!layers.length" style="opacity: 0.7; margin: 0;">Click animations on the left to stack them. Each one adds to the pose at its own frame.</p>
+              <p v-if="!layers.length" style="opacity: 0.7; margin: 0;">Click animations on the left to stack them (click again to take one off). Each adds to the pose at its own frame.</p>
               <div v-for="l in layers" :key="l.uid" @click="active = l.uid"
                    :style="{ border: '1px solid var(--color-border)', borderRadius: '4px', padding: '4px 6px',
                              background: l.uid === active ? 'var(--color-selected)' : '' }">
-                <div style="display: flex; justify-content: space-between; gap: 6px;">
-                  <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{{ l.name }}</span>
-                  <a href="#" @click.prevent.stop="remove(l)" title="Remove from the stack">✕</a>
-                </div>
+                <div style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{{ l.name }}</div>
                 <div style="display: flex; align-items: center; gap: 4px;">
                   <button @click.stop="step(l, -1)" title="Previous frame">◀</button>
                   <input type="range" min="0" :max="l.frames" step="1" :value="l.frame" @input="setFrame(l, Number($event.target.value))" @mousedown="active = l.uid" style="flex: 1;">
@@ -3729,7 +3743,13 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
           </div>`,
       },
       onButton(index) {
-        finish(index === 0 && vm && (vm.layers.length > 0 || vm.fromRest));
+        if (index === 0 && vm) {
+          const b = baseNow();
+          root.pose_animation = vm.layers.length
+            ? { base: Object.fromEntries([...b].map(([k, r]) => [k, r.slice()])), layers: vm.layers.map((l) => ({ id: l.id, frame: l.frame })) }
+            : null;
+          finish(true);
+        } else finish(false);
       },
       onCancel() {
         finish(false);
@@ -4752,6 +4772,14 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   // <changelog>
   const CHANGELOG = [
     {
+      "version": "0.27.1",
+      "date": "2026-09-30",
+      "changes": [
+        "The Animation window remembers what you applied: reopening it shows the same stack and frames instead of adding the animation a second time. Bones you posed by hand in between keep that posing.",
+        "Click an animation in the list to add it, and click it again to take it off (the ✕ buttons are gone)."
+      ]
+    },
+    {
       "version": "0.27.0",
       "date": "2026-09-30",
       "changes": [
@@ -5051,6 +5079,7 @@ ${PLUGIN_URL}`,
       skinProperties = [
         new Property(Group, 'object', 'pose_entity'),
         new Property(Group, 'object', 'pose_equipment'),
+        new Property(Group, 'object', 'pose_animation'),
         new Property(Group, 'number', 'pose_skin_slot', { default: 0 }),
         new Property(Group, 'boolean', 'pose_slim', { default: false }),
       ];

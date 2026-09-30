@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.27.1 (2026-09-30)
+
+- The Animation window remembers what you applied: reopening it shows the same stack and frames instead of adding the animation a second time. Bones you posed by hand in between keep that posing.
+- Click an animation in the list to add it, and click it again to take it off (the ✕ buttons are gone).
+
 ## 0.27.0 (2026-09-30)
 
 - Animation Frame… is now Animation… and works for players as well as entities.
