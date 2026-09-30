@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.24.0 (2026-09-30)
+
+- The camera view has Cinema 4D style buttons in its top-right corner: drag the hand to move the camera sideways and up/down, the arrows to move it forward/back, and the circle to orbit it around what it looks at (hold Shift to turn it on the spot). Each drag is one undo step.
+- New cameras are drawn as a line outline (spline mesh) in the Generic Model format, with a triangle marking the top. Other formats keep the block camera.
+- Smoother rotation when turning several selected objects together: only the moved objects are redrawn.
+
 ## 0.23.0 (2026-09-30)
 
 - Rotating two or more selected mannequins, entities and cameras now turns them around their shared centre as one piece, instead of each spinning in place. One undo reverts the whole turn.

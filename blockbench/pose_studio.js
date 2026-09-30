@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.23.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.24.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -405,6 +405,10 @@
   }
 
   function checkGroupSpin() {
+    if (navDrag) {
+      groupSpin = null; // the camera view's buttons are moving a camera
+      return;
+    }
     const roots = selectedPoseRoots();
     if (roots.length < 2) {
       groupSpin = null;
@@ -439,7 +443,7 @@
       if (to.distanceToSquared(at) > 1e-10) translateTree(g, to.sub(at).toArray());
       groupSpin.rotations.set(g.uuid, g.rotation.slice());
     }
-    if (typeof Canvas !== 'undefined') Canvas.updateAll();
+    if (typeof Canvas !== 'undefined') refreshGroups(roots);
   }
 
   // Rotation (degrees, format Euler order) that points a camera along `dir` with no roll.
@@ -462,14 +466,65 @@
 
     Undo.initEdit({ outliner: true, elements: [] });
     const group = new Group({ name: `cam_${n}`, origin: [x, y, z], rotation: rotationFacing(dir) }).init();
-    const cubes = [
-      new Cube({ name: 'body', from: [x - 3, y - 3, z], to: [x + 3, y + 3, z + 8], color: 4 }).addTo(group).init(),
-      new Cube({ name: 'lens', from: [x - 1.5, y - 1.5, z - 3], to: [x + 1.5, y + 1.5, z], color: 5 }).addTo(group).init(),
-    ];
-    Undo.finishEdit('Add Pose Studio camera', { outliner: true, elements: cubes });
+    let elements = null;
+    try {
+      elements = cameraSpline(group, [x, y, z]);
+    } catch (e) {
+      console.warn('[Pose Studio] spline camera', e);
+      elements = null;
+    }
+    if (!elements) {
+      // formats without splines: a box body and lens
+      elements = [
+        new Cube({ name: 'body', from: [x - 3, y - 3, z], to: [x + 3, y + 3, z + 8], color: 4 }).addTo(group).init(),
+        new Cube({ name: 'lens', from: [x - 1.5, y - 1.5, z - 3], to: [x + 1.5, y + 1.5, z], color: 5 }).addTo(group).init(),
+      ];
+    }
+    Undo.finishEdit('Add Pose Studio camera', { outliner: true, elements });
     Canvas.updateAll();
     group.select();
     return group;
+  }
+
+  // The camera drawn as lines (a spline mesh shown as a path): a body, a lens widening to a 16:9
+  // frame at the eye point, and a triangle on top marking "up". Everything sits behind the eye
+  // (+Z, the camera looks down -Z) so it never shows in its own camera view. Null when the
+  // project's format has no splines.
+  const CAMERA_LINES = (() => {
+    const box = (x0, y0, z0, x1, y1, z1) => {
+      const c = [[x0, y0, z0], [x1, y0, z0], [x1, y1, z0], [x0, y1, z0], [x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]];
+      return [[0, 1], [1, 2], [2, 3], [3, 0], [4, 5], [5, 6], [6, 7], [7, 4], [0, 4], [1, 5], [2, 6], [3, 7]].map(([a, b]) => [c[a], c[b]]);
+    };
+    const body = box(-3, -3, 4, 3, 3, 12);
+    const small = [[-1.5, -1.5, 4], [1.5, -1.5, 4], [1.5, 1.5, 4], [-1.5, 1.5, 4]];
+    const frame = [[-3.2, -1.8, 0.05], [3.2, -1.8, 0.05], [3.2, 1.8, 0.05], [-3.2, 1.8, 0.05]];
+    const lens = [];
+    for (let i = 0; i < 4; i++) {
+      lens.push([frame[i], frame[(i + 1) % 4]], [small[i], frame[i]]);
+    }
+    const up = [[-1.5, 3.5, 8], [1.5, 3.5, 8], [0, 5.5, 8]];
+    return body.concat(lens, [[up[0], up[1]], [up[1], up[2]], [up[2], up[0]]]);
+  })();
+
+  function cameraSpline(group, eye) {
+    if (typeof SplineMesh === 'undefined' || typeof SplineHandle === 'undefined' || typeof SplineCurve === 'undefined') return null;
+    if (!Format || !Format.splines) return null;
+    const spline = new SplineMesh({ name: 'camera', origin: eye.slice(), vertices: {}, render_mode: 'path', color: 4 });
+    // one handle per corner; straight segments keep both control points on the corner
+    const handles = new Map();
+    const handleAt = (p) => {
+      const key = p.join(',');
+      if (!handles.has(key)) {
+        const [joint, control1, control2] = spline.addVertices(p, p, p);
+        handles.set(key, spline.addHandles(new SplineHandle(spline, { control1, joint, control2 }))[0]);
+      }
+      return handles.get(key);
+    };
+    for (const [a, b] of CAMERA_LINES) {
+      spline.addCurves(new SplineCurve(spline, { start_handle: handleAt(a), end_handle: handleAt(b) }));
+    }
+    spline.addTo(group).init();
+    return [spline];
   }
 
   // The camera the game (and the POV viewport) follows: the last cam_ group you selected, until
@@ -522,6 +577,7 @@
           background: 'rgba(0, 0, 0, 0.6)', color: '#fff', font: '600 12px sans-serif', letterSpacing: '0.02em',
         });
         povPreview.node.appendChild(povLabel);
+        povNav = createPovNav(povPreview.node);
       }
       applyPovAspect();
       if (!povTimer) povTimer = setInterval(updatePovViewport, 33);
@@ -530,6 +586,8 @@
       povTimer = null;
       if (povLabel) povLabel.remove();
       povLabel = null;
+      if (povNav) povNav.remove();
+      povNav = null;
       if (povPreview) {
         if (povPreview.controls) povPreview.controls.enabled = true;
         povPreview.aspect_ratio = undefined;
@@ -582,6 +640,152 @@
     povPreview.camera.lookAt(target);
     const fov = cam.pose_fov || mainViewportFov();
     if (povPreview.camera.fov !== fov && povPreview.setFOV) povPreview.setFOV(fov);
+  }
+
+  // ---- Camera view navigation ----------------------------------------------------------------
+  // Three drag buttons in the camera view's corner, like Cinema 4D's: the hand moves the camera
+  // sideways and up/down, the arrows move it forward/back, the circle orbits it around what it's
+  // looking at (Shift: turns it on the spot). Each drag is one undo step.
+  const NAV_BUTTONS = [
+    { mode: 'pan', icon: 'pan_tool', title: 'Move the camera left/right/up/down (drag)' },
+    { mode: 'dolly', icon: 'height', title: 'Move the camera forward/back (drag up/down)' },
+    { mode: 'orbit', icon: 'autorenew', title: 'Orbit the camera around what it looks at (drag). Hold Shift to turn it on the spot' },
+  ];
+  const NAV_DEFAULT_DISTANCE = 48; // 3 blocks, when nothing is in front of the camera
+  let povNav = null;
+  let navDrag = null;
+
+  function createPovNav(node) {
+    const bar = document.createElement('div');
+    bar.className = 'pose_studio_pov_nav';
+    Object.assign(bar.style, {
+      position: 'absolute', top: '6px', right: '8px', zIndex: 6, display: 'flex', gap: '2px', padding: '2px',
+      borderRadius: '6px', background: 'rgba(0, 0, 0, 0.55)',
+    });
+    for (const b of NAV_BUTTONS) {
+      const button = document.createElement('div');
+      button.title = b.title;
+      Object.assign(button.style, {
+        width: '28px', height: '28px', display: 'flex', alignItems: 'center', justifyContent: 'center',
+        color: '#fff', borderRadius: '4px', cursor: 'grab', userSelect: 'none', touchAction: 'none',
+      });
+      button.innerHTML = `<i class="material-icons" style="font-size: 20px; pointer-events: none;">${b.icon}</i>`;
+      button.addEventListener('pointerenter', () => (button.style.background = 'rgba(255, 255, 255, 0.18)'));
+      button.addEventListener('pointerleave', () => {
+        if (!navDrag || navDrag.button !== button) button.style.background = '';
+      });
+      button.addEventListener('pointerdown', (e) => startNavDrag(b.mode, e, button));
+      bar.appendChild(button);
+    }
+    node.appendChild(bar);
+    return bar;
+  }
+
+  const camQuaternion = (cam) => eulerQuaternion(cam.rotation);
+
+  // How far ahead the orbit pivot is: the nearest mannequin or entity roughly in view, else 3 blocks.
+  function orbitDistance(cam) {
+    const pos = new THREE.Vector3().fromArray(cam.origin);
+    const forward = cameraForward(cam);
+    let best = null;
+    for (const g of Outliner.root) {
+      if (!(g instanceof Group) || !/^(mq_|ent_)/i.test(g.name)) continue;
+      const to = new THREE.Vector3().fromArray(g.origin).add(new THREE.Vector3(0, 16, 0)).sub(pos);
+      const along = to.dot(forward);
+      if (along < 4 || to.angleTo(forward) > 0.6) continue;
+      if (best === null || along < best) best = along;
+    }
+    return best || NAV_DEFAULT_DISTANCE;
+  }
+
+  function refreshGroups(groups) {
+    if (Canvas.updateView) Canvas.updateView({ groups, group_aspects: { transform: true } });
+    else Canvas.updateAll();
+  }
+
+  function startNavDrag(mode, e, button) {
+    const cam = activeCamera();
+    if (!cam) {
+      Blockbench.showQuickMessage('Add or select a camera first', 2000);
+      return;
+    }
+    e.preventDefault();
+    e.stopPropagation();
+    try {
+      button.setPointerCapture(e.pointerId);
+    } catch (err) {
+      // pointer capture unavailable
+    }
+    const nodes = [cam].concat(collectDescendants(cam));
+    Undo.initEdit({ groups: nodes.filter((n) => n instanceof Group), elements: nodes.filter((n) => !(n instanceof Group)) });
+    const distance = orbitDistance(cam);
+    navDrag = {
+      mode, cam, button, distance, moved: false, x: e.clientX, y: e.clientY,
+      pivot: new THREE.Vector3().fromArray(cam.origin).add(cameraForward(cam).multiplyScalar(distance)),
+    };
+    button.style.background = 'rgba(255, 255, 255, 0.3)';
+    button.style.cursor = 'grabbing';
+    const move = (ev) => navMove(ev);
+    const up = () => {
+      button.removeEventListener('pointermove', move);
+      button.removeEventListener('pointerup', up);
+      button.removeEventListener('pointercancel', up);
+      button.style.background = '';
+      button.style.cursor = 'grab';
+      const drag = navDrag;
+      navDrag = null;
+      if (drag && drag.moved) {
+        Undo.finishEdit(`Camera ${drag.mode}`);
+        if (typeof updateSelection === 'function') updateSelection();
+      } else if (Undo.cancelEdit) Undo.cancelEdit();
+    };
+    button.addEventListener('pointermove', move);
+    button.addEventListener('pointerup', up);
+    button.addEventListener('pointercancel', up);
+  }
+
+  function navMove(e) {
+    const drag = navDrag;
+    if (!drag) return;
+    const dx = e.clientX - drag.x;
+    const dy = e.clientY - drag.y;
+    drag.x = e.clientX;
+    drag.y = e.clientY;
+    if (!dx && !dy) return;
+    const cam = drag.cam;
+    const q = camQuaternion(cam);
+    const pos = new THREE.Vector3().fromArray(cam.origin);
+    let next = pos.clone();
+    let turn = null;
+    if (drag.mode === 'pan') {
+      // grab the scene: the camera moves the opposite way to the mouse
+      const scale = Math.max(drag.distance, 8) * 0.004;
+      const right = new THREE.Vector3(1, 0, 0).applyQuaternion(q);
+      const upAxis = new THREE.Vector3(0, 1, 0).applyQuaternion(q);
+      next.add(right.multiplyScalar(-dx * scale)).add(upAxis.multiplyScalar(dy * scale));
+    } else if (drag.mode === 'dolly') {
+      const step = Math.max(drag.distance, 8) * 0.01;
+      next.add(cameraForward(cam).multiplyScalar(-dy * step));
+    } else {
+      // yaw around the world's up axis, pitch around the camera's own right axis
+      const right = new THREE.Vector3(1, 0, 0).applyQuaternion(q);
+      turn = new THREE.Quaternion()
+        .setFromAxisAngle(new THREE.Vector3(0, 1, 0), -dx * 0.3 * DEG)
+        .multiply(new THREE.Quaternion().setFromAxisAngle(right, -dy * 0.3 * DEG));
+      const pivot = e.shiftKey ? pos : drag.pivot;
+      next = pos.clone().sub(pivot).applyQuaternion(turn).add(pivot);
+    }
+    const offset = next.clone().sub(pos);
+    if (offset.lengthSq() > 1e-12) translateTree(cam, offset.toArray());
+    if (drag.mode !== 'orbit') drag.pivot.add(offset);
+    else if (e.shiftKey) drag.pivot.sub(pos).applyQuaternion(turn).add(pos);
+    if (turn) {
+      const e2 = new THREE.Euler().setFromQuaternion(turn.clone().multiply(q), eulerOrder());
+      [e2.x, e2.y, e2.z].forEach((v, i) => (cam.rotation[i] = round(v / DEG, 3)));
+    }
+    drag.moved = true;
+    refreshGroups([cam]);
+    updatePovViewport();
   }
 
   // Watches the Minecraft window's client size with one long-running PowerShell process that
@@ -4061,6 +4265,15 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.24.0",
+      "date": "2026-09-30",
+      "changes": [
+        "The camera view has Cinema 4D style buttons in its top-right corner: drag the hand to move the camera sideways and up/down, the arrows to move it forward/back, and the circle to orbit it around what it looks at (hold Shift to turn it on the spot). Each drag is one undo step.",
+        "New cameras are drawn as a line outline (spline mesh) in the Generic Model format, with a triangle marking the top. Other formats keep the block camera.",
+        "Smoother rotation when turning several selected objects together: only the moved objects are redrawn."
+      ]
+    },
     {
       "version": "0.23.0",
       "date": "2026-09-30",
