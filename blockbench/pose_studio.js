@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.30.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.30.1'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -1202,9 +1202,9 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
     link.onConnect = () => {
       resync();
       if (playerHidden) setPlayerHidden(true);
-      autoAnchor();
-      // match the open scene with the world (after the first updates have gone out)
-      setTimeout(() => checkWorldScene().catch(() => {}), 1500);
+      // match the open scene with the world first; an empty scene is only centred on the player
+      // when the world has no scene of its own
+      setTimeout(() => checkWorldScene().catch(() => {}).then(() => autoAnchor()), 1000);
     };
     if (!tickTimer) tickTimer = setInterval(tick, TICK_MS);
     const command = `/connect 127.0.0.1:${PORT}`;
@@ -1270,6 +1270,9 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
 
   async function autoAnchor() {
     if (!link.connected || !sceneIsEmpty()) return;
+    // a world with a scene keeps that scene's anchor
+    if (connectedWorld && connectedWorld.path) return;
+    if (typeof Project !== 'undefined' && Project && Project.pose_world && Project.pose_world.anchor) return;
     await link.command('scriptevent pose:anchor').catch(logFailure);
     resync();
   }
@@ -1303,7 +1306,15 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
     if (!requireConnection()) return;
     link
       .command('scriptevent pose:anchor')
-      .then(resync)
+      .then(async () => {
+        resync();
+        // the scene now lives here: remember it (Save Scene keeps it in the file)
+        const fresh = await readWorldScene().catch(() => null);
+        if (fresh && connectedWorld) connectedWorld.anchor = fresh.anchor;
+        if (fresh && typeof Project !== 'undefined' && Project && Project.pose_world && Project.pose_world.id === fresh.id) {
+          Project.pose_world = Object.assign({}, Project.pose_world, { anchor: fresh.anchor });
+        }
+      })
       .catch(logFailure);
   }
 
@@ -1704,6 +1715,11 @@ Write-Output $Out
       showError('Pose Studio: world import failed', e);
       return;
     }
+    const { palette, blocks } = parseScanItems(items);
+    await buildWorld(palette, blocks);
+  }
+
+  function parseScanItems(items) {
     const palette = [];
     const blocks = [];
     for (const item of items) {
@@ -1718,7 +1734,7 @@ Write-Output $Out
         for (let i = 0; i + 8 <= s.length; i += 8) blocks.push([d(i) - 2048, d(i + 2) - 2048, d(i + 4) - 2048, d(i + 6)]);
       }
     }
-    await buildWorld(palette, blocks);
+    return { palette, blocks };
   }
 
   // Builds the scan as ONE mesh element. Neighbouring faces that share a direction and block
@@ -5362,7 +5378,10 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     } catch (e) {
       scene = {};
     }
-    return { id: idItem.slice(2), path: windowsPath(scene.path), name: scene.name || '' };
+    const a = items.find((i) => i.startsWith('A|'));
+    const parts = a ? a.split('|') : null;
+    const anchor = parts ? { x: Number(parts[1]), y: Number(parts[2]), z: Number(parts[3]), dim: parts[4] || '' } : null;
+    return { id: idItem.slice(2), path: windowsPath(scene.path), name: scene.name || '', anchor };
   }
 
   // The world's name, from the most recently played world folder (the one that's open).
@@ -5407,7 +5426,27 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
 
   function linkProjectToWorld(world, name) {
     if (typeof Project === 'undefined' || !Project) return;
-    Project.pose_world = { id: world.id, name };
+    Project.pose_world = { id: world.id, name, anchor: world.anchor || (Project.pose_world && Project.pose_world.anchor) || null };
+  }
+
+  const sameAnchor = (a, b) => !!a && !!b && ['x', 'y', 'z'].every((k) => Math.abs(Number(a[k]) - Number(b[k])) < 0.01);
+
+  // Puts the world's anchor back where the open scene was built, if the scene belongs to this world.
+  async function restoreSceneAnchor() {
+    if (!link.connected || !connectedWorld || typeof Project === 'undefined' || !Project) return false;
+    const linked = Project.pose_world;
+    if (!linked || linked.id !== connectedWorld.id || !linked.anchor) return false;
+    if (sameAnchor(linked.anchor, connectedWorld.anchor)) return false;
+    const a = linked.anchor;
+    await link.command(`scriptevent pose:anchor ${JSON.stringify({ at: [a.x, a.y, a.z], dim: a.dim || undefined })}`).catch(logFailure);
+    connectedWorld.anchor = Object.assign({}, a);
+    resync();
+    return true;
+  }
+
+  // Switching to (or opening) a scene of this world puts it back in place.
+  function onProjectSelected() {
+    if (link.connected && connectedWorld) setTimeout(() => restoreSceneAnchor().catch(() => {}), 300);
   }
 
   // Scene ▸ Save Scene: saves the scene (to Documents\Pose Studio\Scenes\<world>.bbmodel the first
@@ -5416,6 +5455,11 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     if (typeof Project === 'undefined' || !Project) {
       Blockbench.showQuickMessage('Nothing to save yet', 2000);
       return;
+    }
+    // the world's anchor right now, so the scene reopens exactly where it was built
+    if (link.connected) {
+      const fresh = await readWorldScene().catch(() => null);
+      if (fresh) connectedWorld = Object.assign(connectedWorld || {}, fresh, { name: (connectedWorld && connectedWorld.name) || fresh.name });
     }
     const world = connectedWorld;
     const worldName = (world && world.name) || (Project.pose_world && Project.pose_world.name) || currentWorldName();
@@ -5459,6 +5503,143 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     openSceneFile(world.path);
   }
 
+  // Scene ▸ Realign Scene with World: finds where the scene was built by matching its imported
+  // terrain (world_scan) against the terrain around the player now, then puts the anchor back there.
+  // For scenes whose position was lost (saved before scenes remembered it).
+  let realignDebug = null;
+  const REALIGN_RADIUS = 24; // blocks of terrain read around the player
+  const REALIGN_SEARCH = 128; // how far away (blocks) the scene may have been built
+
+  // Highest block top per column of the scene's imported terrain: Map "x,z" -> top.
+  function sceneHeights() {
+    const mesh = (Outliner.elements || Project.elements || []).find((e) => e.name === WORLD_GROUP && e.vertices && e.faces);
+    if (!mesh) return null;
+    const o = mesh.origin || [0, 0, 0];
+    const heights = new Map();
+    for (const face of Object.values(mesh.faces)) {
+      const v = (face.vertices || []).map((k) => mesh.vertices[k]).filter(Boolean);
+      if (v.length < 3 || v.some((p) => Math.abs(p[1] - v[0][1]) > 1e-6)) continue; // horizontal faces only
+      const xs = v.map((p) => 0.5 - (p[0] + o[0]) / 16);
+      const zs = v.map((p) => 0.5 - (p[2] + o[2]) / 16);
+      const top = Math.round((v[0][1] + o[1]) / 16);
+      for (let x = Math.round(Math.min(...xs)); x < Math.round(Math.max(...xs)); x++) {
+        for (let z = Math.round(Math.min(...zs)); z < Math.round(Math.max(...zs)); z++) {
+          const key = x + ',' + z;
+          if (!(heights.get(key) >= top)) heights.set(key, top);
+        }
+      }
+    }
+    return heights;
+  }
+
+  // The offset (scene = now + offset) that makes two height maps line up best, or null.
+  function matchHeights(scene, now, range = REALIGN_SEARCH) {
+    let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+    for (const key of scene.keys()) {
+      const [x, z] = key.split(',').map(Number);
+      minX = Math.min(minX, x); maxX = Math.max(maxX, x); minZ = Math.min(minZ, z); maxZ = Math.max(maxZ, z);
+    }
+    const w = maxX - minX + 1;
+    const d = maxZ - minZ + 1;
+    const grid = new Int32Array(w * d).fill(-100000);
+    for (const [key, h] of scene) {
+      const [x, z] = key.split(',').map(Number);
+      grid[(x - minX) * d + (z - minZ)] = h;
+    }
+    const cells = [...now].map(([key, h]) => [...key.split(',').map(Number), h]);
+    const counts = new Int32Array(4096);
+    const touched = [];
+    const candidates = [];
+    for (let dx = -range; dx <= range; dx++) {
+      for (let dz = -range; dz <= range; dz++) {
+        let overlap = 0;
+        let top = 0;
+        let topDiff = 0;
+        for (const [x, z, h] of cells) {
+          const sx = x + dx - minX;
+          const sz = z + dz - minZ;
+          if (sx < 0 || sz < 0 || sx >= w || sz >= d) continue;
+          const sh = grid[sx * d + sz];
+          if (sh === -100000) continue;
+          overlap++;
+          const diff = sh - h;
+          if (diff < -2048 || diff >= 2048) continue;
+          const i = diff + 2048;
+          if (!counts[i]) touched.push(i);
+          if (++counts[i] > top) {
+            top = counts[i];
+            topDiff = diff;
+          }
+        }
+        for (const i of touched) counts[i] = 0;
+        touched.length = 0;
+        if (overlap >= 40) candidates.push({ dx, dz, dy: topDiff, score: top, overlap, quality: top - 3 * (overlap - top) });
+      }
+    }
+    // Flat ground matches almost anywhere, so what tells places apart is how few columns disagree:
+    // matches count, mismatches count against (three times).
+    let best = null;
+    for (const c of candidates) if (!best || c.quality > best.quality) best = c;
+    if (!best) return null;
+    let second = null;
+    for (const c of candidates) {
+      if (Math.abs(c.dx - best.dx) <= 2 && Math.abs(c.dz - best.dz) <= 2) continue;
+      if (!second || c.quality > second.quality) second = c;
+    }
+    const rate = (c) => (c ? (c.overlap - c.score) / c.overlap : 1);
+    return Object.assign(best, { errorRate: rate(best), secondErrorRate: rate(second), cells: cells.length });
+  }
+
+  async function realignScene() {
+    if (!requireConnection()) return;
+    const scene = sceneHeights();
+    if (!scene || scene.size < 30) {
+      Blockbench.showMessageBox({ title: 'Pose Studio', message: 'Realigning needs imported terrain in the scene (Import World…) to compare with Minecraft.' });
+      return;
+    }
+    let world;
+    let items;
+    try {
+      world = await readWorldScene();
+      items = await runGameQuery('pose:scan', { radius: REALIGN_RADIUS, rays: 0, dist: 8 }, 'Reading the terrain around you');
+    } catch (e) {
+      showError('Pose Studio: realign', e);
+      return;
+    }
+    const { blocks } = parseScanItems(items);
+    const now = new Map();
+    for (const [x, y, z] of blocks) {
+      const key = x + ',' + z;
+      if (!(now.get(key) >= y + 1)) now.set(key, y + 1);
+    }
+    const found = matchHeights(scene, now);
+    realignDebug = { found, scene: scene.size, now: now.size }; // for troubleshooting
+    // a clear match: few mismatching columns, and clearly fewer than anywhere else
+    const clear = found && found.errorRate <= 0.2 && found.secondErrorRate >= Math.max(found.errorRate * 2, found.errorRate + 0.01);
+    if (!clear) {
+      Blockbench.showMessageBox({
+        title: 'Pose Studio',
+        message: "Couldn't find a clear match between the scene's terrain and the terrain around you.\n\nStand somewhere inside the area you imported, ideally near trees, slopes or buildings (flat ground all looks alike), and try again.",
+      });
+      return;
+    }
+    const a = world.anchor || { x: 0.5, y: 0, z: 0.5, dim: '' };
+    const anchor = { x: a.x - found.dx, y: a.y - found.dy, z: a.z - found.dz, dim: a.dim || '' };
+    await link.command(`scriptevent pose:anchor ${JSON.stringify({ at: [anchor.x, anchor.y, anchor.z], dim: anchor.dim || undefined })}`).catch(logFailure);
+    connectedWorld = Object.assign(connectedWorld || world, { anchor });
+    if (typeof Project !== 'undefined' && Project) {
+      Project.pose_world = Object.assign({}, Project.pose_world || { id: world.id, name: connectedWorld.name || currentWorldName() }, { anchor });
+    }
+    resync();
+    const moved = Math.round(Math.hypot(found.dx, found.dy, found.dz));
+    Blockbench.showMessageBox({
+      title: 'Pose Studio',
+      message: moved
+        ? `Found where the scene was built (${moved} blocks from where it was showing) and put it back. Use Scene ▸ Save Scene to keep this.`
+        : 'The scene already lines up with the world.',
+    });
+  }
+
   // Scene ▸ Unlink Scene from World
   function unlinkScene() {
     if (typeof Project !== 'undefined' && Project) Project.pose_world = null;
@@ -5483,7 +5664,11 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     // the open scene belongs to this world: keep the world's link up to date
     if (linked && linked.id === world.id) {
       if (projectPath() && !samePath(projectPath(), world.path)) tellWorldScene(projectPath(), worldName);
-      Blockbench.showQuickMessage(`Scene linked to ${worldName}`, 2500);
+      const moved = await restoreSceneAnchor();
+      Blockbench.showQuickMessage(`Scene linked to ${worldName}${moved ? ': put back where it was built' : ''}`, 3000);
+      if (!linked.anchor) {
+        Blockbench.showQuickMessage(`Scene linked to ${worldName}. If it doesn't line up in Minecraft, use Scene ▸ Realign Scene with World, then Save Scene.`, 6000);
+      }
       return;
     }
     // the world has a scene: open it (or switch to its tab)
@@ -5551,6 +5736,17 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.30.1",
+      "date": "2026-09-30",
+      "changes": [
+        "Fixed: opening a saved scene could put it in the wrong place in Minecraft. Connecting with an empty scene moved the world anchor to where you stood before the saved scene opened. Worlds with a scene now keep their anchor.",
+        "Scenes remember where in the world they were built and put themselves back there when they open or when you switch to their tab.",
+        "New: Scene ▸ Realign Scene with World finds the original position of a scene that lost it, by matching its imported terrain with the terrain around you.",
+        "Minecraft requests now wait their turn instead of failing with \"another transfer is running\".",
+        "Needs the updated Minecraft behavior pack (Check for Updates)."
+      ]
+    },
     {
       "version": "0.30.0",
       "date": "2026-09-30",
@@ -5899,6 +6095,7 @@ ${PLUGIN_URL}`,
       ];
       pickTimer = setInterval(disableWorldPicking, 1000);
       startGroupSpin();
+      if (Blockbench.on) Blockbench.on('select_project', onProjectSelected);
 
       const a = {
         link: (linkToggle = new Toggle('pose_studio_link', {
@@ -5915,6 +6112,10 @@ ${PLUGIN_URL}`,
           description: 'Opens the scene linked to the Minecraft world you have open.',
         }),
         unlinkscene: new Action('pose_studio_unlink_scene', { name: 'Unlink Scene from World', icon: 'link_off', click: unlinkScene }),
+        realign: new Action('pose_studio_realign_scene', {
+          name: 'Realign Scene with World', icon: 'my_location', click: realignScene,
+          description: "Finds where the scene was built by matching its imported terrain with the terrain around you, and puts it back there.",
+        }),
         add: new Action('pose_studio_add', {
           name: 'Add Mannequin', icon: 'accessibility_new', click: addMannequin,
           condition: () => !selectionIs('mannequin'),
@@ -6010,7 +6211,7 @@ ${PLUGIN_URL}`,
 
       menu = new BarMenu('pose_studio', [
         a.link,
-        { name: 'Scene', id: 'pose_studio_scene_menu', icon: 'link', children: [a.savescene, a.openscene, a.unlinkscene] },
+        { name: 'Scene', id: 'pose_studio_scene_menu', icon: 'link', children: [a.savescene, a.openscene, '_', a.realign, a.unlinkscene] },
         '_',
         a.add,
         a.outfit,
@@ -6039,6 +6240,7 @@ ${PLUGIN_URL}`,
 
     onunload() {
       stopGroupSpin();
+      if (Blockbench.removeListener) Blockbench.removeListener('select_project', onProjectSelected);
       if (startupTimer) clearTimeout(startupTimer);
       startupTimer = null;
       if (tickTimer) clearInterval(tickTimer);

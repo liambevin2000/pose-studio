@@ -424,6 +424,8 @@ function reportScene(data) {
   const scene = world.getDynamicProperty(SCENE_PROPERTY);
   const hex = typeof scene === "string" && scene ? toHex(scene) : "";
   const items = [`W|${worldId()}`];
+  const anchor = getAnchor();
+  if (anchor) items.push(`A|${anchor.x}|${anchor.y}|${anchor.z}|${anchor.dim || ""}`);
   const size = MAX_ITEM_LENGTH - 10;
   for (let i = 0; i * size < hex.length; i++) items.push(`S|${i}|${hex.slice(i * size, (i + 1) * size)}`);
   finishResult(items);
@@ -562,6 +564,14 @@ function handle(ev) {
 
   switch (ev.id) {
     case "pose:anchor": {
+      // {"at":[x,y,z],"dim":"..."} puts the anchor back where a saved scene had it
+      if (Array.isArray(data.at) && data.at.length === 3 && data.at.every((v) => Number.isFinite(Number(v)))) {
+        const [x, y, z] = data.at.map(Number);
+        const dim = String(data.dim || (player ? player.dimension.id : "minecraft:overworld"));
+        world.setDynamicProperty("pose:anchor", JSON.stringify({ x, y, z, dim }));
+        if (player && !data.quiet) player.sendMessage(`§b[Pose Studio]§r Scene placed at ${x} ${y} ${z}`);
+        return;
+      }
       if (!player) return;
       const a = setAnchorAt(player);
       player.sendMessage(`§b[Pose Studio]§r Anchor set at ${a.x} ${a.y} ${a.z}`);

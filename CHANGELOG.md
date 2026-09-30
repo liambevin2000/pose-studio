@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.30.1 (2026-09-30)
+
+- Fixed: opening a saved scene could put it in the wrong place in Minecraft. Connecting with an empty scene moved the world anchor to where you stood before the saved scene opened. Worlds with a scene now keep their anchor.
+- Scenes remember where in the world they were built and put themselves back there when they open or when you switch to their tab.
+- New: Scene ▸ Realign Scene with World finds the original position of a scene that lost it, by matching its imported terrain with the terrain around you.
+- Minecraft requests now wait their turn instead of failing with "another transfer is running".
+- Needs the updated Minecraft behavior pack (Check for Updates).
+
 ## 0.30.0 (2026-09-30)
 
 - Scenes linked to worlds: Scene ▸ Save Scene saves with one click (to DocumentsPose StudioScenes the first time) and links the scene with the Minecraft world you have open.
