@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.28.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.29.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -698,8 +698,8 @@
     label.style.minWidth = '64px';
     const input = document.createElement('input');
     input.type = 'range';
-    input.min = '10';
-    input.max = '120';
+    input.min = '30';
+    input.max = '110';
     input.step = '1';
     input.title = 'Field of view of the camera (degrees)';
     input.style.width = '140px';
@@ -2753,94 +2753,257 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   }
 
   // ---- Variants and babies ----
-  // Which geometry and texture the entity's render controller picks for a given state: the variant
-  // number (query.variant / skin_id / v.index...) and whether it's a baby. The controller's own
-  // expressions are evaluated, so this follows each mob's rules (warm/cold cows, wolf coats, cat
-  // breeds, baby models...).
-  const VARIANT_QUERIES = ['variant', 'skin_id', 'index', 'color', 'mark_variant'];
+  // An entity's looks come from its render controllers: which geometry and which textures they
+  // pick for a given state. A state is a value for each "choice" the controllers index arrays with
+  // (query.variant = coat, query.mark_variant = markings or biome, variable.armor_texture_slot =
+  // horse armour, variable.profession_index...) plus whether it's a baby. Several texture layers
+  // (a horse's coat, markings and armour; a villager's skin, biome outfit and profession) are
+  // merged into one texture, since Minecraft's posable copy draws one.
+  const LOOK_SKIP_CHOICES = /level|tier|armor_texture_slot_baby/i; // villager level badges stay at the first level
+  const MAX_LOOKS_PER_ENTITY = 320;
+  const LEATHER_TINT = '#a06540'; // undyed leather (horse armour)
 
-  function lookFor(content, description, state) {
-    const controller = mainController(content, description);
-    const evaluate = (expr, kind) => {
-      if (typeof expr !== 'string') return null;
-      const map = description[kind === 'geometry' ? 'geometry' : 'textures'] || {};
-      const arrays = (controller.arrays || {})[kind === 'geometry' ? 'geometries' : 'textures'] || {};
-      const find = (obj, key) => obj[Object.keys(obj).find((k) => k.toLowerCase() === String(key).toLowerCase())];
-      const js = expr
-        .replace(/\b(array)\.(\w+)\s*\[/gi, (m, a, name) => `A(${JSON.stringify(name)},`)
-        .replace(/\]/g, ')')
-        .replace(/\b(texture|geometry)\.(\w+)/gi, (m, k, name) => JSON.stringify('K:' + name))
-        .replace(/\b(query|q|variable|v|temp|t|context|c)\.([a-z0-9_.]+)(\s*\([^()]*\))?/gi, (m, kind, name) => {
-          const n = name.toLowerCase();
-          return `(${Number(state[n] !== undefined ? state[n] : IDLE_QUERIES[n] || 0) || 0})`;
-        })
-        .replace(/\bmath\.\w+/gi, '0');
-      if (/[^\s\w"':.,()!?&|<>=+\-*/%]/.test(js)) return null;
-      const A = (name, index) => {
-        const list = find(arrays, `Array.${name}`) || [];
-        const item = list[Math.max(0, Math.min(list.length - 1, Math.floor(Number(index) || 0)))];
-        const m = typeof item === 'string' && item.match(/^(?:texture|geometry)\.(\w+)$/i);
-        return m ? 'K:' + m[1] : null;
-      };
-      let result;
-      try {
-        result = Function('A', `return (${js});`)(A);
-      } catch (e) {
-        return null;
-      }
-      const key = typeof result === 'string' && result.startsWith('K:') ? result.slice(2) : null;
-      return key ? { key, value: find(map, key) } : null;
-    };
-    const geometry = evaluate(controller.geometry || 'Geometry.default', 'geometry');
-    const texture = evaluate((controller.textures || ['Texture.default'])[0], 'texture');
-    // how many variants the expressions index into
-    let count = 1;
-    for (const expr of [controller.geometry, (controller.textures || [])[0]]) {
-      for (const m of String(expr || '').matchAll(/\barray\.(\w+)\s*\[/gi)) {
-        const all = Object.assign({}, (controller.arrays || {}).textures, (controller.arrays || {}).geometries);
-        const key = Object.keys(all).find((k) => k.toLowerCase() === `array.${m[1]}`.toLowerCase());
-        if (key) count = Math.max(count, all[key].length);
-      }
-    }
-    return { geometry, texture, count };
+  // A render-controller expression as JavaScript, with queries and variables taken from `state`
+  // (else the idle values) and arrays as A(name, index) calls. Null if it's anything fancier.
+  function controllerJs(expr, state) {
+    const js = String(expr)
+      .replace(/\b(array)\.(\w+)\s*\[/gi, (m, a, name) => `A(${JSON.stringify(name)},`)
+      .replace(/\]/g, ')')
+      .replace(/\b(texture|geometry|material)\.(\w+)/gi, (m, k, name) => JSON.stringify('K:' + name))
+      .replace(/\b(query|q|variable|v|temp|t|context|c)\.([a-z0-9_.]+)(\s*\([^()]*\))?/gi, (m, k, name) => {
+        const n = name.toLowerCase();
+        return `(${Number(state[n] !== undefined ? state[n] : IDLE_QUERIES[n] || 0) || 0})`;
+      })
+      .replace(/\bmath\.\w+/gi, '0');
+    return /[^\s\w"':.,()!?&|<>=+\-*/%]/.test(js) ? null : js;
   }
 
-  // Every variant of a list entry, baby versions included (the entry itself first). Each is an
-  // entry of its own: { ...entry, geometryId, texturePath, flags, variant, baby }.
+  // True when a controller condition holds in `state` (unreadable conditions count as true).
+  function stateCondition(expr, state) {
+    if (expr === true || expr === undefined) return true;
+    if (expr === false) return false;
+    const js = controllerJs(expr, state);
+    if (js === null) return true;
+    try {
+      return !!Function('A', `return (${js});`)(() => null);
+    } catch (e) {
+      return true;
+    }
+  }
+
+  // Evaluates a render-controller expression to a texture/geometry/material key, or null.
+  function controllerPick(controller, description, expr, kind, state) {
+    if (typeof expr !== 'string') return null;
+    const maps = { geometry: 'geometry', texture: 'textures', material: 'materials' };
+    const arrayKinds = { geometry: 'geometries', texture: 'textures', material: 'materials' };
+    const map = description[maps[kind]] || {};
+    const arrays = (controller.arrays || {})[arrayKinds[kind]] || {};
+    const find = (obj, key) => obj[Object.keys(obj).find((k) => k.toLowerCase() === String(key).toLowerCase())];
+    const js = controllerJs(expr, state);
+    if (js === null) return null;
+    const A = (name, index) => {
+      const list = find(arrays, `Array.${name}`) || [];
+      const item = list[Math.max(0, Math.min(list.length - 1, Math.floor(Number(index) || 0)))];
+      const m = typeof item === 'string' && item.match(/^(?:texture|geometry|material)\.(\w+)$/i);
+      return m ? 'K:' + m[1] : null;
+    };
+    let result;
+    try {
+      result = Function('A', `return (${js});`)(A);
+    } catch (e) {
+      return null;
+    }
+    const key = typeof result === 'string' && result.startsWith('K:') ? result.slice(2) : null;
+    return key ? { key, value: find(map, key) } : null;
+  }
+
+  // The controllers that draw the body: the main one, plus same-geometry layers that pick from
+  // arrays (a villager's biome/profession outfit and level badge). Overlays that hide everything
+  // but a saddle or armour piece are left out.
+  function lookControllers(content, description) {
+    const main = mainController(content, description);
+    const out = [main];
+    for (const rc of description.render_controllers || ['controller.render.default']) {
+      const id = typeof rc === 'string' ? rc : Object.keys(rc)[0];
+      const def = content.controllers.get(id);
+      if (!def || def === main) continue;
+      const hidesAll = (def.part_visibility || []).some((p) => p['*'] === false);
+      const usesArrays = (def.textures || []).some((t) => /\barray\./i.test(String(t)));
+      if (!hidesAll && usesArrays) out.push(def);
+    }
+    return out;
+  }
+
+  // The choices an entity's looks depend on: { name, size, labels } for each index expression
+  // like query.mark_variant, with labels from the texture keys it selects.
+  function lookChoices(content, description) {
+    const controllers = lookControllers(content, description);
+    const choices = new Map();
+    for (const def of controllers) {
+      const all = Object.assign({}, (def.arrays || {}).textures, (def.arrays || {}).geometries);
+      for (const expr of [def.geometry].concat(def.textures || [])) {
+        for (const m of String(expr || '').matchAll(/\barray\.(\w+)\s*\[\s*(?:query|q|variable|v)\.(\w+)\s*\]/gi)) {
+          const name = m[2].toLowerCase();
+          if (LOOK_SKIP_CHOICES.test(name) || /^baby/i.test(m[1])) continue;
+          const key = Object.keys(all).find((k) => k.toLowerCase() === `array.${m[1]}`.toLowerCase());
+          if (!key) continue;
+          const labels = all[key].map((t) => String(t).replace(/^(texture|geometry)\./i, ''));
+          // a choice whose options all look the same (a villager's six identical skins) isn't one
+          const map = Object.assign({}, description.textures, description.geometry);
+          const paths = new Set(labels.map((l) => map[l] || l));
+          if (paths.size < 2) continue;
+          // name the options from the plain array (not the angry/tame/sleeping ones)
+          const plainness = (arr) => (/angry|tame|sleep|saddle|baby/i.test(arr) ? 0 : 2) + (/^(default|skins?|base|textures?|variants?)$/i.test(arr) ? 1 : 0);
+          const known = choices.get(name);
+          if (!known || plainness(m[1]) > plainness(known.array) || (plainness(m[1]) === plainness(known.array) && labels.length > known.size)) {
+            choices.set(name, { name, array: m[1], size: labels.length, labels });
+          }
+        }
+      }
+    }
+    return [...choices.values()];
+  }
+
+  // Geometry and texture layers for one state.
+  function lookFor(content, description, state) {
+    const controllers = lookControllers(content, description);
+    const main = controllers[0];
+    const geometry = controllerPick(main, description, main.geometry || 'Geometry.default', 'geometry', state);
+    const layers = [];
+    controllers.forEach((def, n) => {
+      // a layer controller only draws when its visibility rule holds for this state
+      if (n > 0) {
+        const all = (def.part_visibility || []).find((p) => '*' in p);
+        if (all && !stateCondition(all['*'], state)) return;
+      }
+      let textures = def.textures || (n === 0 ? ['Texture.default'] : []);
+      // a material chosen by a condition that lands on the plain one draws only the first texture
+      // (a baby villager's outfit shows its biome, not a profession)
+      const matExpr = def.materials && def.materials[0] && Object.values(def.materials[0])[0];
+      if (n > 0 && typeof matExpr === 'string' && matExpr.includes('?')) {
+        const mat = controllerPick(def, description, matExpr, 'material', state);
+        if (mat && !/mask|multi|layer/i.test(mat.key)) textures = textures.slice(0, 1);
+      }
+      for (const expr of textures) {
+        const pick = controllerPick(def, description, expr, 'texture', state);
+        if (pick && pick.value && !/_none$|^none$/i.test(pick.key)) layers.push({ key: pick.key, path: pick.value });
+      }
+    });
+    return { geometry, layers };
+  }
+
+  const cleanLabel = (key) =>
+    String(key || '')
+      .replace(/^baby_?/i, '')
+      .replace(/_?(default|base|skin)$/i, '')
+      .replace(/^(base|skin|markings|armor|armour|decor|biome)_/i, '')
+      .replace(/_/g, ' ')
+      .trim() || 'default';
+
+  // Every look of a list entry, baby versions included (the plain entry first). Each is an entry of
+  // its own: { ...entry, geometryId, texturePath, layers, choices, flags, variant, baby }.
   function variantEntries(content, entry) {
     const entity = content.entities.get(entry.id);
     if (!entity) return [entry];
     const description = entity.description;
+    const choices = lookChoices(content, description);
     const out = [];
     const seen = new Set();
-    const label = (key) => String(key || '').replace(/^baby_?/i, '').replace(/_?(default|base|skin)$/i, '').replace(/^(base|skin)_/i, '').replace(/_/g, ' ').trim();
-    const adultCount = lookFor(content, description, { is_baby: 0 }).count;
+    // every combination of choices (capped), adults then babies
+    const combos = [{}];
+    for (const c of choices) {
+      const next = [];
+      for (const combo of combos) for (let i = 0; i < c.size && next.length < MAX_LOOKS_PER_ENTITY * 4; i++) next.push(Object.assign({}, combo, { [c.name]: i }));
+      combos.splice(0, combos.length, ...next);
+    }
     for (const baby of [0, 1]) {
-      for (let i = 0; i < Math.min(adultCount, 32); i++) {
-        const state = { is_baby: baby };
-        for (const q of VARIANT_QUERIES) state[q] = i;
-        state.mark_variant = 0;
+      for (const combo of combos) {
+        if (out.length >= MAX_LOOKS_PER_ENTITY) break;
+        // pre-animation variables that follow a query (villager: profession_index = query.variant)
+        const state = Object.assign({ is_baby: baby }, combo);
+        if (combo.profession_index !== undefined && state.variant === undefined) state.variant = combo.profession_index;
         const look = lookFor(content, description, state);
         const geometryId = (look.geometry && look.geometry.value) || entry.geometryId;
-        const texturePath = (look.texture && look.texture.value) || entry.texturePath;
+        const layers = look.layers.length ? look.layers : [{ key: 'default', path: entry.texturePath }];
         const geometry = geometryId && resolveGeometry(content.geometries, geometryId);
-        if (!geometry || !geometry.bones.length || !texturePath || !findTexture(content, texturePath)) continue;
-        // a baby only counts when it looks different from the adult (its own model or texture)
-        if (baby && out.some((v) => !v.baby && v.geometryId === geometryId && v.texturePath === texturePath)) continue;
-        const key = `${geometryId}|${texturePath}|${baby}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
+        if (!geometry || !geometry.bones.length || !layers.every((l) => findTexture(content, l.path))) continue;
+        const signature = `${geometryId}|${layers.map((l) => l.path).join('+')}`;
+        // a baby only counts when it looks different from every adult
+        if (baby && out.some((v) => !v.baby && v.signature === signature)) continue;
+        if (seen.has(`${signature}|${baby}`)) continue;
+        seen.add(`${signature}|${baby}`);
+        const labels = choices.map((c) => cleanLabel(c.labels[combo[c.name]]));
         out.push(Object.assign({}, entry, {
-          geometryId, texturePath, baby: !!baby, flags: baby ? { is_baby: 1 } : null,
-          variant: label(look.texture && look.texture.key) || (i ? `variant ${i + 1}` : 'default'),
+          geometryId,
+          texturePath: layers.length === 1 ? layers[0].path : `textures/entity/pose_studio/looks/${hashString(signature)}`,
+          layers: layers.length > 1 ? layers : null,
+          signature,
+          choices: Object.assign({}, combo),
+          baby: !!baby,
+          flags: baby ? { is_baby: 1 } : null,
+          variant: labels.filter((l) => l !== 'default' && l !== 'none' && l !== 'unskilled').join(' ') || 'default',
         }));
       }
     }
-    // the plain entry is always there, first
     const plain = out.findIndex((v) => !v.baby && v.geometryId === entry.geometryId && v.texturePath === entry.texturePath);
     if (plain > 0) out.unshift(out.splice(plain, 1)[0]);
-    else if (plain < 0) out.unshift(Object.assign({}, entry, { baby: false, flags: null, variant: 'default' }));
+    else if (plain < 0 && !out.some((v) => !v.baby)) out.unshift(Object.assign({}, entry, { baby: false, flags: null, variant: 'default', choices: {} }));
+    out.choiceList = choices.map((c) => ({ name: c.name, label: choiceTitle(c), values: c.labels.map(cleanLabel) }));
     return out;
+  }
+
+  function choiceTitle(choice) {
+    const a = choice.array.toLowerCase();
+    if (/armou?r/.test(a)) return 'Armour';
+    if (/marking/.test(a)) return 'Markings';
+    if (/biome/.test(a)) return 'Biome';
+    if (/profession/.test(a)) return 'Profession';
+    if (/decor/.test(a)) return 'Decor';
+    if (/default|base|skin|coat|variant|texture/.test(a)) return 'Variant';
+    return a.replace(/_/g, ' ').replace(/^\w/, (ch) => ch.toUpperCase());
+  }
+
+  // The merged texture of a multi-layer look, as a PNG data URL (layers drawn bottom to top at the
+  // first layer's size; undyed leather armour tinted brown as in game).
+  const layerImageCache = new Map();
+  async function layeredTextureUrl(content, entry) {
+    const images = [];
+    for (const layer of entry.layers) {
+      let img = layerImageCache.get(layer.path);
+      if (!img) {
+        const found = findTexture(content, layer.path);
+        if (!found) continue;
+        img = await loadImage(textureDataUrl(found.file.read(), found.ext));
+        layerImageCache.set(layer.path, img);
+      }
+      images.push({ img, tint: /leather/i.test(layer.key) ? LEATHER_TINT : null });
+    }
+    if (!images.length) return null;
+    const w = images[0].img.width;
+    const h = images[0].img.height;
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    for (const { img, tint } of images) {
+      if (!tint) {
+        ctx.drawImage(img, 0, 0, w, h);
+        continue;
+      }
+      // tint just this layer, then draw it over the others
+      const layer = document.createElement('canvas');
+      layer.width = w;
+      layer.height = h;
+      const lctx = layer.getContext('2d');
+      lctx.drawImage(img, 0, 0, w, h);
+      lctx.globalCompositeOperation = 'multiply';
+      lctx.fillStyle = tint;
+      lctx.fillRect(0, 0, w, h);
+      lctx.globalCompositeOperation = 'destination-in';
+      lctx.drawImage(img, 0, 0, w, h);
+      ctx.drawImage(layer, 0, 0);
+    }
+    return canvas.toDataURL('image/png');
   }
 
   // Finds a texture file in the highest-priority layer that has it.
@@ -3242,6 +3405,18 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     canvas.height = img.height;
     canvas.getContext('2d').putImageData(new ImageData(img.data, img.width, img.height), 0, 0);
     return canvas.toDataURL('image/png');
+  }
+
+  // Texture of a look as a data URL: merged layers for multi-layer looks.
+  async function lookTextureUrl(content, entry) {
+    if (entry.layers && entry.layers.length > 1) {
+      try {
+        return await layeredTextureUrl(content, entry);
+      } catch (e) {
+        return null;
+      }
+    }
+    return entityTextureUrl(content, entry);
   }
 
   function entityTextureUrl(content, entry) {
@@ -3958,7 +4133,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     if (cached) return cached;
     const model = entityModel(content, entry);
     if (!model) return '';
-    const url = entityTextureUrl(content, entry);
+    const url = await lookTextureUrl(content, entry);
     const image = url ? await loadImage(url).catch(() => null) : null;
     const thumb = renderThumbnail(model, image, 128);
     thumbPut(key, thumb);
@@ -3984,14 +4159,14 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   }
 
   // The texture for an entity look (shared by copies with the same look).
-  function entityTexture(content, entry, model) {
+  async function entityTexture(content, entry, model) {
     const short = entry.id.replace(/^[^:]+:/, '').replace(/[^a-z0-9_]/gi, '_');
-    const look = [entry.variant && entry.variant !== 'default' ? entry.variant : '', entry.baby ? 'baby' : ''].filter(Boolean).join('_');
+    const look = [entry.variant && entry.variant !== 'default' ? entry.variant : '', entry.baby ? 'baby' : ''].filter(Boolean).join('_').replace(/\s+/g, '_');
     const name = `ent_${short}${look ? '_' + look.replace(/[^a-z0-9_]/gi, '_') : ''}`;
     let texture = Texture.all.find((t) => t.name === name);
     let created = false;
     if (!texture) {
-      const url = entityTextureUrl(content, entry);
+      const url = await lookTextureUrl(content, entry);
       if (url) {
         texture = new Texture({ name }).fromDataURL(url);
         texture.add(false);
@@ -4071,7 +4246,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   function entityInfo(entry, model, rest) {
     return {
       entity: entry.id, key: entryKey(entry), bones: posableBones(model), rest, source: entry.source,
-      variant: entry.variant || 'default', baby: !!entry.baby,
+      variant: entry.variant || 'default', baby: !!entry.baby, choices: entry.choices || {},
     };
   }
 
@@ -4083,8 +4258,8 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     const used = Outliner.root.filter((n) => n instanceof Group && n.name.startsWith(`ent_${short}_`)).length;
     const name = `ent_${short}_${used + 1}`;
     const { origin: at, yaw } = placement();
+    const { texture } = await entityTexture(content, entry, model);
     Undo.initEdit({ outliner: true, elements: [], textures: [] });
-    const { texture } = entityTexture(content, entry, model);
     const root = new Group({ name, origin: at.slice(), rotation: [0, yaw, 0] }).init();
     const { cubes, rest } = buildEntityBones(root, model, texture, at);
     root.pose_entity = entityInfo(entry, model, rest);
@@ -4096,9 +4271,10 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
 
   // Swaps an entity copy to another look (variant, baby or adult) where it stands. Bones keep how
   // far they were turned from their rest pose, and animations stay applied.
-  function setEntityVariant(root, content, entry) {
+  async function setEntityVariant(root, content, entry) {
     const model = entityModel(content, entry);
     if (!model) throw new Error(`No model found for this variant of ${entry.id}.`);
+    const { texture } = await entityTexture(content, entry, model);
     const info = root.pose_entity || {};
     const oldRest = new Map(Object.entries(info.rest || {}).map(([k, r]) => [k.toLowerCase(), r]));
     const turned = new Map();
@@ -4117,7 +4293,6 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     for (const node of oldNodes.slice().reverse()) {
       if (node instanceof Group && node.remove) node.remove(false);
     }
-    const { texture } = entityTexture(content, entry, model);
     const { cubes, rest } = buildEntityBones(root, model, texture, root.origin.slice());
     eachDescendant(root, (node) => {
       if (!(node instanceof Group)) return;
@@ -4183,13 +4358,13 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     return /^entity(_|$)/.test(material || '') ? material : 'entity_alphatest';
   }
 
-  function prepareProxy(content, list) {
+  async function prepareProxy(content, list) {
     const models = list.map((entry) => {
       const geometry = restGeometry(content, entry.id, entry.geometryId, entry.flags);
       const model = geometry ? bedrockToBlockbench(geometry) : null;
       return { key: entryKey(entry), entry, geometry, bones: model ? posableBones(model) : [] };
     });
-    const hash = hashString('v11|' + JSON.stringify(models.map((m) => [m.key, m.entry.material, m.bones, m.geometry && m.geometry.bones.length])));
+    const hash = hashString('v12|' + JSON.stringify(models.map((m) => [m.key, m.entry.material, m.bones, m.geometry && m.geometry.bones.length])));
     const registry = proxyRegistry();
     if (registry.hash === hash) return 0;
 
@@ -4240,6 +4415,14 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     const animations = { format_version: '1.8.0', animations: {} };
     const arrays = { geos: [], skins: [], mats: [] };
     const registryModels = {};
+    // merged textures of multi-layer looks (a horse's coat + markings + armour...)
+    const looksDir = `${rp}\\textures\\entity\\pose_studio\\looks`;
+    if (!fs.existsSync(looksDir)) fs.mkdirSync(looksDir, { recursive: true });
+    for (const m of models) {
+      if (!m.entry.layers || m.entry.layers.length < 2) continue;
+      const url = await lookTextureUrl(content, m.entry);
+      if (url) fs.writeFileSync(`${rp}\\${m.entry.texturePath.split('/').join('\\')}.png`, bufferClass().from(url.split(',')[1], 'base64'));
+    }
     const geometries = [];
     // variants that only change the texture share a geometry (and its pose animation)
     const shared = new Map(); // geometry key -> { g, indices }
@@ -4441,9 +4624,9 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   }
 
   // Prepares pose:proxy for the browser's world and offers the one reload it needs.
-  function prepareForWorld(state) {
+  async function prepareForWorld(state) {
     // every variant and baby of every entity, so switching variants never needs a reload
-    const count = prepareProxy(state.content, state.list.flatMap((e) => variantEntries(state.content, e)));
+    const count = await prepareProxy(state.content, state.list.flatMap((e) => variantEntries(state.content, e)));
     if (!count) return;
     Blockbench.showMessageBox(
       {
@@ -4481,58 +4664,108 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
       Blockbench.showMessageBox({ title: 'Pose Studio', message: `${base ? base.name : root.pose_entity.entity} has no other variants.` });
       return;
     }
+    const choices = looks.choiceList || [];
+    const currentLook = looks.find((l) => entryKey(l) === root.pose_entity.key) || looks[0];
+    // the closest look to a set of choices (a baby can't wear horse armour, for instance)
+    const closest = (sel, baby) => {
+      let best = null;
+      let score = -1;
+      for (const l of looks) {
+        if (l.baby !== baby) continue;
+        const s = choices.reduce((n, c, i) => n + ((l.choices || {})[c.name] === sel[c.name] ? (i === 0 ? 100 : 10) : 0), 0);
+        if (s > score) {
+          score = s;
+          best = l;
+        }
+      }
+      return best;
+    };
+    const hasBabies = looks.some((l) => l.baby);
+    let busy = Promise.resolve();
     new Dialog({
       id: 'pose_studio_variants',
       title: `Variant: ${root.name}`,
-      width: 640,
+      width: 680,
       buttons: ['Done'],
       component: {
         data: () => ({
-          looks: looks.map((v, i) => ({ i, label: v.variant, baby: v.baby, key: entryKey(v), thumb: '' })),
-          current: root.pose_entity.key,
+          choices: choices.map((c) => ({ name: c.name, label: c.label, values: c.values })),
+          sel: Object.assign({}, ...choices.map((c) => ({ [c.name]: (currentLook.choices || {})[c.name] || 0 }))),
+          baby: !!currentLook.baby,
+          hasBabies,
+          current: entryKey(currentLook),
+          thumbs: {},
         }),
         computed: {
-          adults() {
-            return this.looks.filter((l) => !l.baby);
-          },
-          babies() {
-            return this.looks.filter((l) => l.baby);
+          // the grid: looks that differ only in the first choice (or every look when there's none)
+          grid() {
+            const first = this.choices[0];
+            return looks
+              .map((l, i) => ({ i, key: entryKey(l), label: first ? first.values[(l.choices || {})[first.name]] || l.variant : l.variant + (l.baby ? ' (baby)' : ''), look: l }))
+              .filter(({ look }) => !first || (look.baby === this.baby && this.choices.slice(1).every((c) => (look.choices || {})[c.name] === this.sel[c.name])));
           },
         },
-        async mounted() {
-          for (const look of this.looks) {
-            try {
-              look.thumb = (await makeThumbnail(state.content, looks[look.i])) || 'none';
-            } catch (e) {
-              look.thumb = 'none';
-            }
-            await sleep(0);
-          }
+        watch: {
+          grid: {
+            immediate: true,
+            handler(list) {
+              this.loadThumbs(list);
+            },
+          },
         },
         methods: {
-          pick(look) {
-            try {
-              setEntityVariant(root, state.content, looks[look.i]);
-              this.current = look.key;
-            } catch (e) {
-              showError('Pose Studio: variant', e);
+          async loadThumbs(list) {
+            for (const g of list) {
+              if (this.thumbs[g.key]) continue;
+              this.$set ? this.$set(this.thumbs, g.key, '…') : (this.thumbs[g.key] = '…');
+              let url = 'none';
+              try {
+                url = (await makeThumbnail(state.content, g.look)) || 'none';
+              } catch (e) {
+                url = 'none';
+              }
+              this.$set ? this.$set(this.thumbs, g.key, url) : (this.thumbs[g.key] = url);
+              await sleep(0);
             }
+          },
+          apply(look) {
+            if (!look) return;
+            this.current = entryKey(look);
+            for (const c of this.choices) if ((look.choices || {})[c.name] !== undefined) this.sel[c.name] = look.choices[c.name];
+            this.baby = look.baby;
+            busy = busy.then(() => setEntityVariant(root, state.content, look)).catch((e) => showError('Pose Studio: variant', e));
+            return busy;
+          },
+          pickTile(g) {
+            return this.apply(this.choices.length ? closest(Object.assign({}, this.sel, { [this.choices[0].name]: (g.look.choices || {})[this.choices[0].name] }), this.baby) : g.look);
+          },
+          changed() {
+            return this.apply(closest(this.sel, this.baby));
           },
         },
         template: `
           <div class="pose_studio_variants">
-            <template v-for="section in [['Adult', adults], ['Baby', babies]]">
-              <h3 v-if="section[1].length" style="margin: 4px 0 6px;">{{ section[0] }}</h3>
-              <div v-if="section[1].length" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 6px; margin-bottom: 10px;">
-                <div v-for="l in section[1]" :key="l.key" @click="pick(l)" :title="l.label + (l.baby ? ' (baby)' : '')"
-                     :style="{ cursor: 'pointer', border: '1px solid var(--color-border)', borderRadius: '6px', padding: '4px', textAlign: 'center',
-                               background: l.key === current ? 'var(--color-selected)' : '' }">
-                  <img v-if="l.thumb && l.thumb !== 'none'" :src="l.thumb" style="width: 72px; height: 72px; image-rendering: pixelated;">
-                  <div v-else style="width: 72px; height: 72px; margin: auto; display: flex; align-items: center; justify-content: center; opacity: 0.4;">{{ l.thumb === 'none' ? '' : '…' }}</div>
-                  <div style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-transform: capitalize;">{{ l.label }}</div>
-                </div>
+            <div v-if="choices.length > 1 || hasBabies" style="display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; margin-bottom: 10px;">
+              <label v-for="c in choices.slice(1)" :key="c.name" style="display: flex; gap: 6px; align-items: center;">
+                <span>{{ c.label }}</span>
+                <select v-model.number="sel[c.name]" @change="changed()">
+                  <option v-for="(v, i) in c.values" :value="i">{{ v }}</option>
+                </select>
+              </label>
+              <label v-if="hasBabies" style="display: flex; gap: 6px; align-items: center;">
+                <input type="checkbox" v-model="baby" @change="changed()"> Baby
+              </label>
+            </div>
+            <h3 v-if="choices.length" style="margin: 0 0 6px;">{{ choices[0].label }}</h3>
+            <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 6px; max-height: 420px; overflow-y: auto;">
+              <div v-for="g in grid" :key="g.key" @click="pickTile(g)" :title="g.look.variant + (g.look.baby ? ' (baby)' : '')"
+                   :style="{ cursor: 'pointer', border: '1px solid var(--color-border)', borderRadius: '6px', padding: '4px', textAlign: 'center',
+                             background: g.key === current ? 'var(--color-selected)' : '' }">
+                <img v-if="thumbs[g.key] && thumbs[g.key] !== 'none' && thumbs[g.key] !== '…'" :src="thumbs[g.key]" style="width: 72px; height: 72px; image-rendering: pixelated;">
+                <div v-else style="width: 72px; height: 72px; margin: auto; display: flex; align-items: center; justify-content: center; opacity: 0.4;">{{ thumbs[g.key] === 'none' ? '' : '…' }}</div>
+                <div style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-transform: capitalize;">{{ g.label }}</div>
               </div>
-            </template>
+            </div>
           </div>`,
       },
     }).show();
@@ -4600,7 +4833,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
               this.source = 'all';
               this.ready = true;
               try {
-                prepareForWorld(browserState);
+                await prepareForWorld(browserState);
               } catch (e) {
                 showError('Pose Studio: preparing entities for Minecraft', e);
               }
@@ -5098,6 +5331,17 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.29.0",
+      "date": "2026-09-30",
+      "changes": [
+        "Horse armour: Variant… on a horse has Markings and Armour dropdowns (leather, iron, gold, diamond, copper, netherite) alongside the coat.",
+        "Villager variants: Variant… on a villager or zombie villager picks the biome (plains, desert, jungle, savanna, snow, swamp, taiga) and the profession, with the level badge as in game. Llamas get their decor too.",
+        "The Variant window now has a grid for the main choice plus a dropdown for each other choice and a Baby tickbox.",
+        "The camera view FOV slider now goes from 30° to 110°.",
+        "Minecraft needs one pack reload after this update (open Add Entity… and accept the prompt) to load the new looks."
+      ]
+    },
     {
       "version": "0.28.0",
       "date": "2026-09-30",

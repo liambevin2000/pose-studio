@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.29.0 (2026-09-30)
+
+- Horse armour: Variant… on a horse has Markings and Armour dropdowns (leather, iron, gold, diamond, copper, netherite) alongside the coat.
+- Villager variants: Variant… on a villager or zombie villager picks the biome (plains, desert, jungle, savanna, snow, swamp, taiga) and the profession, with the level badge as in game. Llamas get their decor too.
+- The Variant window now has a grid for the main choice plus a dropdown for each other choice and a Baby tickbox.
+- The camera view FOV slider now goes from 30° to 110°.
+- Minecraft needs one pack reload after this update (open Add Entity… and accept the prompt) to load the new looks.
+
 ## 0.28.0 (2026-09-30)
 
 - New: Variant… (with an entity selected) shows every look of that mob with thumbnails: biome and colour variants and baby versions. Click one to swap it where it stands, keeping its pose.
