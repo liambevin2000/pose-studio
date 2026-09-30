@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.29.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.30.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -1203,6 +1203,8 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
       resync();
       if (playerHidden) setPlayerHidden(true);
       autoAnchor();
+      // match the open scene with the world (after the first updates have gone out)
+      setTimeout(() => checkWorldScene().catch(() => {}), 1500);
     };
     if (!tickTimer) tickTimer = setInterval(tick, TICK_MS);
     const command = `/connect 127.0.0.1:${PORT}`;
@@ -1322,6 +1324,7 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
     if (tickTimer) clearInterval(tickTimer);
     tickTimer = null;
     link.onConnect = null;
+    connectedWorld = null;
     link.stop();
     resync();
     if (cameraSync && cameraToggle) cameraToggle.set(false);
@@ -1474,7 +1477,11 @@ Write-Output $Out
 
   // Runs `/scriptevent <eventId>` and returns every item the script publishes for it.
   async function runGameQuery(eventId, payload, label) {
-    if (transferRunning) throw new Error('Another Pose Studio transfer is still running.');
+    // one transfer at a time: wait for the one in progress (e.g. the scene check after connecting)
+    for (let waited = 0; transferRunning; waited += 100) {
+      if (waited > 60000) throw new Error('Another Pose Studio transfer is still running.');
+      await sleep(100);
+    }
     transferRunning = true;
     const op = Math.random().toString(36).slice(2, 8);
     try {
@@ -5324,6 +5331,219 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     if (!startLink()) setTimeout(() => linkToggle && linkToggle.set(false), 0);
   }
 
+  // ---- Scenes linked to worlds ------------------------------------------------------------------
+  // A scene (.bbmodel) remembers which Minecraft world it belongs to (Project.pose_world), and the
+  // world remembers its scene file (a dynamic property the behavior pack keeps). When Minecraft
+  // connects, Pose Studio checks the pair: it opens the world's scene, or offers to link the open
+  // one. Scene ▸ Save Scene saves with one click (Documents\Pose Studio\Scenes by default).
+  let connectedWorld = null; // { id, path, name } of the world Minecraft has open
+  let worldProperty = null;
+
+  const hexToText = (hex) => decodeURIComponent(String(hex).replace(/[^0-9a-f]/gi, '').replace(/../g, (h) => String.fromCharCode(parseInt(h, 16))));
+  // paths are kept with forward slashes in the world (plain in commands) and compared loosely
+  const forwardSlashes = (p) => String(p || '').replace(/\\/g, '/');
+  const samePath = (a, b) => !!a && !!b && forwardSlashes(a).toLowerCase() === forwardSlashes(b).toLowerCase();
+  const windowsPath = (p) => String(p || '').replace(/\//g, '\\');
+
+  // The world Minecraft has open: its Pose Studio id and linked scene.
+  async function readWorldScene() {
+    const items = await runGameQuery('pose:scene', {}, 'Checking the world');
+    const idItem = items.find((i) => i.startsWith('W|'));
+    if (!idItem) return null;
+    const hex = items
+      .filter((i) => i.startsWith('S|'))
+      .map((i) => i.split('|'))
+      .sort((a, b) => Number(a[1]) - Number(b[1]))
+      .map((p) => p[2])
+      .join('');
+    let scene = {};
+    try {
+      scene = hex ? JSON.parse(hexToText(hex)) : {};
+    } catch (e) {
+      scene = {};
+    }
+    return { id: idItem.slice(2), path: windowsPath(scene.path), name: scene.name || '' };
+  }
+
+  // The world's name, from the most recently played world folder (the one that's open).
+  function currentWorldName() {
+    try {
+      const worlds = listWorlds(bedrockFs(), bedrockRoot());
+      return (worlds[0] && worlds[0].name) || 'Minecraft world';
+    } catch (e) {
+      return 'Minecraft world';
+    }
+  }
+
+  function tellWorldScene(path, name) {
+    if (!link.connected) return;
+    send(`scriptevent pose:setscene ${JSON.stringify({ p: forwardSlashes(path), n: name || '' })}`);
+    if (connectedWorld) Object.assign(connectedWorld, { path: path || '', name: name || connectedWorld.name });
+  }
+
+  const projectPath = () => (typeof Project !== 'undefined' && Project && (Project.save_path || '')) || '';
+  const fileName = (path) => String(path).split(/[\\/]/).pop();
+  const dirName = (path) => String(path).replace(/[\\/][^\\/]*$/, '');
+
+  function fileExists(path) {
+    try {
+      const fs = requireNativeModule('fs', { scope: dirName(path), message: 'Pose Studio checks for the scene file linked to this world.' });
+      return !!fs && fs.existsSync(path);
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function openSceneFile(path) {
+    const open = typeof ModelProject !== 'undefined' && ModelProject.all.find((p) => samePath(p.save_path, path));
+    if (open) {
+      open.select();
+      return;
+    }
+    Blockbench.read([path], { readtype: 'text', errorbox: true }, (files) => {
+      if (files && files[0]) loadModelFile(files[0]);
+    });
+  }
+
+  function linkProjectToWorld(world, name) {
+    if (typeof Project === 'undefined' || !Project) return;
+    Project.pose_world = { id: world.id, name };
+  }
+
+  // Scene ▸ Save Scene: saves the scene (to Documents\Pose Studio\Scenes\<world>.bbmodel the first
+  // time) and links it with the world Minecraft has open.
+  async function saveScene() {
+    if (typeof Project === 'undefined' || !Project) {
+      Blockbench.showQuickMessage('Nothing to save yet', 2000);
+      return;
+    }
+    const world = connectedWorld;
+    const worldName = (world && world.name) || (Project.pose_world && Project.pose_world.name) || currentWorldName();
+    if (world) linkProjectToWorld(world, worldName);
+    let path = projectPath();
+    if (!path) {
+      const dir = `${SystemInfo.home_directory}\\Documents\\Pose Studio\\Scenes`;
+      const fs = requireNativeModule('fs', { scope: `${SystemInfo.home_directory}\\Documents\\Pose Studio`, message: 'Pose Studio saves scenes in Documents\\Pose Studio\\Scenes.' });
+      if (!fs) {
+        Blockbench.showMessageBox({ title: 'Pose Studio', message: 'Permission to save in Documents\\Pose Studio was denied. Use File > Save Project instead.' });
+        return;
+      }
+      fs.mkdirSync(dir, { recursive: true });
+      const base = String(worldName).replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').trim() || 'Scene';
+      path = `${dir}\\${base}.bbmodel`;
+      for (let n = 2; fs.existsSync(path); n++) path = `${dir}\\${base} ${n}.bbmodel`;
+      Project.save_path = path;
+      Project.name = fileName(path).replace(/\.bbmodel$/i, '');
+      Codecs.project.write(Codecs.project.compile(), path);
+    } else if (BarItems.save_project) {
+      BarItems.save_project.trigger();
+    } else {
+      Codecs.project.write(Codecs.project.compile(), path);
+    }
+    if (world) tellWorldScene(path, worldName);
+    Blockbench.showQuickMessage(world ? `Saved ${fileName(path)}, linked to ${worldName}` : `Saved ${fileName(path)} (connect Minecraft to link it to a world)`, 3000);
+  }
+
+  // Scene ▸ Open This World's Scene
+  async function openWorldScene() {
+    if (!requireConnection()) return;
+    const world = connectedWorld || (await readWorldScene().catch(() => null));
+    if (!world || !world.path) {
+      Blockbench.showMessageBox({ title: 'Pose Studio', message: 'This world has no scene linked yet. Build one and use Scene ▸ Save Scene.' });
+      return;
+    }
+    if (!fileExists(world.path)) {
+      Blockbench.showMessageBox({ title: 'Pose Studio', message: `This world's scene wasn't found:\n${world.path}` });
+      return;
+    }
+    openSceneFile(world.path);
+  }
+
+  // Scene ▸ Unlink Scene from World
+  function unlinkScene() {
+    if (typeof Project !== 'undefined' && Project) Project.pose_world = null;
+    if (link.connected) tellWorldScene('', '');
+    Blockbench.showQuickMessage('Scene and world unlinked', 2000);
+  }
+
+  // Runs when Minecraft connects: matches the open scene with the world.
+  async function checkWorldScene() {
+    let world;
+    try {
+      world = await readWorldScene();
+    } catch (e) {
+      return; // an older behavior pack: no scene links
+    }
+    if (!world) return;
+    const worldName = world.name || currentWorldName();
+    connectedWorld = Object.assign(world, { name: worldName });
+    const project = typeof Project !== 'undefined' && Project ? Project : null;
+    const linked = project && project.pose_world;
+    const hasContent = project && (mannequinRoots().length || entityRoots().length || cameraRoots().length);
+    // the open scene belongs to this world: keep the world's link up to date
+    if (linked && linked.id === world.id) {
+      if (projectPath() && !samePath(projectPath(), world.path)) tellWorldScene(projectPath(), worldName);
+      Blockbench.showQuickMessage(`Scene linked to ${worldName}`, 2500);
+      return;
+    }
+    // the world has a scene: open it (or switch to its tab)
+    if (world.path) {
+      const open = typeof ModelProject !== 'undefined' && ModelProject.all.find((p) => samePath(p.save_path, world.path));
+      if (open) {
+        open.select();
+        Blockbench.showQuickMessage(`Switched to ${fileName(world.path)}, the scene for ${worldName}`, 3000);
+        return;
+      }
+      if (!fileExists(world.path)) {
+        Blockbench.showMessageBox({ title: 'Pose Studio', message: `${worldName} is linked to a scene that wasn't found:\n${world.path}\n\nSave the open scene with Scene ▸ Save Scene to link it instead.` });
+        return;
+      }
+      Blockbench.showMessageBox(
+        {
+          title: 'Pose Studio',
+          message: `${worldName} has a Pose Studio scene:\n${fileName(world.path)}\n\nOpen it?`,
+          buttons: ['Open Scene', 'Not Now'],
+          confirm: 0,
+          cancel: 1,
+        },
+        (button) => {
+          if (button === 0) openSceneFile(world.path);
+        }
+      );
+      return;
+    }
+    // the world has no scene yet
+    if (linked && linked.id !== world.id) {
+      Blockbench.showMessageBox(
+        {
+          title: 'Pose Studio',
+          message: `The open scene belongs to ${linked.name || 'another world'}, not ${worldName}.\n\nStart a new scene for ${worldName}?`,
+          buttons: ['New Scene', 'Keep This One'],
+          confirm: 0,
+          cancel: 1,
+        },
+        (button) => {
+          if (button === 0) newProject(Formats.free);
+        }
+      );
+      return;
+    }
+    if (hasContent) {
+      Blockbench.showMessageBox(
+        {
+          title: 'Pose Studio',
+          message: `Link this scene to ${worldName}?\n\nPose Studio saves it, and offers to open it whenever you connect in this world.`,
+          buttons: ['Link and Save', 'Not Now'],
+          confirm: 0,
+          cancel: 1,
+        },
+        (button) => {
+          if (button === 0) saveScene();
+        }
+      );
+    }
+  }
+
   // ---- Updates and changelog -----------------------------------------------------------------
   // Shared through a GitHub repository: people load blockbench/pose_studio.js from its raw URL
   // (File > Plugins > Load Plugin from URL), and Blockbench downloads it again on every start.
@@ -5331,6 +5551,16 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.30.0",
+      "date": "2026-09-30",
+      "changes": [
+        "Scenes linked to worlds: Scene ▸ Save Scene saves with one click (to DocumentsPose StudioScenes the first time) and links the scene with the Minecraft world you have open.",
+        "When you connect, Pose Studio offers to open that world's scene (or switches to its tab), warns if the open scene belongs to another world, and offers to link an unlinked scene.",
+        "Scene ▸ Open This World's Scene and Unlink Scene from World.",
+        "Needs the updated Minecraft behavior pack (Check for Updates)."
+      ]
+    },
     {
       "version": "0.29.0",
       "date": "2026-09-30",
@@ -5659,6 +5889,7 @@ ${PLUGIN_URL}`,
 
     onload() {
       fovProperty = new Property(Group, 'number', 'pose_fov', { default: 0 });
+      if (typeof ModelProject !== 'undefined') worldProperty = new Property(ModelProject, 'object', 'pose_world', { default: null, exposed: false });
       skinProperties = [
         new Property(Group, 'object', 'pose_entity'),
         new Property(Group, 'object', 'pose_equipment'),
@@ -5675,6 +5906,15 @@ ${PLUGIN_URL}`,
           description: 'Listens for Minecraft on 127.0.0.1:19131 (run /connect 127.0.0.1:19131 in game).',
         })),
         // One slot in the menu: Add Mannequin with no mannequin selected, Skin & Equipment… with one
+        savescene: new Action('pose_studio_save_scene', {
+          name: 'Save Scene', icon: 'save', click: saveScene,
+          description: 'Saves the scene (to Documents\\Pose Studio\\Scenes the first time) and links it with the Minecraft world you have open.',
+        }),
+        openscene: new Action('pose_studio_open_scene', {
+          name: "Open This World's Scene", icon: 'folder_open', click: openWorldScene,
+          description: 'Opens the scene linked to the Minecraft world you have open.',
+        }),
+        unlinkscene: new Action('pose_studio_unlink_scene', { name: 'Unlink Scene from World', icon: 'link_off', click: unlinkScene }),
         add: new Action('pose_studio_add', {
           name: 'Add Mannequin', icon: 'accessibility_new', click: addMannequin,
           condition: () => !selectionIs('mannequin'),
@@ -5770,6 +6010,7 @@ ${PLUGIN_URL}`,
 
       menu = new BarMenu('pose_studio', [
         a.link,
+        { name: 'Scene', id: 'pose_studio_scene_menu', icon: 'link', children: [a.savescene, a.openscene, a.unlinkscene] },
         '_',
         a.add,
         a.outfit,
@@ -5824,6 +6065,8 @@ ${PLUGIN_URL}`,
       if (entityPanel) entityPanel.delete();
       entityPanel = null;
       browserVm = null;
+      if (worldProperty) worldProperty.delete();
+      worldProperty = null;
       if (fovProperty) fovProperty.delete();
       fovProperty = null;
     },

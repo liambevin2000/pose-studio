@@ -400,6 +400,40 @@ function packBlocks(blocks) {
   return items;
 }
 
+// ---- Scene link ----
+// Each world gets a permanent Pose Studio id, and remembers which Blockbench scene file belongs to
+// it. `pose:scene` reports both (`W|<id>` and the scene as hex text in `S|<n>|<chunk>` items);
+// `pose:setscene {"p":"C:/…/scene.bbmodel","n":"World name"}` stores the link (an empty p unlinks).
+const WORLD_ID_PROPERTY = "pose:world_id";
+const SCENE_PROPERTY = "pose:scene";
+
+function worldId() {
+  let id = world.getDynamicProperty(WORLD_ID_PROPERTY);
+  if (typeof id !== "string" || !id) {
+    id = Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+    world.setDynamicProperty(WORLD_ID_PROPERTY, id);
+  }
+  return id;
+}
+
+// text <-> hex (of its URI encoding, so every character survives)
+const toHex = (text) => Array.from(encodeURIComponent(text), (ch) => ch.charCodeAt(0).toString(16).padStart(2, "0")).join("");
+
+function reportScene(data) {
+  beginResult(data.op);
+  const scene = world.getDynamicProperty(SCENE_PROPERTY);
+  const hex = typeof scene === "string" && scene ? toHex(scene) : "";
+  const items = [`W|${worldId()}`];
+  const size = MAX_ITEM_LENGTH - 10;
+  for (let i = 0; i * size < hex.length; i++) items.push(`S|${i}|${hex.slice(i * size, (i + 1) * size)}`);
+  finishResult(items);
+}
+
+function storeScene(data) {
+  const path = String(data.p || "");
+  world.setDynamicProperty(SCENE_PROPERTY, path ? JSON.stringify({ path, name: String(data.n || "") }) : undefined);
+}
+
 // `pose:grabcam` — the player's eye position (relative to the anchor) and view rotation.
 function grabCamera(player, data) {
   beginResult(data.op);
@@ -553,6 +587,10 @@ function handle(ev) {
       return setPlayerHidden(player, !!data.hide);
     case "pose:page":
       return publishPage(Number(data.n) || 0, Number(data.k) || 1);
+    case "pose:scene":
+      return reportScene(data);
+    case "pose:setscene":
+      return storeScene(data);
     case "pose:grabcam":
       return grabCamera(player, data);
     case "pose:scan":
@@ -580,7 +618,7 @@ system.afterEvents.scriptEventReceive.subscribe(
     try {
       handle(ev);
     } catch (e) {
-      if (ev.id === "pose:scan" || ev.id === "pose:grabcam") failResult(e);
+      if (ev.id === "pose:scan" || ev.id === "pose:grabcam" || ev.id === "pose:scene") failResult(e);
       const msg = `${ev.id} failed: ${e}`;
       console.warn(`[Pose Studio] ${msg}`);
       if (!reportedErrors.has(msg) && ev.sourceEntity?.typeId === "minecraft:player") {

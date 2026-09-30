@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.30.0 (2026-09-30)
+
+- Scenes linked to worlds: Scene ▸ Save Scene saves with one click (to DocumentsPose StudioScenes the first time) and links the scene with the Minecraft world you have open.
+- When you connect, Pose Studio offers to open that world's scene (or switches to its tab), warns if the open scene belongs to another world, and offers to link an unlinked scene.
+- Scene ▸ Open This World's Scene and Unlink Scene from World.
+- Needs the updated Minecraft behavior pack (Check for Updates).
+
 ## 0.29.0 (2026-09-30)
 
 - Horse armour: Variant… on a horse has Markings and Armour dropdowns (leather, iron, gold, diamond, copper, netherite) alongside the coat.

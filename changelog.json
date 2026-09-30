@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.30.0",
+    "date": "2026-09-30",
+    "changes": [
+      "Scenes linked to worlds: Scene ▸ Save Scene saves with one click (to DocumentsPose StudioScenes the first time) and links the scene with the Minecraft world you have open.",
+      "When you connect, Pose Studio offers to open that world's scene (or switches to its tab), warns if the open scene belongs to another world, and offers to link an unlinked scene.",
+      "Scene ▸ Open This World's Scene and Unlink Scene from World.",
+      "Needs the updated Minecraft behavior pack (Check for Updates)."
+    ]
+  },
+  {
     "version": "0.29.0",
     "date": "2026-09-30",
     "changes": [
