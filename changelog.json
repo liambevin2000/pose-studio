@@ -1,5 +1,12 @@
 [
   {
+    "version": "0.33.0",
+    "date": "2026-09-30",
+    "changes": [
+      "Switching between far-apart locations now works reliably: Minecraft only draws terrain and entities around the player, so switching to a location more than about 100 blocks away takes you there automatically. The area loads, then its players and entities are placed. Turn off Go to Locations in the plugin settings to be asked instead."
+    ]
+  },
+  {
     "version": "0.32.3",
     "date": "2026-09-30",
     "changes": [

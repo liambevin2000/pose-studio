@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.32.3'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.33.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -5826,6 +5826,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   // Beyond this, a location is probably not loaded around the player (Minecraft only lets scripts
   // place entities in loaded chunks), so Pose Studio offers to go there.
   const FAR_AWAY = 96;
+  let followLocations = true; // setting: go to a location when switching to it
 
   // Teleports the player to a location (a little above its centre, in its dimension).
   async function goToLocation(anchor) {
@@ -5847,11 +5848,19 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     const away = distanceTo(linked.anchor, fresh.player);
     if (sameDim && away <= FAR_AWAY) return;
     const name = linked.locName || 'This location';
+    // Minecraft only draws the world (terrain and entities) around the player, so the player goes
+    // with you. You're hidden and the camera is Pose Studio's anyway.
+    if (followLocations) {
+      await goToLocation(linked.anchor);
+      Blockbench.showQuickMessage(`Pose Studio: took you to ${name} (${sameDim ? `${Math.round(away)} blocks` : 'another dimension'}) so Minecraft loads it`, 3500);
+      await sleep(2000); // let the area load before anything reads it
+      return true;
+    }
     Blockbench.showMessageBox(
       {
         title: 'Pose Studio',
         message: sameDim
-          ? `${name} is ${Math.round(away)} blocks away.\n\nTeleport there to see it?`
+          ? `${name} is ${Math.round(away)} blocks away. Minecraft only shows the world around you.\n\nTeleport there to see it?`
           : `${name} is in another dimension.\n\nTeleport there?`,
         buttons: ['Teleport There', 'Stay Here'],
         confirm: 0,
@@ -5861,6 +5870,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
         if (button === 0) goToLocation(linked.anchor);
       }
     );
+    return false;
   }
 
   // Switching to (or opening) a location of this world puts it in place.
@@ -6357,6 +6367,13 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.33.0",
+      "date": "2026-09-30",
+      "changes": [
+        "Switching between far-apart locations now works reliably: Minecraft only draws terrain and entities around the player, so switching to a location more than about 100 blocks away takes you there automatically. The area loads, then its players and entities are placed. Turn off Go to Locations in the plugin settings to be asked instead."
+      ]
+    },
     {
       "version": "0.32.3",
       "date": "2026-09-30",
@@ -6889,6 +6906,13 @@ ${PLUGIN_URL}`,
             else unfreezeWorldClock().catch(() => {});
           },
         }),
+        setting('pose_studio_follow_locations', {
+          name: 'Pose Studio: Go to Locations', type: 'toggle', value: true,
+          description: 'When you switch to a location far from where you stand, teleport there (Minecraft only shows the world around the player). Off: ask first.',
+          onChange: (value) => {
+            followLocations = value;
+          },
+        }),
         setting('pose_studio_check_updates', {
           name: 'Pose Studio: Check for Updates', type: 'click', icon: 'update', click: () => checkForUpdates(true),
           description: 'Updates this plugin and installs or updates the Pose Studio Minecraft packs.',
@@ -6900,6 +6924,7 @@ ${PLUGIN_URL}`,
       ];
       entityHeldItems = !!pluginSettings[0].value;
       freezeEnabled = pluginSettings[1].value !== false;
+      followLocations = pluginSettings[2].value !== false;
       // The plugin page's Changelog tab shows this; Blockbench otherwise looks for it in its plugin store.
       const self = typeof Plugins !== 'undefined' && Plugins.registered && Plugins.registered.pose_studio;
       if (self) {

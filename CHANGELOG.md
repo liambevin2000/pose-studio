@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.33.0 (2026-09-30)
+
+- Switching between far-apart locations now works reliably: Minecraft only draws terrain and entities around the player, so switching to a location more than about 100 blocks away takes you there automatically. The area loads, then its players and entities are placed. Turn off Go to Locations in the plugin settings to be asked instead.
+
 ## 0.32.3 (2026-09-30)
 
 - Locations now keep their area loaded with a ticking area, so their players and entities appear even when you are far away or outside your simulation distance. Minecraft only lets scripts place entities in ticking chunks, which caused players to go missing.
