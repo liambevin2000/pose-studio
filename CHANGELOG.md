@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.23.0 (2026-09-30)
+
+- Rotating two or more selected mannequins, entities and cameras now turns them around their shared centre as one piece, instead of each spinning in place. One undo reverts the whole turn.
+
 ## 0.22.0 (2026-09-30)
 
 - Add Camera now opens the camera view on the new camera and makes the Minecraft camera follow it.

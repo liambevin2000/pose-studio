@@ -1,5 +1,12 @@
 [
   {
+    "version": "0.23.0",
+    "date": "2026-09-30",
+    "changes": [
+      "Rotating two or more selected mannequins, entities and cameras now turns them around their shared centre as one piece, instead of each spinning in place. One undo reverts the whole turn."
+    ]
+  },
+  {
     "version": "0.22.0",
     "date": "2026-09-30",
     "changes": [

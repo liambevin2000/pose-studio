@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.22.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.23.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -313,6 +313,133 @@
   function cameraForward(group) {
     const r = group.rotation;
     return new THREE.Vector3(0, 0, -1).applyEuler(new THREE.Euler(r[0] * DEG, r[1] * DEG, r[2] * DEG, eulerOrder()));
+  }
+
+  // ---- Rotating several things together --------------------------------------------------------
+  // Blockbench turns each selected group around its own pivot. With two or more mannequins,
+  // entities or cameras selected, Pose Studio also swings them around their shared centre, so the
+  // selection turns as one piece (like rotating a group). The moves join Blockbench's own undo step.
+  const POSE_ROOT_PREFIX = /^(mq_|ent_|cam_)/i;
+  let groupSpin = null; // { key, rotations: Map(uuid -> [x, y, z]), undoSave }
+  let groupSpinTimer = null;
+  const onRenderFrame = () => {
+    try {
+      checkGroupSpin();
+    } catch (e) {
+      console.warn('[Pose Studio] group rotation', e);
+    }
+  };
+  function startGroupSpin() {
+    // every frame where Blockbench offers it, so the swing keeps up with the gizmo
+    if (typeof Blockbench !== 'undefined' && Blockbench.on && Blockbench.removeListener) Blockbench.on('render_frame', onRenderFrame);
+    else groupSpinTimer = setInterval(onRenderFrame, 30);
+  }
+  function stopGroupSpin() {
+    if (groupSpinTimer) clearInterval(groupSpinTimer);
+    else if (typeof Blockbench !== 'undefined' && Blockbench.removeListener) Blockbench.removeListener('render_frame', onRenderFrame);
+    groupSpinTimer = null;
+    groupSpin = null;
+  }
+
+  function selectedPoseRoots() {
+    if (typeof Group === 'undefined' || typeof Project === 'undefined' || !Project) return [];
+    const selected = Group.multi_selected || (Group.all || []).filter((g) => g.selected);
+    return selected.filter((g) => g instanceof Group && g.parent === 'root' && POSE_ROOT_PREFIX.test(g.name));
+  }
+
+  const eulerQuaternion = (r) => new THREE.Quaternion().setFromEuler(new THREE.Euler(r[0] * DEG, r[1] * DEG, r[2] * DEG, eulerOrder()));
+
+  function eachDescendant(group, cb) {
+    for (const child of group.children || []) {
+      cb(child);
+      if (child instanceof Group) eachDescendant(child, cb);
+    }
+  }
+
+  // Moves a group and everything in it (Blockbench keeps absolute coordinates on every node).
+  function translateTree(group, o) {
+    const add = (v) => {
+      if (Array.isArray(v)) for (let i = 0; i < 3; i++) v[i] += o[i];
+    };
+    add(group.origin);
+    eachDescendant(group, (node) => {
+      if (node instanceof Group) add(node.origin);
+      else {
+        add(node.from);
+        add(node.to);
+        add(node.origin);
+        add(node.position);
+      }
+    });
+  }
+
+  // Adds the moved nodes to the undo step Blockbench opened for the rotation, before they move,
+  // so one undo puts everything back.
+  function joinUndo(roots) {
+    const save = typeof Undo !== 'undefined' && Undo.current_save;
+    if (!save || !save.aspects) return;
+    const aspects = save.aspects;
+    // copies: Blockbench may have passed its live selection arrays
+    aspects.groups = (aspects.groups || []).slice();
+    aspects.elements = (aspects.elements || []).slice();
+    save.groups = save.groups || [];
+    save.elements = save.elements || {};
+    for (const root of roots) {
+      for (const node of [root].concat(collectDescendants(root))) {
+        if (node instanceof Group) {
+          if (!aspects.groups.includes(node)) {
+            save.groups.push(node.getChildlessCopy(true));
+            aspects.groups.push(node);
+          }
+        } else if (!save.elements[node.uuid]) {
+          save.elements[node.uuid] = node.getUndoCopy(aspects);
+          aspects.elements.push(node);
+        }
+      }
+    }
+  }
+  function collectDescendants(group) {
+    const out = [];
+    eachDescendant(group, (node) => out.push(node));
+    return out;
+  }
+
+  function checkGroupSpin() {
+    const roots = selectedPoseRoots();
+    if (roots.length < 2) {
+      groupSpin = null;
+      return;
+    }
+    const key = roots.map((g) => g.uuid).sort().join('|');
+    const save = typeof Undo !== 'undefined' ? Undo.current_save : null;
+    if (!groupSpin || groupSpin.key !== key) {
+      groupSpin = { key, rotations: new Map(roots.map((g) => [g.uuid, g.rotation.slice()])), undoSave: null };
+      return;
+    }
+    const changed = roots.find((g) => g.rotation.some((v, i) => Math.abs(v - groupSpin.rotations.get(g.uuid)[i]) > 1e-6));
+    if (!changed) return;
+    // Only while Blockbench is recording a rotation (the gizmo or a slider): undo, redo and
+    // Pose Studio's own changes just update the snapshot.
+    if (!save) {
+      for (const g of roots) groupSpin.rotations.set(g.uuid, g.rotation.slice());
+      return;
+    }
+    // the turn since last check, taken from the group that moved (the gizmo turns them alike)
+    const delta = eulerQuaternion(changed.rotation).multiply(eulerQuaternion(groupSpin.rotations.get(changed.uuid)).invert());
+    if (groupSpin.undoSave !== save) {
+      joinUndo(roots);
+      groupSpin.undoSave = save;
+    }
+    const centre = new THREE.Vector3();
+    for (const g of roots) centre.add(new THREE.Vector3().fromArray(g.origin));
+    centre.divideScalar(roots.length);
+    for (const g of roots) {
+      const at = new THREE.Vector3().fromArray(g.origin);
+      const to = at.clone().sub(centre).applyQuaternion(delta).add(centre);
+      if (to.distanceToSquared(at) > 1e-10) translateTree(g, to.sub(at).toArray());
+      groupSpin.rotations.set(g.uuid, g.rotation.slice());
+    }
+    if (typeof Canvas !== 'undefined') Canvas.updateAll();
   }
 
   // Rotation (degrees, format Euler order) that points a camera along `dir` with no roll.
@@ -3935,6 +4062,13 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   // <changelog>
   const CHANGELOG = [
     {
+      "version": "0.23.0",
+      "date": "2026-09-30",
+      "changes": [
+        "Rotating two or more selected mannequins, entities and cameras now turns them around their shared centre as one piece, instead of each spinning in place. One undo reverts the whole turn."
+      ]
+    },
+    {
       "version": "0.22.0",
       "date": "2026-09-30",
       "changes": [
@@ -4193,6 +4327,7 @@ ${PLUGIN_URL}`,
         new Property(Group, 'boolean', 'pose_slim', { default: false }),
       ];
       pickTimer = setInterval(disableWorldPicking, 1000);
+      startGroupSpin();
 
       const a = {
         link: (linkToggle = new Toggle('pose_studio_link', {
@@ -4309,6 +4444,7 @@ ${PLUGIN_URL}`,
     },
 
     onunload() {
+      stopGroupSpin();
       if (startupTimer) clearTimeout(startupTimer);
       startupTimer = null;
       if (tickTimer) clearInterval(tickTimer);
