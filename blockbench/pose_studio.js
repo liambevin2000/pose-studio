@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.24.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.25.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -643,7 +643,7 @@
   }
 
   // ---- Camera view navigation ----------------------------------------------------------------
-  // Three drag buttons in the camera view's corner, like Cinema 4D's: the hand moves the camera
+  // Three drag buttons down the camera view's left side, like Cinema 4D's: the hand moves the camera
   // sideways and up/down, the arrows move it forward/back, the circle orbits it around what it's
   // looking at (Shift: turns it on the spot). Each drag is one undo step.
   const NAV_BUTTONS = [
@@ -659,7 +659,7 @@
     const bar = document.createElement('div');
     bar.className = 'pose_studio_pov_nav';
     Object.assign(bar.style, {
-      position: 'absolute', top: '6px', right: '8px', zIndex: 6, display: 'flex', gap: '2px', padding: '2px',
+      position: 'absolute', top: '36px', left: '8px', zIndex: 6, display: 'flex', flexDirection: 'column', gap: '2px', padding: '2px',
       borderRadius: '6px', background: 'rgba(0, 0, 0, 0.55)',
     });
     for (const b of NAV_BUTTONS) {
@@ -1467,10 +1467,36 @@ Write-Output $Out
       const worldDir = [-Math.sin(w) * Math.cos(p), -Math.sin(p), Math.cos(w) * Math.cos(p)];
       const dir = new THREE.Vector3(-worldDir[0], worldDir[1], -worldDir[2]);
       const cam = createCamera(toModel([x, y, z]), dir);
-      lookThroughCamera(cam);
+      // the same field of view as Minecraft's own camera (only the camera view changes, not the
+      // viewport you work in)
+      const fov = readGameFov();
+      if (fov) cam.pose_fov = fov;
       useNewCamera(cam);
     } catch (e) {
       showError('Pose Studio: grab camera failed', e);
+    }
+  }
+
+  // Minecraft's Field of View setting (options.txt of the most recently used Minecraft account on
+  // this PC), or null when it can't be read.
+  function readGameFov() {
+    try {
+      const fs = bedrockFs();
+      const users = `${bedrockRoot()}\\Users`;
+      let best = null;
+      for (const id of fs.readdirSync(users)) {
+        if (id.toLowerCase() === 'shared') continue;
+        const file = `${users}\\${id}\\games\\com.mojang\\minecraftpe\\options.txt`;
+        if (!fs.existsSync(file)) continue;
+        const time = fs.statSync(file).mtimeMs;
+        if (!best || time > best.time) best = { file, time };
+      }
+      if (!best) return null;
+      const m = String(fs.readFileSync(best.file, 'utf8')).match(/^gfx_field_of_view:([\d.]+)/m);
+      const fov = m ? Number(m[1]) : NaN;
+      return fov >= 10 && fov <= 150 ? fov : null;
+    } catch (e) {
+      return null;
     }
   }
 
@@ -4265,6 +4291,15 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.25.0",
+      "date": "2026-09-30",
+      "changes": [
+        "Add Camera ▸ From Minecraft View no longer moves the viewport you work in; only the camera view shows the new camera.",
+        "Cameras grabbed from Minecraft get the same field of view as your Minecraft FOV setting.",
+        "The camera view buttons (move, forward/back, orbit) moved to the left side of the camera view."
+      ]
+    },
     {
       "version": "0.24.0",
       "date": "2026-09-30",

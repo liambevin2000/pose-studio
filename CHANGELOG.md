@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.25.0 (2026-09-30)
+
+- Add Camera ▸ From Minecraft View no longer moves the viewport you work in; only the camera view shows the new camera.
+- Cameras grabbed from Minecraft get the same field of view as your Minecraft FOV setting.
+- The camera view buttons (move, forward/back, orbit) moved to the left side of the camera view.
+
 ## 0.24.0 (2026-09-30)
 
 - The camera view has Cinema 4D style buttons in its top-right corner: drag the hand to move the camera sideways and up/down, the arrows to move it forward/back, and the circle to orbit it around what it looks at (hold Shift to turn it on the spot). Each drag is one undo step.

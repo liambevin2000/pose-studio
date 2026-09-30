@@ -1,5 +1,14 @@
 [
   {
+    "version": "0.25.0",
+    "date": "2026-09-30",
+    "changes": [
+      "Add Camera ▸ From Minecraft View no longer moves the viewport you work in; only the camera view shows the new camera.",
+      "Cameras grabbed from Minecraft get the same field of view as your Minecraft FOV setting.",
+      "The camera view buttons (move, forward/back, orbit) moved to the left side of the camera view."
+    ]
+  },
+  {
     "version": "0.24.0",
     "date": "2026-09-30",
     "changes": [
