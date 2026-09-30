@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.32.2'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.32.3'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -1324,6 +1324,7 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
         if (fresh && typeof Project !== 'undefined' && Project && Project.pose_world && Project.pose_world.id === fresh.id) {
           Project.pose_world = Object.assign({}, Project.pose_world, { anchor: fresh.anchor });
           tellWorldLocation();
+          ensureTickingArea().catch(() => {});
         }
       })
       .catch(logFailure);
@@ -1348,6 +1349,7 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
     tickTimer = null;
     link.onConnect = null;
     connectedWorld = null;
+    tickingAreas.clear();
     link.stop();
     resync();
     if (cameraSync && cameraToggle) cameraToggle.set(false);
@@ -1355,11 +1357,28 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
   }
 
   // Shows what the plugin sees and what it last sent, to compare with /scriptevent pose:debug.
-  function showDebug() {
+  async function showDebug() {
     const lines = [
       `Link: ${link.server ? 'listening' : 'stopped'}, Minecraft ${link.connected ? 'connected' : 'not connected'}, ${link.inFlight} commands awaiting reply`,
       `Project: ${typeof Project !== 'undefined' && Project ? (Project.format && Project.format.id) || '?' : 'none'}`,
     ];
+    // where the open location is, where Minecraft's anchor is, and where the player stands
+    const fmt = (a) => (a ? `${round(a.x, 1)} ${round(a.y, 1)} ${round(a.z, 1)}${a.dim ? ' (' + String(a.dim).replace('minecraft:', '') + ')' : ''}` : 'not set');
+    const linkInfo = projectLink();
+    const world = link.connected ? await readWorldScene().catch(() => null) : null;
+    lines.push('', `Location: ${linkInfo ? `${linkInfo.locName || 'Main'} (id ${linkInfo.loc || 'main'}) in ${linkInfo.name || '?'}` : 'this scene is not a saved location'}`);
+    if (linkInfo) lines.push(`  saved at: ${fmt(linkInfo.anchor)}`);
+    if (world) {
+      const matches = linkInfo && linkInfo.anchor && world.anchor ? (sameAnchor(linkInfo.anchor, world.anchor) ? ' (matches)' : ' (DIFFERENT)') : '';
+      lines.push(`  Minecraft anchor now: ${fmt(world.anchor)}${matches}`);
+      lines.push(`  you are at: ${fmt(world.player)}${world.player && world.anchor ? `, ${Math.round(distanceTo(world.player, world.anchor))} blocks from the anchor` : ''}`);
+      const otherWorld = linkInfo && linkInfo.id !== world.id ? ` (NOT the world this scene belongs to: ${linkInfo.id})` : '';
+      lines.push(`  world ${world.id}${otherWorld}, pack protocol ${world.protocol} (plugin expects ${EXPECTED_PACK_PROTOCOL})`);
+      lines.push(`  locations: ${(world.locations || []).map((l) => `${l.name} @ ${fmt(l.anchor)}`).join('; ') || 'none'}`);
+      lines.push(`  in-game ids here: ${mannequinRoots().concat(entityRoots()).map((r) => mannequinId(r.name)).join(', ') || 'none'}`);
+      send('scriptevent pose:debug');
+      lines.push('  (Minecraft also lists its Pose Studio entities and where they are in chat.)');
+    }
     const roots = mannequinRoots();
     if (!roots.length) lines.push('No top-level groups named Player_… found.');
     for (const root of roots) {
@@ -5779,6 +5798,31 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     return true;
   }
 
+  // Minecraft only lets scripts place entities in chunks that are loaded and ticking, which is just
+  // the area around the player (the simulation distance). A ticking area keeps each location's
+  // chunks ticking wherever the player is (Minecraft allows 10 per world).
+  const tickingAreas = new Map(); // location id -> "x y z" the area was made for (this session)
+  async function ensureTickingArea() {
+    const l = projectLink();
+    if (!link.connected || !l || !l.anchor || !connectedWorld || l.id !== connectedWorld.id) return;
+    const a = l.anchor;
+    const at = `${Math.floor(a.x)} ${Math.floor(a.y)} ${Math.floor(a.z)}`;
+    const name = `pose_${String(l.loc || 'main').replace(/[^a-z0-9_]/gi, '_')}`;
+    if (tickingAreas.get(name) === at) return;
+    const run = (cmd) => link.command(a.dim ? `execute in ${a.dim} run ${cmd}` : cmd).catch(() => null);
+    await run(`tickingarea remove ${name}`); // it may be from an older position
+    const body = await run(`tickingarea add circle ${at} 4 ${name} true`);
+    tickingAreas.set(name, at);
+    // the chunks load over the next ticks; send everything again then
+    setTimeout(resync, 1500);
+    return body;
+  }
+  async function removeTickingArea(loc) {
+    const name = `pose_${String(loc || 'main').replace(/[^a-z0-9_]/gi, '_')}`;
+    tickingAreas.delete(name);
+    if (link.connected) await link.command(`tickingarea remove ${name}`).catch(() => null);
+  }
+
   // Beyond this, a location is probably not loaded around the player (Minecraft only lets scripts
   // place entities in loaded chunks), so Pose Studio offers to go there.
   const FAR_AWAY = 96;
@@ -5807,7 +5851,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
       {
         title: 'Pose Studio',
         message: sameDim
-          ? `${name} is ${Math.round(away)} blocks away, too far for Minecraft to show it.\n\nTeleport there?`
+          ? `${name} is ${Math.round(away)} blocks away.\n\nTeleport there to see it?`
           : `${name} is in another dimension.\n\nTeleport there?`,
         buttons: ['Teleport There', 'Stay Here'],
         confirm: 0,
@@ -5827,6 +5871,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
       const linked = projectLink();
       if (linked && linked.id === connectedWorld.id) {
         applySceneEnvironment();
+        await ensureTickingArea().catch(() => {});
         await offerToGoThere().catch(() => {});
         await realignScene({ auto: true }).catch(() => false);
       }
@@ -5912,6 +5957,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     Project.pose_world = { id: world.id, name: connectedWorld.name, loc: newLocationId(), locName: String(name).trim(), anchor: world.anchor };
     resync();
     await saveScene();
+    await ensureTickingArea().catch(() => {});
     Blockbench.showQuickMessage(`New location "${String(name).trim()}" set up where you stand. Use Import World… to bring in its terrain.`, 5000);
   }
 
@@ -5979,6 +6025,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
               (button) => {
                 if (button !== 0) return;
                 send(`scriptevent pose:setloc ${JSON.stringify({ loc: r.loc, del: true })}`);
+                removeTickingArea(r.loc).catch(() => {});
                 connectedWorld.locations = (connectedWorld.locations || []).filter((l) => l.loc !== r.loc);
                 this.rows = rows();
               }
@@ -6147,6 +6194,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     }
     resync();
     tellWorldLocation();
+    ensureTickingArea().catch(() => {});
     const moved = Math.round(Math.hypot(found.dx, found.dy, found.dz));
     // keep it in the scene file straight away if the file was otherwise saved
     let kept = false;
@@ -6175,6 +6223,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     const l = projectLink();
     if (link.connected && l && connectedWorld && l.id === connectedWorld.id) {
       send(`scriptevent pose:setloc ${JSON.stringify({ loc: l.loc || 'main', del: true })}`);
+      removeTickingArea(l.loc).catch(() => {});
       connectedWorld.locations = (connectedWorld.locations || []).filter((x) => x.loc !== (l.loc || 'main'));
     }
     if (typeof Project !== 'undefined' && Project) Project.pose_world = null;
@@ -6230,6 +6279,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
       if (projectPath() && (!mine || !samePath(projectPath(), mine.path))) tellWorldLocation();
       const moved = await restoreSceneAnchor();
       applySceneEnvironment();
+      await ensureTickingArea().catch(() => {});
       await offerToGoThere().catch(() => {});
       const where = linked.loc && linked.loc !== 'main' ? `${linked.locName} (${worldName})` : worldName;
       Blockbench.showQuickMessage(`Location: ${where}${moved ? ', put back in place' : ''}`, 3000);
@@ -6307,6 +6357,15 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.32.3",
+      "date": "2026-09-30",
+      "changes": [
+        "Locations now keep their area loaded with a ticking area, so their players and entities appear even when you are far away or outside your simulation distance. Minecraft only lets scripts place entities in ticking chunks, which caused players to go missing.",
+        "Debug Info (File > Plugins > Pose Studio > Settings) now shows where the open location is saved, where Minecraft's anchor is, where you are, and which world and pack version it sees. Minecraft also lists each Pose Studio entity's position in chat.",
+        "Needs the updated Minecraft behavior pack (Check for Updates, then reload the world)."
+      ]
+    },
     {
       "version": "0.32.2",
       "date": "2026-09-30",

@@ -269,7 +269,16 @@ function debug(player) {
   const anchor = getAnchor();
   const say = (m) => (player ? player.sendMessage(m) : console.warn(m));
   say(`§b[Pose Studio]§r anchor: ${anchor ? `${anchor.x} ${anchor.y} ${anchor.z}` : "not set"}`);
+  if (player) {
+    const l = player.location;
+    say(`§b[Pose Studio]§r you: ${l.x.toFixed(1)} ${l.y.toFixed(1)} ${l.z.toFixed(1)} (${player.dimension.id}) | updates waiting for an unloaded area: ${waiting.size}`);
+  }
   if (!anchor) return;
+  for (const e of world.getDimension(anchor.dim).getEntities({ families: ["pose_studio"] })) {
+    const id = e.getTags().find((t) => t.startsWith(TAG_PREFIX))?.slice(TAG_PREFIX.length) ?? "?";
+    const l = e.location;
+    say(`§7  ${id} at ${l.x.toFixed(1)} ${l.y.toFixed(1)} ${l.z.toFixed(1)}`);
+  }
   for (const e of world.getDimension(anchor.dim).getEntities({ type: TYPE })) {
     const id = e.getTags().find((t) => t.startsWith(TAG_PREFIX))?.slice(TAG_PREFIX.length) ?? "?";
     const parts = BONES.map((b) => {

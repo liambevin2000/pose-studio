@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.32.3 (2026-09-30)
+
+- Locations now keep their area loaded with a ticking area, so their players and entities appear even when you are far away or outside your simulation distance. Minecraft only lets scripts place entities in ticking chunks, which caused players to go missing.
+- Debug Info (File > Plugins > Pose Studio > Settings) now shows where the open location is saved, where Minecraft's anchor is, where you are, and which world and pack version it sees. Minecraft also lists each Pose Studio entity's position in chat.
+- Needs the updated Minecraft behavior pack (Check for Updates, then reload the world).
+
 ## 0.32.2 (2026-09-30)
 
 - Fixed: a location far from the player showed no players and filled chat with LocationInUnloadedChunkError. Minecraft only loads the area around you, so its updates now wait and appear as soon as you get there.
