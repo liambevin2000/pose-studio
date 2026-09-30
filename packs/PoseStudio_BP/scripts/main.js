@@ -419,21 +419,55 @@ function worldId() {
 // text <-> hex (of its URI encoding, so every character survives)
 const toHex = (text) => Array.from(encodeURIComponent(text), (ch) => ch.charCodeAt(0).toString(16).padStart(2, "0")).join("");
 
-function reportScene(data) {
+// The world's locations: { world, locations: [{ loc, name, path, anchor }] }. A link saved by an
+// older version ({ path, name }) becomes the location "main".
+function readLocations() {
+  const raw = world.getDynamicProperty(SCENE_PROPERTY);
+  let data = {};
+  try {
+    data = typeof raw === "string" && raw ? JSON.parse(raw) : {};
+  } catch {
+    data = {};
+  }
+  if (!Array.isArray(data.locations)) {
+    data = { world: data.name || "", locations: data.path ? [{ loc: "main", name: "Main", path: data.path }] : [] };
+  }
+  return data;
+}
+
+function reportScene(data, player) {
   beginResult(data.op);
-  const scene = world.getDynamicProperty(SCENE_PROPERTY);
-  const hex = typeof scene === "string" && scene ? toHex(scene) : "";
+  const hex = toHex(JSON.stringify(readLocations()));
   const items = [`W|${worldId()}`];
   const anchor = getAnchor();
   if (anchor) items.push(`A|${anchor.x}|${anchor.y}|${anchor.z}|${anchor.dim || ""}`);
+  if (player) {
+    const l = player.location;
+    items.push(`P|${l.x.toFixed(1)}|${l.y.toFixed(1)}|${l.z.toFixed(1)}|${player.dimension.id}`);
+  }
   const size = MAX_ITEM_LENGTH - 10;
   for (let i = 0; i * size < hex.length; i++) items.push(`S|${i}|${hex.slice(i * size, (i + 1) * size)}`);
   finishResult(items);
 }
 
+// `pose:setloc {"loc":"k3x9","p":"C:/…/x.bbmodel","n":"Birch forest","w":"World name","a":[x,y,z],"d":"minecraft:overworld"}`
+// adds or updates a location; {"loc":"k3x9","del":true} removes it.
+function storeLocation(data) {
+  const loc = String(data.loc || "main");
+  const saved = readLocations();
+  const list = saved.locations.filter((l) => l.loc !== loc);
+  if (!data.del) {
+    const old = saved.locations.find((l) => l.loc === loc) || {};
+    const a = Array.isArray(data.a) && data.a.length === 3 ? { x: Number(data.a[0]), y: Number(data.a[1]), z: Number(data.a[2]), dim: String(data.d || "") } : old.anchor;
+    list.push({ loc, name: String(data.n || old.name || "Location"), path: String(data.p || old.path || ""), anchor: a || null });
+  }
+  const next = { world: String(data.w || saved.world || ""), locations: list };
+  world.setDynamicProperty(SCENE_PROPERTY, list.length ? JSON.stringify(next) : undefined);
+}
+
+// the older single-scene link
 function storeScene(data) {
-  const path = String(data.p || "");
-  world.setDynamicProperty(SCENE_PROPERTY, path ? JSON.stringify({ path, name: String(data.n || "") }) : undefined);
+  storeLocation({ loc: "main", p: data.p, n: data.n ? "Main" : "", del: !data.p });
 }
 
 // `pose:grabcam` — the player's eye position (relative to the anchor) and view rotation.
@@ -598,9 +632,11 @@ function handle(ev) {
     case "pose:page":
       return publishPage(Number(data.n) || 0, Number(data.k) || 1);
     case "pose:scene":
-      return reportScene(data);
+      return reportScene(data, player);
     case "pose:setscene":
       return storeScene(data);
+    case "pose:setloc":
+      return storeLocation(data);
     case "pose:grabcam":
       return grabCamera(player, data);
     case "pose:scan":

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.31.0 (2026-09-30)
+
+- Locations: one world can hold several set-ups, each a scene of its own with its own imported terrain, entities, cameras and position in the world. The Scene menu is now Locations.
+- Locations ▸ New Location Here… starts a new scene tab centred where you stand, so you can import that area and set up cameras without disturbing your other locations.
+- Locations ▸ Locations… lists the world's locations nearest first, to open, rename or remove them. Switching tabs moves Minecraft to that location, and every location's entities stay set up in the world at once.
+- When you connect, Pose Studio offers the location you are standing nearest.
+- Needs the updated Minecraft behavior pack (Check for Updates). Scenes linked with 0.30 become the location "Main".
+
 ## 0.30.2 (2026-09-30)
 
 - Scenes line themselves up automatically: when a linked scene connects or opens, Pose Studio compares its imported terrain with the terrain around you and moves it back if it is clearly offset. It only acts when you are standing in the scene's area and the match is unmistakable, and saves the corrected position into the scene file.

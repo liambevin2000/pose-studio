@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.30.2'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.31.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -63,8 +63,12 @@
   function boneKey(name) {
     return String(name).replace(/[\d_.]+$/, '').toLowerCase();
   }
+  // In-game id of a mannequin or entity: its name, prefixed with the scene's location for every
+  // location but the first, so several locations in one world don't take each other's entities.
   function mannequinId(name) {
-    return String(name).replace(/[^a-z0-9_]/gi, '_');
+    const link = typeof Project !== 'undefined' && Project && Project.pose_world;
+    const loc = link && link.loc && link.loc !== 'main' ? `${link.loc}_` : '';
+    return (loc + String(name)).replace(/[^a-z0-9_]/gi, '_');
   }
 
   // ---- Minimal WebSocket server (Minecraft's /connect speaks plain RFC 6455) -----------------
@@ -1271,7 +1275,7 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
   async function autoAnchor() {
     if (!link.connected || !sceneIsEmpty()) return;
     // a world with a scene keeps that scene's anchor
-    if (connectedWorld && connectedWorld.path) return;
+    if (connectedWorld && connectedWorld.locations && connectedWorld.locations.length) return;
     if (typeof Project !== 'undefined' && Project && Project.pose_world && Project.pose_world.anchor) return;
     await link.command('scriptevent pose:anchor').catch(logFailure);
     resync();
@@ -1313,6 +1317,7 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
         if (fresh && connectedWorld) connectedWorld.anchor = fresh.anchor;
         if (fresh && typeof Project !== 'undefined' && Project && Project.pose_world && Project.pose_world.id === fresh.id) {
           Project.pose_world = Object.assign({}, Project.pose_world, { anchor: fresh.anchor });
+          tellWorldLocation();
         }
       })
       .catch(logFailure);
@@ -5347,12 +5352,14 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     if (!startLink()) setTimeout(() => linkToggle && linkToggle.set(false), 0);
   }
 
-  // ---- Scenes linked to worlds ------------------------------------------------------------------
-  // A scene (.bbmodel) remembers which Minecraft world it belongs to (Project.pose_world), and the
-  // world remembers its scene file (a dynamic property the behavior pack keeps). When Minecraft
-  // connects, Pose Studio checks the pair: it opens the world's scene, or offers to link the open
-  // one. Scene ▸ Save Scene saves with one click (Documents\Pose Studio\Scenes by default).
-  let connectedWorld = null; // { id, path, name } of the world Minecraft has open
+  // ---- Locations: scenes linked to worlds ---------------------------------------------------------
+  // A world can hold several set-ups ("locations"), each a scene file of its own with its own
+  // imported terrain, entities, cameras and anchor (where in the world it sits). The scene
+  // remembers its world and location (Project.pose_world); the world keeps the list of its
+  // locations (a dynamic property the behavior pack keeps). In-game ids of a location's
+  // mannequins and entities carry the location, so every location stays set up in the world.
+  // When Minecraft connects, Pose Studio offers the location you're standing nearest.
+  let connectedWorld = null; // { id, name, anchor, player, locations } of the world Minecraft has open
   let worldProperty = null;
 
   const hexToText = (hex) => decodeURIComponent(String(hex).replace(/[^0-9a-f]/gi, '').replace(/../g, (h) => String.fromCharCode(parseInt(h, 16))));
@@ -5360,8 +5367,9 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   const forwardSlashes = (p) => String(p || '').replace(/\\/g, '/');
   const samePath = (a, b) => !!a && !!b && forwardSlashes(a).toLowerCase() === forwardSlashes(b).toLowerCase();
   const windowsPath = (p) => String(p || '').replace(/\//g, '\\');
+  const newLocationId = () => Math.random().toString(36).slice(2, 6);
 
-  // The world Minecraft has open: its Pose Studio id and linked scene.
+  // The world Minecraft has open: its id, anchor, where the player stands and its locations.
   async function readWorldScene() {
     const items = await runGameQuery('pose:scene', {}, 'Checking the world');
     const idItem = items.find((i) => i.startsWith('W|'));
@@ -5378,10 +5386,15 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     } catch (e) {
       scene = {};
     }
-    const a = items.find((i) => i.startsWith('A|'));
-    const parts = a ? a.split('|') : null;
-    const anchor = parts ? { x: Number(parts[1]), y: Number(parts[2]), z: Number(parts[3]), dim: parts[4] || '' } : null;
-    return { id: idItem.slice(2), path: windowsPath(scene.path), name: scene.name || '', anchor };
+    // a link saved by an older behavior pack: one scene
+    if (!Array.isArray(scene.locations)) scene = { world: scene.name || '', locations: scene.path ? [{ loc: 'main', name: 'Main', path: scene.path }] : [] };
+    const point = (prefix) => {
+      const item = items.find((i) => i.startsWith(prefix));
+      const parts = item ? item.split('|') : null;
+      return parts ? { x: Number(parts[1]), y: Number(parts[2]), z: Number(parts[3]), dim: parts[4] || '' } : null;
+    };
+    const locations = scene.locations.map((l) => Object.assign({}, l, { path: windowsPath(l.path) }));
+    return { id: idItem.slice(2), name: scene.world || '', anchor: point('A|'), player: point('P|'), locations };
   }
 
   // The world's name, from the most recently played world folder (the one that's open).
@@ -5394,19 +5407,36 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     }
   }
 
-  function tellWorldScene(path, name) {
-    if (!link.connected) return;
-    send(`scriptevent pose:setscene ${JSON.stringify({ p: forwardSlashes(path), n: name || '' })}`);
-    if (connectedWorld) Object.assign(connectedWorld, { path: path || '', name: name || connectedWorld.name });
-  }
-
   const projectPath = () => (typeof Project !== 'undefined' && Project && (Project.save_path || '')) || '';
   const fileName = (path) => String(path).split(/[\\/]/).pop();
   const dirName = (path) => String(path).replace(/[\\/][^\\/]*$/, '');
+  const projectLink = () => (typeof Project !== 'undefined' && Project && Project.pose_world) || null;
+  // the location of the open scene ("main" for scenes linked before locations existed)
+  const projectLocation = () => {
+    const l = projectLink();
+    return l ? l.loc || 'main' : '';
+  };
+
+  // Tells the world about the open scene's location (path, name, anchor).
+  function tellWorldLocation() {
+    const l = projectLink();
+    if (!link.connected || !l || !connectedWorld || l.id !== connectedWorld.id) return;
+    const msg = { loc: l.loc || 'main', p: forwardSlashes(projectPath()), n: l.locName || 'Main', w: l.name || connectedWorld.name || '' };
+    if (l.anchor) {
+      msg.a = [l.anchor.x, l.anchor.y, l.anchor.z];
+      msg.d = l.anchor.dim || undefined;
+    }
+    send(`scriptevent pose:setloc ${JSON.stringify(msg)}`);
+    const list = connectedWorld.locations || (connectedWorld.locations = []);
+    const entry = { loc: msg.loc, name: msg.n, path: projectPath(), anchor: l.anchor || null };
+    const i = list.findIndex((x) => x.loc === msg.loc);
+    if (i >= 0) list[i] = entry;
+    else list.push(entry);
+  }
 
   function fileExists(path) {
     try {
-      const fs = requireNativeModule('fs', { scope: dirName(path), message: 'Pose Studio checks for the scene file linked to this world.' });
+      const fs = requireNativeModule('fs', { scope: dirName(path), message: 'Pose Studio checks for the scene files linked to this world.' });
       return !!fs && fs.existsSync(path);
     } catch (e) {
       return false;
@@ -5424,51 +5454,60 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     });
   }
 
-  function linkProjectToWorld(world, name) {
-    if (typeof Project === 'undefined' || !Project) return;
-    Project.pose_world = { id: world.id, name, anchor: world.anchor || (Project.pose_world && Project.pose_world.anchor) || null };
-  }
-
   const sameAnchor = (a, b) => !!a && !!b && ['x', 'y', 'z'].every((k) => Math.abs(Number(a[k]) - Number(b[k])) < 0.01);
+  const distanceTo = (a, b) => (a && b ? Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z) : Infinity);
 
-  // Puts the world's anchor back where the open scene was built, if the scene belongs to this world.
+  // Puts the world's anchor where the open location sits, if it belongs to this world.
   async function restoreSceneAnchor() {
-    if (!link.connected || !connectedWorld || typeof Project === 'undefined' || !Project) return false;
-    const linked = Project.pose_world;
-    if (!linked || linked.id !== connectedWorld.id || !linked.anchor) return false;
+    const linked = projectLink();
+    if (!link.connected || !connectedWorld || !linked || linked.id !== connectedWorld.id || !linked.anchor) return false;
     if (sameAnchor(linked.anchor, connectedWorld.anchor)) return false;
     const a = linked.anchor;
-    await link.command(`scriptevent pose:anchor ${JSON.stringify({ at: [a.x, a.y, a.z], dim: a.dim || undefined })}`).catch(logFailure);
+    await link.command(`scriptevent pose:anchor ${JSON.stringify({ at: [a.x, a.y, a.z], dim: a.dim || undefined, quiet: true })}`).catch(logFailure);
     connectedWorld.anchor = Object.assign({}, a);
     resync();
     return true;
   }
 
-  // Switching to (or opening) a scene of this world puts it back in place.
+  // Switching to (or opening) a location of this world puts it in place.
   function onProjectSelected() {
     if (!link.connected || !connectedWorld) return;
     setTimeout(async () => {
       await restoreSceneAnchor().catch(() => {});
-      const linked = typeof Project !== 'undefined' && Project && Project.pose_world;
+      const linked = projectLink();
       if (linked && linked.id === connectedWorld.id) await realignScene({ auto: true }).catch(() => false);
     }, 300);
   }
 
-  // Scene ▸ Save Scene: saves the scene (to Documents\Pose Studio\Scenes\<world>.bbmodel the first
+  function safeFileName(text) {
+    return String(text).replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').trim() || 'Scene';
+  }
+
+  // Locations ▸ Save Location: saves the open location (to Documents\Pose Studio\Scenes the first
   // time) and links it with the world Minecraft has open.
   async function saveScene() {
     if (typeof Project === 'undefined' || !Project) {
       Blockbench.showQuickMessage('Nothing to save yet', 2000);
       return;
     }
-    // the world's anchor right now, so the scene reopens exactly where it was built
     if (link.connected) {
       const fresh = await readWorldScene().catch(() => null);
-      if (fresh) connectedWorld = Object.assign(connectedWorld || {}, fresh, { name: (connectedWorld && connectedWorld.name) || fresh.name });
+      if (fresh) connectedWorld = Object.assign(connectedWorld || {}, fresh, { name: fresh.name || (connectedWorld && connectedWorld.name) || currentWorldName() });
     }
     const world = connectedWorld;
-    const worldName = (world && world.name) || (Project.pose_world && Project.pose_world.name) || currentWorldName();
-    if (world) linkProjectToWorld(world, worldName);
+    const old = projectLink();
+    const worldName = (world && world.name) || (old && old.name) || currentWorldName();
+    if (world && (!old || old.id === world.id)) {
+      // the world's anchor now is where this location sits
+      Project.pose_world = {
+        id: world.id,
+        name: worldName,
+        loc: (old && old.loc) || 'main',
+        locName: (old && old.locName) || 'Main',
+        anchor: world.anchor || (old && old.anchor) || null,
+      };
+    }
+    const l = projectLink();
     let path = projectPath();
     if (!path) {
       const dir = `${SystemInfo.home_directory}\\Documents\\Pose Studio\\Scenes`;
@@ -5478,7 +5517,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
         return;
       }
       fs.mkdirSync(dir, { recursive: true });
-      const base = String(worldName).replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').trim() || 'Scene';
+      const base = safeFileName(l && l.loc && l.loc !== 'main' ? `${worldName} - ${l.locName}` : worldName);
       path = `${dir}\\${base}.bbmodel`;
       for (let n = 2; fs.existsSync(path); n++) path = `${dir}\\${base} ${n}.bbmodel`;
       Project.save_path = path;
@@ -5489,26 +5528,120 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     } else {
       Codecs.project.write(Codecs.project.compile(), path);
     }
-    if (world) tellWorldScene(path, worldName);
-    Blockbench.showQuickMessage(world ? `Saved ${fileName(path)}, linked to ${worldName}` : `Saved ${fileName(path)} (connect Minecraft to link it to a world)`, 3000);
+    if (world && l && l.id === world.id) tellWorldLocation();
+    const where = l && l.locName && l.loc !== 'main' ? `${l.locName} in ${worldName}` : worldName;
+    Blockbench.showQuickMessage(world ? `Saved ${fileName(path)}, linked to ${where}` : `Saved ${fileName(path)} (connect Minecraft to link it to a world)`, 3000);
   }
 
-  // Scene ▸ Open This World's Scene
-  async function openWorldScene() {
+  // Locations ▸ New Location Here…: a new, empty scene tab for this world, anchored where you stand.
+  async function newLocationHere() {
     if (!requireConnection()) return;
-    const world = connectedWorld || (await readWorldScene().catch(() => null));
-    if (!world || !world.path) {
-      Blockbench.showMessageBox({ title: 'Pose Studio', message: 'This world has no scene linked yet. Build one and use Scene ▸ Save Scene.' });
+    const name = await new Promise((resolve) => {
+      if (Blockbench.textPrompt) Blockbench.textPrompt('New location', '', (text) => resolve(text), 'Name this location, e.g. Birch forest');
+      else resolve(window.prompt('Name this location', ''));
+    });
+    if (!name || !String(name).trim()) return;
+    // keep the location you're leaving
+    const leaving = projectLink();
+    if (leaving && typeof Project !== 'undefined' && Project && (projectPath() || !Project.saved)) await saveScene();
+    newProject(Formats.free);
+    await link.command('scriptevent pose:anchor').catch(logFailure); // centred where you stand
+    const world = await readWorldScene().catch(() => null);
+    if (!world) {
+      Blockbench.showMessageBox({ title: 'Pose Studio', message: "Couldn't read the world. Is the Pose Studio behavior pack up to date?" });
       return;
     }
-    if (!fileExists(world.path)) {
-      Blockbench.showMessageBox({ title: 'Pose Studio', message: `This world's scene wasn't found:\n${world.path}` });
-      return;
-    }
-    openSceneFile(world.path);
+    connectedWorld = Object.assign(connectedWorld || {}, world, { name: world.name || (connectedWorld && connectedWorld.name) || currentWorldName() });
+    Project.pose_world = { id: world.id, name: connectedWorld.name, loc: newLocationId(), locName: String(name).trim(), anchor: world.anchor };
+    resync();
+    await saveScene();
+    Blockbench.showQuickMessage(`New location "${String(name).trim()}" set up where you stand. Use Import World… to bring in its terrain.`, 5000);
   }
 
-  // Scene ▸ Realign Scene with World: finds where the scene was built by matching its imported
+  // Locations ▸ Locations…: this world's locations, nearest first.
+  async function openLocations() {
+    if (!requireConnection()) return;
+    const world = await readWorldScene().catch(() => null);
+    if (!world) {
+      Blockbench.showMessageBox({ title: 'Pose Studio', message: "Couldn't read the world. Is the Pose Studio behavior pack up to date?" });
+      return;
+    }
+    connectedWorld = Object.assign(connectedWorld || {}, world, { name: world.name || (connectedWorld && connectedWorld.name) || currentWorldName() });
+    const current = projectLink() && projectLink().id === world.id ? projectLocation() : '';
+    const rows = () =>
+      (connectedWorld.locations || [])
+        .map((l) => ({ loc: l.loc, name: l.name, path: l.path, distance: Math.round(distanceTo(l.anchor, world.player)), current: l.loc === current }))
+        .sort((a, b) => a.distance - b.distance);
+    const dialog = new Dialog({
+      id: 'pose_studio_locations',
+      title: `Locations in ${connectedWorld.name}`,
+      width: 560,
+      buttons: ['New Location Here…', 'Close'],
+      cancelIndex: 1,
+      component: {
+        data: () => ({ rows: rows() }),
+        methods: {
+          open(r) {
+            if (!fileExists(r.path)) {
+              Blockbench.showMessageBox({ title: 'Pose Studio', message: `The scene for ${r.name} wasn't found:\n${r.path}` });
+              return;
+            }
+            dialog.hide();
+            openSceneFile(r.path);
+          },
+          rename(r) {
+            const apply = (text) => {
+              if (!text || !String(text).trim()) return;
+              send(`scriptevent pose:setloc ${JSON.stringify({ loc: r.loc, n: String(text).trim() })}`);
+              const entry = (connectedWorld.locations || []).find((l) => l.loc === r.loc);
+              if (entry) entry.name = String(text).trim();
+              const open = typeof ModelProject !== 'undefined' && ModelProject.all.find((p) => p.pose_world && p.pose_world.id === world.id && (p.pose_world.loc || 'main') === r.loc);
+              if (open) open.pose_world = Object.assign({}, open.pose_world, { locName: String(text).trim() });
+              this.rows = rows();
+            };
+            if (Blockbench.textPrompt) Blockbench.textPrompt('Rename location', r.name, apply);
+            else apply(window.prompt('Rename location', r.name));
+          },
+          remove(r) {
+            Blockbench.showMessageBox(
+              {
+                title: 'Pose Studio',
+                message: `Remove "${r.name}" from this world's locations?\n\nIts scene file stays where it is; you can link it again by opening it and using Save Location.`,
+                buttons: ['Remove', 'Cancel'],
+                confirm: 0,
+                cancel: 1,
+              },
+              (button) => {
+                if (button !== 0) return;
+                send(`scriptevent pose:setloc ${JSON.stringify({ loc: r.loc, del: true })}`);
+                connectedWorld.locations = (connectedWorld.locations || []).filter((l) => l.loc !== r.loc);
+                this.rows = rows();
+              }
+            );
+          },
+        },
+        template: `
+          <div class="pose_studio_locations">
+            <p v-if="!rows.length" style="opacity: 0.7;">No locations yet. Build a scene and use Save Location, or stand somewhere and use New Location Here….</p>
+            <div v-for="r in rows" :key="r.loc" :style="{ display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 8px', borderRadius: '4px', marginBottom: '4px', border: '1px solid var(--color-border)', background: r.current ? 'var(--color-selected)' : '' }">
+              <div style="flex: 1; min-width: 0;">
+                <div style="font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{{ r.name }}{{ r.current ? '  (open)' : '' }}</div>
+                <div style="opacity: 0.6; font-size: 0.85em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{{ isFinite(r.distance) ? r.distance + ' blocks away' : '' }}</div>
+              </div>
+              <button @click="open(r)" :disabled="r.current" style="min-width: 0; padding: 0 10px;">Open</button>
+              <button @click="rename(r)" style="min-width: 0; padding: 0 10px;">Rename</button>
+              <button @click="remove(r)" style="min-width: 0; padding: 0 10px;">Remove</button>
+            </div>
+          </div>`,
+      },
+      onButton(index) {
+        if (index === 0) setTimeout(() => newLocationHere(), 100);
+      },
+    });
+    dialog.show();
+  }
+
+  // Locations ▸ Realign with World: finds where the scene was built by matching its imported
   // terrain (world_scan) against the terrain around the player now, then puts the anchor back there.
   // For scenes whose position was lost (saved before scenes remembered it).
   let realignDebug = null;
@@ -5647,6 +5780,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
       Project.pose_world = Object.assign({}, Project.pose_world || { id: world.id, name: connectedWorld.name || currentWorldName() }, { anchor });
     }
     resync();
+    tellWorldLocation();
     const moved = Math.round(Math.hypot(found.dx, found.dy, found.dz));
     // keep it in the scene file straight away if the file was otherwise saved
     let kept = false;
@@ -5658,7 +5792,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
         kept = false;
       }
     }
-    const keep = kept ? '' : ' Use Scene ▸ Save Scene to keep this.';
+    const keep = kept ? '' : ' Use Locations ▸ Save Location to keep this.';
     if (auto) {
       Blockbench.showQuickMessage(`Pose Studio: moved the scene ${moved} blocks to line up with the world.${keep}`, 6000);
     } else {
@@ -5670,62 +5804,72 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     return !!moved;
   }
 
-  // Scene ▸ Unlink Scene from World
+  // Locations ▸ Remove Location from World: the open scene stops being one of this world's locations.
   function unlinkScene() {
+    const l = projectLink();
+    if (link.connected && l && connectedWorld && l.id === connectedWorld.id) {
+      send(`scriptevent pose:setloc ${JSON.stringify({ loc: l.loc || 'main', del: true })}`);
+      connectedWorld.locations = (connectedWorld.locations || []).filter((x) => x.loc !== (l.loc || 'main'));
+    }
     if (typeof Project !== 'undefined' && Project) Project.pose_world = null;
-    if (link.connected) tellWorldScene('', '');
-    Blockbench.showQuickMessage('Scene and world unlinked', 2000);
+    Blockbench.showQuickMessage('Location removed from the world (the scene file is kept)', 2500);
   }
 
-  // Runs when Minecraft connects: matches the open scene with the world.
+  // Runs when Minecraft connects: matches the open scene with the world's locations.
   async function checkWorldScene() {
     let world;
     try {
       world = await readWorldScene();
     } catch (e) {
-      return; // an older behavior pack: no scene links
+      return; // an older behavior pack: no locations
     }
     if (!world) return;
     const worldName = world.name || currentWorldName();
     connectedWorld = Object.assign(world, { name: worldName });
     const project = typeof Project !== 'undefined' && Project ? Project : null;
-    const linked = project && project.pose_world;
+    const linked = projectLink();
     const hasContent = project && (mannequinRoots().length || entityRoots().length || cameraRoots().length);
-    // the open scene belongs to this world: keep the world's link up to date
+    const locations = world.locations || [];
+    // the open scene is one of this world's locations: keep the world's copy up to date, put it in place
     if (linked && linked.id === world.id) {
-      if (projectPath() && !samePath(projectPath(), world.path)) tellWorldScene(projectPath(), worldName);
+      const mine = locations.find((l) => l.loc === (linked.loc || 'main'));
+      if (projectPath() && (!mine || !samePath(projectPath(), mine.path))) tellWorldLocation();
       const moved = await restoreSceneAnchor();
-      Blockbench.showQuickMessage(`Scene linked to ${worldName}${moved ? ': put back where it was built' : ''}`, 3000);
+      const where = linked.loc && linked.loc !== 'main' ? `${linked.locName} (${worldName})` : worldName;
+      Blockbench.showQuickMessage(`Location: ${where}${moved ? ', put back in place' : ''}`, 3000);
       await realignScene({ auto: true }).catch(() => false);
       return;
     }
-    // the world has a scene: open it (or switch to its tab)
-    if (world.path) {
-      const open = typeof ModelProject !== 'undefined' && ModelProject.all.find((p) => samePath(p.save_path, world.path));
+    // the world has locations: offer the nearest (or switch to it if it's open in a tab)
+    if (locations.length) {
+      const sorted = locations.slice().sort((a, b) => distanceTo(a.anchor, world.player) - distanceTo(b.anchor, world.player));
+      const nearest = sorted[0];
+      const open = typeof ModelProject !== 'undefined' && ModelProject.all.find((p) => samePath(p.save_path, nearest.path));
       if (open) {
         open.select();
-        Blockbench.showQuickMessage(`Switched to ${fileName(world.path)}, the scene for ${worldName}`, 3000);
+        Blockbench.showQuickMessage(`Switched to ${nearest.name}, the nearest location in ${worldName}`, 3000);
         return;
       }
-      if (!fileExists(world.path)) {
-        Blockbench.showMessageBox({ title: 'Pose Studio', message: `${worldName} is linked to a scene that wasn't found:\n${world.path}\n\nSave the open scene with Scene ▸ Save Scene to link it instead.` });
-        return;
-      }
+      const away = distanceTo(nearest.anchor, world.player);
+      const others = locations.length > 1 ? ` (${locations.length} locations in this world)` : '';
       Blockbench.showMessageBox(
         {
           title: 'Pose Studio',
-          message: `${worldName} has a Pose Studio scene:\n${fileName(world.path)}\n\nOpen it?`,
-          buttons: ['Open Scene', 'Not Now'],
+          message: `${worldName} has Pose Studio locations${others}.\n\nNearest: ${nearest.name}${isFinite(away) ? `, ${Math.round(away)} blocks away` : ''}. Open it?`,
+          buttons: [`Open ${nearest.name}`, 'All Locations…', 'Not Now'],
           confirm: 0,
-          cancel: 1,
+          cancel: 2,
         },
         (button) => {
-          if (button === 0) openSceneFile(world.path);
+          if (button === 0) {
+            if (fileExists(nearest.path)) openSceneFile(nearest.path);
+            else Blockbench.showMessageBox({ title: 'Pose Studio', message: `The scene for ${nearest.name} wasn't found:\n${nearest.path}` });
+          } else if (button === 1) openLocations();
         }
       );
       return;
     }
-    // the world has no scene yet
+    // the world has no locations yet
     if (linked && linked.id !== world.id) {
       Blockbench.showMessageBox(
         {
@@ -5745,8 +5889,8 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
       Blockbench.showMessageBox(
         {
           title: 'Pose Studio',
-          message: `Link this scene to ${worldName}?\n\nPose Studio saves it, and offers to open it whenever you connect in this world.`,
-          buttons: ['Link and Save', 'Not Now'],
+          message: `Save this scene as a location in ${worldName}?\n\nPose Studio saves it, and offers it whenever you connect near it in this world.`,
+          buttons: ['Save Location', 'Not Now'],
           confirm: 0,
           cancel: 1,
         },
@@ -5764,6 +5908,17 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.31.0",
+      "date": "2026-09-30",
+      "changes": [
+        "Locations: one world can hold several set-ups, each a scene of its own with its own imported terrain, entities, cameras and position in the world. The Scene menu is now Locations.",
+        "Locations ▸ New Location Here… starts a new scene tab centred where you stand, so you can import that area and set up cameras without disturbing your other locations.",
+        "Locations ▸ Locations… lists the world's locations nearest first, to open, rename or remove them. Switching tabs moves Minecraft to that location, and every location's entities stay set up in the world at once.",
+        "When you connect, Pose Studio offers the location you are standing nearest.",
+        "Needs the updated Minecraft behavior pack (Check for Updates). Scenes linked with 0.30 become the location \"Main\"."
+      ]
+    },
     {
       "version": "0.30.2",
       "date": "2026-09-30",
@@ -6139,16 +6294,20 @@ ${PLUGIN_URL}`,
         })),
         // One slot in the menu: Add Mannequin with no mannequin selected, Skin & Equipment… with one
         savescene: new Action('pose_studio_save_scene', {
-          name: 'Save Scene', icon: 'save', click: saveScene,
-          description: 'Saves the scene (to Documents\\Pose Studio\\Scenes the first time) and links it with the Minecraft world you have open.',
+          name: 'Save Location', icon: 'save', click: saveScene,
+          description: 'Saves this location\'s scene (to Documents\\Pose Studio\\Scenes the first time) and links it with the Minecraft world you have open.',
         }),
-        openscene: new Action('pose_studio_open_scene', {
-          name: "Open This World's Scene", icon: 'folder_open', click: openWorldScene,
-          description: 'Opens the scene linked to the Minecraft world you have open.',
+        newlocation: new Action('pose_studio_new_location', {
+          name: 'New Location Here…', icon: 'add_location_alt', click: newLocationHere,
+          description: 'Starts a new scene tab for another spot in this world, centred where you stand, with its own terrain, entities and cameras.',
         }),
-        unlinkscene: new Action('pose_studio_unlink_scene', { name: 'Unlink Scene from World', icon: 'link_off', click: unlinkScene }),
+        locations: new Action('pose_studio_locations', {
+          name: 'Locations…', icon: 'place', click: openLocations,
+          description: "This world's locations, nearest first: open, rename or remove them.",
+        }),
+        unlinkscene: new Action('pose_studio_unlink_scene', { name: 'Remove Location from World', icon: 'wrong_location', click: unlinkScene }),
         realign: new Action('pose_studio_realign_scene', {
-          name: 'Realign Scene with World', icon: 'my_location', click: realignScene,
+          name: 'Realign with World', icon: 'my_location', click: () => realignScene(),
           description: "Finds where the scene was built by matching its imported terrain with the terrain around you, and puts it back there.",
         }),
         add: new Action('pose_studio_add', {
@@ -6246,7 +6405,7 @@ ${PLUGIN_URL}`,
 
       menu = new BarMenu('pose_studio', [
         a.link,
-        { name: 'Scene', id: 'pose_studio_scene_menu', icon: 'link', children: [a.savescene, a.openscene, '_', a.realign, a.unlinkscene] },
+        { name: 'Locations', id: 'pose_studio_scene_menu', icon: 'place', children: [a.savescene, a.newlocation, a.locations, '_', a.realign, a.unlinkscene] },
         '_',
         a.add,
         a.outfit,

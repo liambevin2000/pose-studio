@@ -1,5 +1,16 @@
 [
   {
+    "version": "0.31.0",
+    "date": "2026-09-30",
+    "changes": [
+      "Locations: one world can hold several set-ups, each a scene of its own with its own imported terrain, entities, cameras and position in the world. The Scene menu is now Locations.",
+      "Locations ▸ New Location Here… starts a new scene tab centred where you stand, so you can import that area and set up cameras without disturbing your other locations.",
+      "Locations ▸ Locations… lists the world's locations nearest first, to open, rename or remove them. Switching tabs moves Minecraft to that location, and every location's entities stay set up in the world at once.",
+      "When you connect, Pose Studio offers the location you are standing nearest.",
+      "Needs the updated Minecraft behavior pack (Check for Updates). Scenes linked with 0.30 become the location \"Main\"."
+    ]
+  },
+  {
     "version": "0.30.2",
     "date": "2026-09-30",
     "changes": [
