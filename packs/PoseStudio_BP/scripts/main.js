@@ -313,6 +313,8 @@ function debug(player) {
 // (`pose:page {"n":1,"k":8}` = pages 1 to 8), then reads them with `scoreboard players list`.
 // Every name looks like `PSD[op|page|item]`; page 0 always carries
 // `M|ready|<pages>|<items>|<items per page>` or `M|busy|<percent>`.
+// What this script understands; Blockbench warns when the world runs an older one.
+const PACK_PROTOCOL = 4;
 const IO_OBJECTIVE = "pose_io";
 const ITEMS_PER_PAGE = 30;
 const MAX_PAGES_PER_BATCH = 16;
@@ -438,7 +440,7 @@ function readLocations() {
 function reportScene(data, player) {
   beginResult(data.op);
   const hex = toHex(JSON.stringify(readLocations()));
-  const items = [`W|${worldId()}`];
+  const items = [`W|${worldId()}`, `V|${PACK_PROTOCOL}`];
   const anchor = getAnchor();
   if (anchor) items.push(`A|${anchor.x}|${anchor.y}|${anchor.z}|${anchor.dim || ""}`);
   if (player) {
@@ -461,8 +463,11 @@ function storeLocation(data) {
     const a = Array.isArray(data.a) && data.a.length === 3 ? { x: Number(data.a[0]), y: Number(data.a[1]), z: Number(data.a[2]), dim: String(data.d || "") } : old.anchor;
     list.push({ loc, name: String(data.n || old.name || "Location"), path: String(data.p || old.path || ""), anchor: a || null });
   }
-  const next = { world: String(data.w || saved.world || ""), locations: list };
-  world.setDynamicProperty(SCENE_PROPERTY, list.length ? JSON.stringify(next) : undefined);
+  // removed locations are remembered, so Blockbench does not bring them back from their scene files
+  const removed = (saved.removed || []).filter((r) => r !== loc);
+  if (data.del) removed.push(loc);
+  const next = { world: String(data.w || saved.world || ""), locations: list, removed };
+  world.setDynamicProperty(SCENE_PROPERTY, list.length || removed.length ? JSON.stringify(next) : undefined);
 }
 
 // the older single-scene link

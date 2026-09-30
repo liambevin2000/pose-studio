@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.32.1 (2026-09-30)
+
+- Connecting to a world now finds its locations even if the world never stored them (for example scenes saved while Blockbench was disconnected): Pose Studio also looks in DocumentsPose StudioScenes for scene files that belong to the world, offers them, and repairs the world's list.
+- Pose Studio now always says something on connect: the location it found, that the world has none yet, or that the world's behavior pack is missing or out of date.
+- A location removed from a world stays removed.
+- Needs the updated Minecraft behavior pack (Check for Updates, then reload the world).
+
 ## 0.32.0 (2026-09-30)
 
 - The day/night and weather cycles are frozen while Blockbench is connected (doDaylightCycle and doWeatherCycle off), and turned back on when it disconnects. There is a setting to turn this off.

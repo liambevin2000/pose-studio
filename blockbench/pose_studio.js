@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.32.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.32.1'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -5645,7 +5645,66 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
       return parts ? { x: Number(parts[1]), y: Number(parts[2]), z: Number(parts[3]), dim: parts[4] || '' } : null;
     };
     const locations = scene.locations.map((l) => Object.assign({}, l, { path: windowsPath(l.path) }));
-    return { id: idItem.slice(2), name: scene.world || '', anchor: point('A|'), player: point('P|'), locations };
+    const version = items.find((i) => i.startsWith('V|'));
+    return { id: idItem.slice(2), name: scene.world || '', anchor: point('A|'), player: point('P|'), locations, removed: scene.removed || [], protocol: version ? Number(version.slice(2)) : 0 };
+  }
+
+  const EXPECTED_PACK_PROTOCOL = 4; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
+  let warnedOldPack = false;
+
+  // Scene files in Documents\Pose Studio\Scenes that belong to a world (their pose_world says so),
+  // as locations. They're found even if the world's own list was never written.
+  function sceneFilesForWorld(worldId) {
+    const found = [];
+    try {
+      const root = `${SystemInfo.home_directory}\\Documents\\Pose Studio`;
+      const dir = `${root}\\Scenes`;
+      const fs = requireNativeModule('fs', { scope: root, message: 'Pose Studio looks for the scenes that belong to this world in Documents\\Pose Studio\\Scenes.' });
+      if (!fs || !fs.existsSync(dir)) return found;
+      for (const name of fs.readdirSync(dir)) {
+        if (!/\.bbmodel$/i.test(name)) continue;
+        const path = `${dir}\\${name}`;
+        let text;
+        try {
+          text = String(fs.readFileSync(path, 'utf8'));
+        } catch (e) {
+          continue;
+        }
+        const link = extractJsonValue(text, '"pose_world"');
+        if (!link || link.id !== worldId) continue;
+        found.push({ loc: link.loc || 'main', name: link.locName || 'Main', path, anchor: link.anchor || null, worldName: link.name || '' });
+      }
+    } catch (e) {
+      // no permission or no folder: nothing found
+    }
+    return found;
+  }
+
+  // The JSON value after "key": in a big JSON text, without parsing the whole file.
+  function extractJsonValue(text, key) {
+    const at = text.indexOf(key + ':');
+    if (at < 0) return null;
+    let i = at + key.length + 1;
+    while (/\s/.test(text[i] || '')) i++;
+    if (text[i] !== '{') return null;
+    let depth = 0;
+    let inString = false;
+    for (let j = i; j < text.length; j++) {
+      const ch = text[j];
+      if (inString) {
+        if (ch === '\\') j++;
+        else if (ch === '"') inString = false;
+      } else if (ch === '"') inString = true;
+      else if (ch === '{') depth++;
+      else if (ch === '}' && --depth === 0) {
+        try {
+          return JSON.parse(text.slice(i, j + 1));
+        } catch (e) {
+          return null;
+        }
+      }
+    }
+    return null;
   }
 
   // The world's name, from the most recently played world folder (the one that's open).
@@ -6078,9 +6137,37 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     try {
       world = await readWorldScene();
     } catch (e) {
-      return; // an older behavior pack: no locations
+      world = null;
     }
-    if (!world) return;
+    if (!world) {
+      Blockbench.showQuickMessage("Pose Studio couldn't read this world's locations: the Pose Studio behavior pack may be missing or out of date (File > Plugins > Pose Studio > Settings > Check for Updates, then reload the world).", 8000);
+      return;
+    }
+    if (world.protocol < EXPECTED_PACK_PROTOCOL && !warnedOldPack) {
+      warnedOldPack = true;
+      Blockbench.showMessageBox({
+        title: 'Pose Studio',
+        message: "The Pose Studio behavior pack in this world is older than the plugin, so some features (like locations) won't work fully.\n\nUpdate it with File > Plugins > Pose Studio > Settings > Check for Updates, then reload the world in Minecraft.",
+      });
+    }
+    // scene files that belong to this world but aren't on its list (saved while disconnected, or
+    // before the world could keep a list) are added, and the world's list is repaired
+    for (const f of sceneFilesForWorld(world.id)) {
+      if ((world.removed || []).includes(f.loc)) continue; // taken off the list on purpose
+      const known = world.locations.find((l) => l.loc === f.loc || samePath(l.path, f.path));
+      if (known) {
+        if (!known.path) known.path = f.path;
+        continue;
+      }
+      world.locations.push({ loc: f.loc, name: f.name, path: f.path, anchor: f.anchor });
+      const msg = { loc: f.loc, p: forwardSlashes(f.path), n: f.name, w: world.name || f.worldName || '' };
+      if (f.anchor) {
+        msg.a = [f.anchor.x, f.anchor.y, f.anchor.z];
+        msg.d = f.anchor.dim || undefined;
+      }
+      send(`scriptevent pose:setloc ${JSON.stringify(msg)}`);
+      if (!world.name && f.worldName) world.name = f.worldName;
+    }
     const worldName = world.name || currentWorldName();
     connectedWorld = Object.assign(world, { name: worldName });
     const project = typeof Project !== 'undefined' && Project ? Project : null;
@@ -6143,6 +6230,9 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
       );
       return;
     }
+    if (!hasContent) {
+      Blockbench.showQuickMessage(`Connected to ${worldName}. No saved locations here yet: build a scene and use Locations ▸ Save Location.`, 5000);
+    }
     if (hasContent) {
       Blockbench.showMessageBox(
         {
@@ -6166,6 +6256,16 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.32.1",
+      "date": "2026-09-30",
+      "changes": [
+        "Connecting to a world now finds its locations even if the world never stored them (for example scenes saved while Blockbench was disconnected): Pose Studio also looks in DocumentsPose StudioScenes for scene files that belong to the world, offers them, and repairs the world's list.",
+        "Pose Studio now always says something on connect: the location it found, that the world has none yet, or that the world's behavior pack is missing or out of date.",
+        "A location removed from a world stays removed.",
+        "Needs the updated Minecraft behavior pack (Check for Updates, then reload the world)."
+      ]
+    },
     {
       "version": "0.32.0",
       "date": "2026-09-30",
