@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.32.2",
+    "date": "2026-09-30",
+    "changes": [
+      "Fixed: a location far from the player showed no players and filled chat with LocationInUnloadedChunkError. Minecraft only loads the area around you, so its updates now wait and appear as soon as you get there.",
+      "Switching to (or connecting with) a location that is far away offers to teleport you there.",
+      "Locations… has a Go There button.",
+      "Needs the updated Minecraft behavior pack (Check for Updates, then reload the world)."
+    ]
+  },
+  {
     "version": "0.32.1",
     "date": "2026-09-30",
     "changes": [

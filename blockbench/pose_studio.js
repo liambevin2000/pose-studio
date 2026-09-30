@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.32.1'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.32.2'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -5649,7 +5649,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     return { id: idItem.slice(2), name: scene.world || '', anchor: point('A|'), player: point('P|'), locations, removed: scene.removed || [], protocol: version ? Number(version.slice(2)) : 0 };
   }
 
-  const EXPECTED_PACK_PROTOCOL = 4; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
+  const EXPECTED_PACK_PROTOCOL = 5; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
   let warnedOldPack = false;
 
   // Scene files in Documents\Pose Studio\Scenes that belong to a world (their pose_world says so),
@@ -5779,6 +5779,46 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     return true;
   }
 
+  // Beyond this, a location is probably not loaded around the player (Minecraft only lets scripts
+  // place entities in loaded chunks), so Pose Studio offers to go there.
+  const FAR_AWAY = 96;
+
+  // Teleports the player to a location (a little above its centre, in its dimension).
+  async function goToLocation(anchor) {
+    if (!link.connected || !anchor) return;
+    const cmd = `tp @s ${anchor.x} ${Number(anchor.y) + 1} ${anchor.z}`;
+    await link.command(anchor.dim ? `execute in ${anchor.dim} run ${cmd}` : cmd).catch(logFailure);
+    // the area loads over the next moments; send everything again once it has
+    setTimeout(resync, 1500);
+    setTimeout(resync, 4000);
+  }
+
+  // After switching to a location: offer to go there when the player is far from it.
+  async function offerToGoThere() {
+    const linked = projectLink();
+    if (!link.connected || !linked || !linked.anchor || !connectedWorld || linked.id !== connectedWorld.id) return;
+    const fresh = await readWorldScene().catch(() => null);
+    if (!fresh || !fresh.player) return;
+    const sameDim = !linked.anchor.dim || !fresh.player.dim || linked.anchor.dim === fresh.player.dim;
+    const away = distanceTo(linked.anchor, fresh.player);
+    if (sameDim && away <= FAR_AWAY) return;
+    const name = linked.locName || 'This location';
+    Blockbench.showMessageBox(
+      {
+        title: 'Pose Studio',
+        message: sameDim
+          ? `${name} is ${Math.round(away)} blocks away, too far for Minecraft to show it.\n\nTeleport there?`
+          : `${name} is in another dimension.\n\nTeleport there?`,
+        buttons: ['Teleport There', 'Stay Here'],
+        confirm: 0,
+        cancel: 1,
+      },
+      (button) => {
+        if (button === 0) goToLocation(linked.anchor);
+      }
+    );
+  }
+
   // Switching to (or opening) a location of this world puts it in place.
   function onProjectSelected() {
     if (!link.connected || !connectedWorld) return;
@@ -5787,6 +5827,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
       const linked = projectLink();
       if (linked && linked.id === connectedWorld.id) {
         applySceneEnvironment();
+        await offerToGoThere().catch(() => {});
         await realignScene({ auto: true }).catch(() => false);
       }
       for (const fn of envListeners) fn(projectEnv());
@@ -5886,7 +5927,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     const current = projectLink() && projectLink().id === world.id ? projectLocation() : '';
     const rows = () =>
       (connectedWorld.locations || [])
-        .map((l) => ({ loc: l.loc, name: l.name, path: l.path, distance: Math.round(distanceTo(l.anchor, world.player)), current: l.loc === current }))
+        .map((l) => ({ loc: l.loc, name: l.name, path: l.path, anchor: l.anchor, distance: Math.round(distanceTo(l.anchor, world.player)), current: l.loc === current }))
         .sort((a, b) => a.distance - b.distance);
     const dialog = new Dialog({
       id: 'pose_studio_locations',
@@ -5904,6 +5945,14 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
             }
             dialog.hide();
             openSceneFile(r.path);
+          },
+          go(r) {
+            if (!r.anchor) {
+              Blockbench.showQuickMessage(`${r.name} has no saved position yet`, 2500);
+              return;
+            }
+            goToLocation(r.anchor);
+            Blockbench.showQuickMessage(`Teleported to ${r.name}`, 2000);
           },
           rename(r) {
             const apply = (text) => {
@@ -5945,6 +5994,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
                 <div style="opacity: 0.6; font-size: 0.85em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{{ isFinite(r.distance) ? r.distance + ' blocks away' : '' }}</div>
               </div>
               <button @click="open(r)" :disabled="r.current" style="min-width: 0; padding: 0 10px;">Open</button>
+              <button @click="go(r)" :disabled="!r.anchor" style="min-width: 0; padding: 0 10px;" title="Teleport there in Minecraft">Go There</button>
               <button @click="rename(r)" style="min-width: 0; padding: 0 10px;">Rename</button>
               <button @click="remove(r)" style="min-width: 0; padding: 0 10px;">Remove</button>
             </div>
@@ -6180,6 +6230,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
       if (projectPath() && (!mine || !samePath(projectPath(), mine.path))) tellWorldLocation();
       const moved = await restoreSceneAnchor();
       applySceneEnvironment();
+      await offerToGoThere().catch(() => {});
       const where = linked.loc && linked.loc !== 'main' ? `${linked.locName} (${worldName})` : worldName;
       Blockbench.showQuickMessage(`Location: ${where}${moved ? ', put back in place' : ''}`, 3000);
       await realignScene({ auto: true }).catch(() => false);
@@ -6256,6 +6307,16 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.32.2",
+      "date": "2026-09-30",
+      "changes": [
+        "Fixed: a location far from the player showed no players and filled chat with LocationInUnloadedChunkError. Minecraft only loads the area around you, so its updates now wait and appear as soon as you get there.",
+        "Switching to (or connecting with) a location that is far away offers to teleport you there.",
+        "Locations… has a Go There button.",
+        "Needs the updated Minecraft behavior pack (Check for Updates, then reload the world)."
+      ]
+    },
     {
       "version": "0.32.1",
       "date": "2026-09-30",

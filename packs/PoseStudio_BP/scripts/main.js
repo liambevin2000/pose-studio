@@ -314,7 +314,7 @@ function debug(player) {
 // Every name looks like `PSD[op|page|item]`; page 0 always carries
 // `M|ready|<pages>|<items>|<items per page>` or `M|busy|<percent>`.
 // What this script understands; Blockbench warns when the world runs an older one.
-const PACK_PROTOCOL = 4;
+const PACK_PROTOCOL = 5;
 const IO_OBJECTIVE = "pose_io";
 const ITEMS_PER_PAGE = 30;
 const MAX_PAGES_PER_BATCH = 16;
@@ -664,11 +664,61 @@ function removeLeftoverHolders() {
 }
 system.runTimeout(removeLeftoverHolders, 20);
 
+// Updates for a spot whose chunks aren't loaded (a location far from the player) wait here and
+// are retried every second, so the location appears as soon as you get there.
+const WAITING_EVENTS = new Set(["pose:set", "pose:ent", "pose:hold"]);
+const waiting = new Map(); // "event|id" -> the latest event for it
+let toldAboutWaiting = false;
+
+function isUnloaded(e) {
+  return /UnloadedChunk|not in a chunk|OutOfWorldBounds/i.test(`${e && e.name} ${e}`);
+}
+
+function waitForChunk(ev, e) {
+  let id = "";
+  try {
+    id = JSON.parse(ev.message || "{}").id || "";
+  } catch {
+    id = "";
+  }
+  waiting.set(`${ev.id}|${id}`, { id: ev.id, message: ev.message, sourceEntity: ev.sourceEntity });
+  if (!toldAboutWaiting && ev.sourceEntity?.typeId === "minecraft:player") {
+    toldAboutWaiting = true;
+    ev.sourceEntity.sendMessage("§e[Pose Studio]§r This location is too far away to load. It will appear when you go there.");
+  }
+}
+
+if (system.runInterval) {
+  system.runInterval(() => {
+    for (const [key, ev] of waiting) {
+      try {
+        handle(ev);
+        waiting.delete(key);
+      } catch (e) {
+        if (!isUnloaded(e)) waiting.delete(key); // a different problem: stop retrying
+      }
+    }
+    if (!waiting.size) toldAboutWaiting = false;
+  }, 20);
+}
+
 system.afterEvents.scriptEventReceive.subscribe(
   (ev) => {
     try {
+      // a newer update for the same thing replaces one that was waiting
+      if (WAITING_EVENTS.has(ev.id) && waiting.size) {
+        try {
+          waiting.delete(`${ev.id}|${JSON.parse(ev.message || "{}").id || ""}`);
+        } catch {
+          // not JSON: nothing waiting for it
+        }
+      }
       handle(ev);
     } catch (e) {
+      if (WAITING_EVENTS.has(ev.id) && isUnloaded(e)) {
+        waitForChunk(ev, e);
+        return;
+      }
       if (ev.id === "pose:scan" || ev.id === "pose:grabcam" || ev.id === "pose:scene") failResult(e);
       const msg = `${ev.id} failed: ${e}`;
       console.warn(`[Pose Studio] ${msg}`);

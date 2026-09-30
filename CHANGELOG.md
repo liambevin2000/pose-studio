@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.32.2 (2026-09-30)
+
+- Fixed: a location far from the player showed no players and filled chat with LocationInUnloadedChunkError. Minecraft only loads the area around you, so its updates now wait and appear as soon as you get there.
+- Switching to (or connecting with) a location that is far away offers to teleport you there.
+- Locations… has a Go There button.
+- Needs the updated Minecraft behavior pack (Check for Updates, then reload the world).
+
 ## 0.32.1 (2026-09-30)
 
 - Connecting to a world now finds its locations even if the world never stored them (for example scenes saved while Blockbench was disconnected): Pose Studio also looks in DocumentsPose StudioScenes for scene files that belong to the world, offers them, and repairs the world's list.
