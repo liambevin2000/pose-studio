@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.21.0 (2026-09-30)
+
+- Simpler menu: with no mannequin selected it shows Add Mannequin; select a mannequin and the same spot becomes Skin & Equipment…, one window with a Skin tab and an Equipment tab.
+- With an entity selected, Equipment… appears for its armour and held items.
+- Skin Library… (for adding and removing skins with nothing selected) moved to More.
+
 ## 0.20.1 (2026-09-30)
 
 - Connect to Minecraft has a Copy Command button: paste the /connect command straight into Minecraft chat.

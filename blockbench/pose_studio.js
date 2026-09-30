@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.20.1'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.21.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -1771,22 +1771,9 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     lastSent.delete(mannequinId(mannequin.name));
   }
 
-  async function openSkinLibrary() {
-    let slots;
-    try {
-      slots = await readLibrary();
-    } catch (e) {
-      showError('Pose Studio: skin library', e);
-      return;
-    }
-    const mannequin = selectedMannequin();
-    const dialog = new Dialog({
-      id: 'pose_studio_skin_library',
-      title: 'Skin Library',
-      width: 780,
-      buttons: ['Reload Minecraft Packs', 'Close'],
-      cancelIndex: 1,
-      component: {
+  // Skin library contents for a dialog (on its own, or as the Skin tab of Skin & Equipment).
+  function skinParts(mannequin, slots) {
+    return {
         data: () => ({ slots, target: mannequin ? mannequin.name : '', busy: false }),
         computed: {
           anyDirty() {
@@ -1873,12 +1860,29 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
               </div>
             </div>
           </div>`,
-      },
+    };
+  }
+
+  // Pose Studio ▸ More ▸ Skin Library…: manage skins without a mannequin selected.
+  async function openSkinLibrary() {
+    let slots;
+    try {
+      slots = await readLibrary();
+    } catch (e) {
+      showError('Pose Studio: skin library', e);
+      return;
+    }
+    new Dialog({
+      id: 'pose_studio_skin_library',
+      title: 'Skin Library',
+      width: 780,
+      buttons: ['Reload Minecraft Packs', 'Close'],
+      cancelIndex: 1,
+      component: skinParts(selectedMannequin(), slots),
       onButton(index) {
         if (index === 0) reloadMinecraftPacks();
       },
-    });
-    dialog.show();
+    }).show();
   }
 
   // <scanner>
@@ -3639,6 +3643,16 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     return null;
   }
 
+  // What's selected, for the menu: 'mannequin', 'entity' or ''.
+  function selectionIs(kind) {
+    try {
+      const root = selectedPoseRoot();
+      return !!root && (ENTITY_PREFIX.test(root.name) ? 'entity' : 'mannequin') === kind;
+    } catch (e) {
+      return false;
+    }
+  }
+
   // Rebuilds the eq_ preview cubes inside the mannequin's bone groups.
   let equipmentBuild = Promise.resolve();
   function refreshEquipmentPreview(mannequin) {
@@ -3733,22 +3747,58 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     return refreshEquipmentPreview(mannequin);
   }
 
-  async function openEquipment() {
-    const mannequin = selectedPoseRoot();
-    if (!mannequin) {
+  // Pose Studio ▸ Skin & Equipment… (a mannequin is selected) or Equipment… (an entity copy):
+  // one window with a Skin tab (mannequins only) and an Equipment tab.
+  async function openOutfit(tab = 'skin') {
+    const target = selectedPoseRoot();
+    if (!target) {
       Blockbench.showQuickMessage('Select a mannequin (mq_) or entity (ent_) first', 2000);
       return;
     }
+    const isEntity = ENTITY_PREFIX.test(target.name);
+    let slots = [];
+    let content;
+    try {
+      if (!isEntity) slots = await readLibrary();
+      content = await previewContent();
+    } catch (e) {
+      showError('Pose Studio: skin & equipment', e);
+      return;
+    }
+    const skin = isEntity ? null : skinParts(target, slots);
+    const equipment = equipmentParts(target, content);
+    const parts = skin ? [skin, equipment] : [equipment];
+    new Dialog({
+      id: 'pose_studio_outfit',
+      title: isEntity ? `Equipment: ${target.name}` : `Skin & Equipment: ${target.name}`,
+      width: 780,
+      buttons: isEntity ? ['Done'] : ['Reload Minecraft Packs', 'Done'],
+      cancelIndex: isEntity ? 0 : 1,
+      component: {
+        data: () => Object.assign({ tab: isEntity ? 'equipment' : tab, hasSkin: !isEntity }, ...parts.map((p) => p.data())),
+        computed: Object.assign({}, ...parts.map((p) => p.computed || {})),
+        methods: Object.assign({}, ...parts.map((p) => p.methods || {})),
+        template: `
+          <div>
+            <div v-if="hasSkin" style="display: flex; gap: 4px; margin-bottom: 12px; border-bottom: 1px solid var(--color-border);">
+              <button v-for="t in [['skin', 'Skin'], ['equipment', 'Equipment']]" :key="t[0]" @click="tab = t[0]"
+                      :style="{ borderRadius: '4px 4px 0 0', background: tab === t[0] ? 'var(--color-selected)' : '', fontWeight: tab === t[0] ? 'bold' : '' }">{{ t[1] }}</button>
+            </div>
+            <div v-if="hasSkin" v-show="tab === 'skin'">${skin ? skin.template : ''}</div>
+            <div v-show="tab === 'equipment'">${equipment.template}</div>
+          </div>`,
+      },
+      onButton(index) {
+        if (!isEntity && index === 0) reloadMinecraftPacks();
+      },
+    }).show();
+  }
+
+  // Equipment contents for the Skin & Equipment window.
+  function equipmentParts(mannequin, content) {
     const isEntity = ENTITY_PREFIX.test(mannequin.name);
     const canHold = !isEntity || !!boneGroupOf(mannequin, 'rightItem') || !!boneGroupOf(mannequin, 'leftItem');
     const canWear = !isEntity || ['head', 'body', 'rightArm', 'rightLeg'].every((b) => boneGroupOf(mannequin, b));
-    let content;
-    try {
-      content = await previewContent();
-    } catch (e) {
-      showError('Pose Studio: equipment', e);
-      return;
-    }
     const icon = (path) => {
       const found = findTexture(content, path);
       try {
@@ -3763,12 +3813,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
       const m = ARMOR_MATERIALS.find((mat) => armorItem(mat, piece) === eq[piece.slot]);
       return m ? m.item : '';
     };
-    new Dialog({
-      id: 'pose_studio_equipment',
-      title: `Equipment: ${mannequin.name}`,
-      width: 640,
-      buttons: ['Done'],
-      component: {
+    return {
         data: () => ({
           pieces: ARMOR_PIECES.map((p) => ({ slot: p.slot, label: p.label, value: armorValue(p), options: ARMOR_MATERIALS.filter((m) => !m.only || m.only === p.slot) })),
           items,
@@ -3841,8 +3886,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
             </div>
             <p style="opacity: 0.7; margin-top: 8px;">Minecraft shows the real items. The Blockbench preview shows armour and a flat icon for held items.</p>
           </div>`,
-      },
-    }).show();
+    };
   }
 
   // ---- Plugin registration -------------------------------------------------------------------
@@ -3869,6 +3913,15 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.21.0",
+      "date": "2026-09-30",
+      "changes": [
+        "Simpler menu: with no mannequin selected it shows Add Mannequin; select a mannequin and the same spot becomes Skin & Equipment…, one window with a Skin tab and an Equipment tab.",
+        "With an entity selected, Equipment… appears for its armour and held items.",
+        "Skin Library… (for adding and removing skins with nothing selected) moved to More."
+      ]
+    },
     {
       "version": "0.20.1",
       "date": "2026-09-30",
@@ -4106,18 +4159,28 @@ ${PLUGIN_URL}`,
           name: 'Connect to Minecraft', icon: 'cable', value: false, onChange: onLinkToggle,
           description: 'Listens for Minecraft on 127.0.0.1:19131 (run /connect 127.0.0.1:19131 in game).',
         })),
-        add: new Action('pose_studio_add', { name: 'Add Mannequin', icon: 'accessibility_new', click: addMannequin }),
+        // One slot in the menu: Add Mannequin with no mannequin selected, Skin & Equipment… with one
+        add: new Action('pose_studio_add', {
+          name: 'Add Mannequin', icon: 'accessibility_new', click: addMannequin,
+          condition: () => !selectionIs('mannequin'),
+        }),
+        outfit: new Action('pose_studio_outfit', {
+          name: 'Skin & Equipment…', icon: 'checkroom', click: () => openOutfit('skin'),
+          description: 'Skin, armour and held items for the selected mannequin.',
+          condition: () => selectionIs('mannequin'),
+        }),
         entity: new Action('pose_studio_entity', {
           name: 'Add Entity…', icon: 'pets', click: openEntityBrowser,
           description: "Every entity in the world you're in (Minecraft's and your packs'), with thumbnails.",
         }),
         equipment: new Action('pose_studio_equipment', {
-          name: 'Equipment…', icon: 'shield', click: openEquipment,
-          description: 'Armour and held items for the selected mannequin.',
+          name: 'Equipment…', icon: 'shield', click: () => openOutfit('equipment'),
+          description: 'Armour and held items for the selected entity.',
+          condition: () => selectionIs('entity'),
         }),
         skin: new Action('pose_studio_skin', {
           name: 'Skin Library…', icon: 'checkroom', click: openSkinLibrary,
-          description: 'Add skins once, then dress the selected mannequin instantly.',
+          description: 'Add, replace and remove skins (dress a mannequin from Skin & Equipment…).',
         }),
         grabcam: new Action('pose_studio_grabcam', {
           name: 'From Minecraft View', icon: 'add_a_photo', click: grabCameraFromPlayer,
@@ -4174,8 +4237,8 @@ ${PLUGIN_URL}`,
         a.link,
         '_',
         a.add,
+        a.outfit,
         a.entity,
-        a.skin,
         a.equipment,
         { name: 'Add Camera', id: 'pose_studio_add_camera', icon: 'videocam', children: [a.grabcam, a.savecam] },
         a.fov,
@@ -4187,7 +4250,7 @@ ${PLUGIN_URL}`,
         a.scan,
         a.capture,
         '_',
-        { name: 'More', id: 'pose_studio_more', icon: 'more_horiz', children: [a.anchor, a.lookcam, a.follow, '_', a.held, a.reloadpacks, a.clear, '_', a.updates, a.changelog, a.debug] },
+        { name: 'More', id: 'pose_studio_more', icon: 'more_horiz', children: [a.anchor, a.lookcam, a.follow, '_', a.skin, a.held, a.reloadpacks, a.clear, '_', a.updates, a.changelog, a.debug] },
       ], { name: 'Pose Studio' });
       MenuBar.addMenu(menu, 'tools');
       startupTimer = setTimeout(() => {
