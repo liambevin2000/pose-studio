@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.26.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.27.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -37,7 +37,7 @@
     { key: 'rightLeg', pivot: [1.9, 12, 0],  from: [-0.1, 0, -2],  to: [3.9, 12, 2],  color: 3 },
     { key: 'leftLeg',  pivot: [-1.9, 12, 0], from: [-3.9, 0, -2],  to: [0.1, 12, 2],  color: 3 },
   ];
-  const MANNEQUIN_PREFIX = /^mq_/i;
+  const MANNEQUIN_PREFIX = /^(player_|mq_)/i; // Player_N (older scenes: mq_N)
 
   // ---- Small helpers -------------------------------------------------------------------------
   function round(n, digits) {
@@ -319,7 +319,7 @@
   // Blockbench turns each selected group around its own pivot. With two or more mannequins,
   // entities or cameras selected, Pose Studio also swings them around their shared centre, so the
   // selection turns as one piece (like rotating a group). The moves join Blockbench's own undo step.
-  const POSE_ROOT_PREFIX = /^(mq_|ent_|cam_)/i;
+  const POSE_ROOT_PREFIX = /^(player_|mq_|ent_|cam_)/i;
   let groupSpin = null; // { key, rotations: Map(uuid -> [x, y, z]), undoSave }
   let groupSpinTimer = null;
   const onRenderFrame = () => {
@@ -744,7 +744,7 @@
     const forward = cameraForward(cam);
     let best = null;
     for (const g of Outliner.root) {
-      if (!(g instanceof Group) || !/^(mq_|ent_)/i.test(g.name)) continue;
+      if (!(g instanceof Group) || !/^(player_|mq_|ent_)/i.test(g.name)) continue;
       const to = new THREE.Vector3().fromArray(g.origin).add(new THREE.Vector3(0, 16, 0)).sub(pos);
       const along = to.dot(forward);
       if (along < 4 || to.angleTo(forward) > 0.6) continue;
@@ -1283,7 +1283,7 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
     const shift = (v) => [v[0] + origin[0], v[1] + origin[1], v[2] + origin[2]];
 
     Undo.initEdit({ outliner: true, elements: [] });
-    const root = new Group({ name: `mq_${n}`, origin: origin.slice(), rotation: [0, yaw, 0] }).init();
+    const root = new Group({ name: `Player_${n}`, origin: origin.slice(), rotation: [0, yaw, 0] }).init();
     const cubes = [];
     for (const bone of BONES) {
       const group = new Group({ name: bone.key, origin: shift(bone.pivot) }).addTo(root).init();
@@ -1332,7 +1332,7 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
       `Project: ${typeof Project !== 'undefined' && Project ? (Project.format && Project.format.id) || '?' : 'none'}`,
     ];
     const roots = mannequinRoots();
-    if (!roots.length) lines.push('No top-level groups named mq_… found.');
+    if (!roots.length) lines.push('No top-level groups named Player_… found.');
     for (const root of roots) {
       const bones = root.children.filter((c) => c instanceof Group).map((g) => `${g.name} [${g.rotation.map((v) => round(v, 1)).join(', ')}]`);
       lines.push('', `${root.name}: origin [${root.origin.join(', ')}], rotation [${root.rotation.map((v) => round(v, 1)).join(', ')}]`);
@@ -3353,28 +3353,32 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   }
 
   // ---- Animation frames ----------------------------------------------------------------------
-  // Poses an entity copy like a frame of one of its animations (walk, attack, sit...). Bone
-  // rotations only: Minecraft's copy can't move bones, so position and scale channels are left out.
+  // Poses a player or an entity copy with frames of its animations (walk, attack, sit...). Frames
+  // add to the pose it already has, and several animations can be stacked, each at its own frame.
+  // Bone rotations only: Minecraft's copies can't move or scale bones.
   const ANIM_FPS = 20; // one frame per game tick
   const ANIM_WALK_SPEED = 6; // blocks per second fed to walk cycles (query.modified_distance_moved)
   const ANIM_DEFAULT_LENGTH = 2; // seconds to scrub through for animations without a length
+  // looking at a target, first-person arms and UI renders don't make sense as poses
+  const ANIM_SKIP = /look_at|first_person|paperdoll|map_player|inventory|\.fp\b|_fp\b|attack\.positions/i;
 
-  // The entity's own animations (not controllers), as { name, id, def, length, keyframed }.
-  function entityAnimations(content, entityId) {
+  // The animations of an entity type that turn at least one of `bones` (lower-case names), as
+  // { name, id, def, length, keyframed }.
+  function entityAnimations(content, entityId, bones = null) {
     const entity = content.entities.get(entityId);
     if (!entity) return [];
     const out = [];
     const seen = new Set();
     for (const [name, id] of Object.entries(entity.description.animations || {})) {
-      if (typeof id !== 'string' || /^controller\./.test(id) || seen.has(id)) continue;
+      if (typeof id !== 'string' || /^controller\./.test(id) || seen.has(id) || ANIM_SKIP.test(name) || ANIM_SKIP.test(id)) continue;
       const def = content.animations.get(id);
       if (!def || !def.bones) continue;
-      const rotates = Object.values(def.bones).some((b) => b && b.rotation !== undefined);
-      if (!rotates) continue;
+      const turned = Object.entries(def.bones).filter(([, b]) => b && b.rotation !== undefined).map(([n]) => n.toLowerCase());
+      if (!turned.length || (bones && !turned.some((n) => bones.has(n)))) continue;
       seen.add(id);
       const keyframed = Object.values(def.bones).some((b) => b && b.rotation && typeof b.rotation === 'object' && !Array.isArray(b.rotation));
       const length = Number(def.animation_length) > 0 ? Number(def.animation_length) : ANIM_DEFAULT_LENGTH;
-      out.push({ name, id, def, length, keyframed, loop: def.loop === true || def.loop === 'true' });
+      out.push({ name, id, def, length, keyframed });
     }
     return out.sort((a, b) => a.name.localeCompare(b.name));
   }
@@ -3422,7 +3426,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
       if (kf && typeof kf === 'object' && !Array.isArray(kf)) return which === 'pre' ? kf.pre || kf.post || kf.value : kf.post || kf.pre || kf.value;
       return kf;
     };
-    let after = keys.findIndex((k) => parseFloat(k) > t);
+    const after = keys.findIndex((k) => parseFloat(k) > t);
     if (after === -1) return value(side(keys[keys.length - 1], 'post'));
     if (after === 0) return value(side(keys[0], 'pre'));
     const k0 = keys[after - 1];
@@ -3435,50 +3439,137 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     return a.map((v, i) => v + (b[i] - v) * f);
   }
 
-  // Blockbench rotation for every bone of an entity copy at time t of an animation.
-  function animationPose(root, content, anim, t) {
-    const info = root.pose_entity;
-    const entity = content.entities.get(info.entity);
+  // What an animation can pose: an entity copy (its own type's animations, its rest pose) or a
+  // player (the player's animations; a player's rest pose is all zeros).
+  function animationTarget(root) {
+    const groups = new Map();
+    eachDescendant(root, (node) => {
+      if (node instanceof Group && !groups.has(node.name.toLowerCase())) groups.set(node.name.toLowerCase(), node);
+    });
+    const rest = new Map();
+    if (ENTITY_PREFIX.test(root.name) && root.pose_entity) {
+      for (const [name, r] of Object.entries(root.pose_entity.rest || {})) rest.set(name.toLowerCase(), r.slice());
+      return { root, entityId: root.pose_entity.entity, groups, rest };
+    }
+    for (const name of groups.keys()) rest.set(name, [0, 0, 0]);
+    return { root, entityId: 'minecraft:player', groups, rest };
+  }
+
+  // How far one animation turns each bone at time t, as Blockbench rotations to add (Bedrock
+  // animations turn X and Y the other way round). "this" in its Molang is the bone's rotation
+  // before the animation: `base`.
+  function animationDelta(target, content, anim, t, base) {
+    const entity = content.entities.get(target.entityId);
     const queries = animQueries(t, anim.length);
     const vars = Object.assign({ attack_time: queries.attack_time }, entity ? idleVariables(entity.description, queries) : {});
     // walk cycles run on distance moved rather than time ("anim_time_update")
     if (anim.def.anim_time_update !== undefined) queries.anim_time = idleValue(anim.def.anim_time_update, 0, vars, queries);
     const weight = entity ? animationWeight(content, entity.description, anim.name, vars, queries) : 1;
-    const channels = new Map(Object.entries(anim.def.bones).map(([name, c]) => [name.toLowerCase(), c]));
-    const pose = new Map();
-    for (const [name, rest] of Object.entries(info.rest || {})) {
-      const channel = channels.get(name.toLowerCase());
-      const r = channel && channelAt(channel.rotation, queries.anim_time, toBedrockRot(rest), vars, queries);
-      if (r) for (let i = 0; i < 3; i++) r[i] *= weight;
-      // an animation's rotation adds to the bone's own (Bedrock convention; Blockbench flips X and Y)
-      pose.set(name.toLowerCase(), r ? [rest[0] - r[0], rest[1] - r[1], rest[2] + r[2]] : rest.slice());
+    const delta = new Map();
+    for (const [name, channels] of Object.entries(anim.def.bones)) {
+      const key = name.toLowerCase();
+      if (!channels || !target.groups.has(key)) continue;
+      const before = base.get(key) || target.rest.get(key) || [0, 0, 0];
+      const r = channelAt(channels.rotation, queries.anim_time, toBedrockRot(before), vars, queries);
+      if (r) delta.set(key, [-r[0] * weight, -r[1] * weight, r[2] * weight]);
+    }
+    return delta;
+  }
+
+  // The base pose plus every layer's frame.
+  function composePose(target, content, base, layers) {
+    const pose = new Map([...base].map(([k, r]) => [k, r.slice()]));
+    for (const layer of layers) {
+      const delta = animationDelta(target, content, layer.anim, layer.frame / ANIM_FPS, base);
+      for (const [key, d] of delta) {
+        const r = pose.get(key) || (target.rest.get(key) || [0, 0, 0]).slice();
+        pose.set(key, [r[0] + d[0], r[1] + d[1], r[2] + d[2]]);
+      }
     }
     return pose;
   }
 
-  function entityBoneGroups(root) {
-    const groups = [];
-    eachDescendant(root, (node) => {
-      if (node instanceof Group) groups.push(node);
-    });
-    return groups;
+  // One animation at time t on top of the rest pose (used by tests and thumbnails).
+  function animationPose(root, content, anim, t) {
+    const target = animationTarget(root);
+    return composePose(target, content, target.rest, [{ anim, frame: t * ANIM_FPS }]);
   }
 
-  function applyPose(root, pose) {
-    const groups = entityBoneGroups(root);
-    for (const g of groups) {
-      const r = pose.get(g.name.toLowerCase());
-      if (r) for (let i = 0; i < 3; i++) g.rotation[i] = round(r[i], 3);
+  function applyPose(target, pose) {
+    for (const [key, group] of target.groups) {
+      const r = pose.get(key);
+      if (r) for (let i = 0; i < 3; i++) group.rotation[i] = round(wrap(r[i]), 3);
     }
-    refreshGroups(groups);
+    refreshGroups([...target.groups.values()]);
   }
 
-  // Pose Studio ▸ Animation Frame… (an entity copy selected): pick an animation, play or scrub it,
-  // and keep the frame you like as the pose.
+  // A small live view of the model for the animation window. It draws the model's own meshes
+  // from the scene with a second renderer, so skins, textures and equipment show as they are.
+  function createAnimationPreview(root, size = 260) {
+    let renderer;
+    try {
+      renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
+    } catch (e) {
+      return null;
+    }
+    renderer.setPixelRatio(window.devicePixelRatio || 1);
+    renderer.setSize(size, size, false);
+    renderer.domElement.style.width = `${size}px`;
+    renderer.domElement.style.height = `${size}px`;
+    renderer.domElement.style.borderRadius = '6px';
+    renderer.domElement.style.background = 'var(--color-back, #1e1e1e)';
+    const camera = new THREE.PerspectiveCamera(30, 1, 0.5, 4000);
+    let framing = null;
+    const draw = () => {
+      const object = root.mesh;
+      if (!object) return;
+      object.updateMatrixWorld(true);
+      if (!framing) {
+        // frame the model once, from the front three-quarter side, so animating doesn't jitter it
+        const box = new THREE.Box3().setFromObject(object);
+        if (box.isEmpty()) return;
+        const center = box.getCenter(new THREE.Vector3());
+        const radius = Math.max(box.getSize(new THREE.Vector3()).length() / 2, 4);
+        const facing = new THREE.Vector3(0, 0, -1).applyQuaternion(object.getWorldQuaternion(new THREE.Quaternion()));
+        facing.y = 0;
+        if (facing.lengthSq() < 1e-6) facing.set(0, 0, -1);
+        facing.normalize().applyAxisAngle(new THREE.Vector3(0, 1, 0), -0.6);
+        framing = { center, dir: facing.add(new THREE.Vector3(0, 0.45, 0)).normalize(), distance: radius / Math.sin((15 * Math.PI) / 180) };
+      }
+      camera.position.copy(framing.center).addScaledVector(framing.dir, framing.distance);
+      camera.lookAt(framing.center);
+      // hide selection outlines while drawing
+      const hidden = [];
+      object.traverse((o) => {
+        if ((o.isLineSegments || o.isLine) && o.visible) {
+          o.visible = false;
+          hidden.push(o);
+        }
+      });
+      renderer.render(object, camera);
+      for (const o of hidden) o.visible = true;
+    };
+    const timer = setInterval(() => {
+      try {
+        draw();
+      } catch (e) {
+        // the model went away; nothing to draw
+      }
+    }, 33);
+    return {
+      canvas: renderer.domElement,
+      dispose() {
+        clearInterval(timer);
+        renderer.dispose();
+      },
+    };
+  }
+
+  // Pose Studio ▸ Animation… (a player or an entity copy selected).
   async function openAnimationFrames() {
     const root = selectedPoseRoot();
-    if (!root || !ENTITY_PREFIX.test(root.name) || !root.pose_entity) {
-      Blockbench.showQuickMessage('Select an entity (ent_) first', 2000);
+    if (!root) {
+      Blockbench.showQuickMessage('Select a player (Player_) or entity (ent_) first', 2000);
       return;
     }
     let content;
@@ -3488,117 +3579,177 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
       showError('Pose Studio: animations', e);
       return;
     }
-    const animations = entityAnimations(content, root.pose_entity.entity);
+    const target = animationTarget(root);
+    const animations = entityAnimations(content, target.entityId, new Set(target.groups.keys()));
     if (!animations.length) {
-      Blockbench.showMessageBox({ title: 'Pose Studio', message: `${root.name} has no animations that turn its bones.` });
+      Blockbench.showMessageBox({ title: 'Pose Studio', message: `No animations found that move ${root.name}'s bones.` });
       return;
     }
-    const groups = entityBoneGroups(root);
-    const original = new Map(groups.map((g) => [g, g.rotation.slice()]));
-    const restore = () => {
-      for (const [g, r] of original) for (let i = 0; i < 3; i++) g.rotation[i] = r[i];
-      refreshGroups(groups);
-    };
+    const groups = [...target.groups.values()];
+    // the pose it has now: animations add to this
+    const current = new Map([...target.groups].map(([k, g]) => [k, g.rotation.slice()]));
     Undo.initEdit({ groups });
     let timer = null;
     const stop = () => {
       if (timer) clearInterval(timer);
       timer = null;
     };
+    let preview = null;
     let vm = null;
+    let uid = 0;
+    const byId = new Map(animations.map((a) => [a.id, a]));
+    const update = () => {
+      if (!vm) return;
+      const base = vm.fromRest ? target.rest : current;
+      const layers = vm.layers.map((l) => ({ anim: byId.get(l.id), frame: l.frame }));
+      applyPose(target, composePose(target, content, base, layers));
+    };
     const dialog = new Dialog({
       id: 'pose_studio_animation_frames',
-      title: `Animation Frame: ${root.name}`,
-      width: 560,
-      buttons: ['Use This Frame', 'Cancel'],
+      title: `Animation: ${root.name}`,
+      width: 760,
+      buttons: ['Apply', 'Cancel'],
       cancelIndex: 1,
       component: {
         data: () => ({
           animations: animations.map((a) => ({ name: a.name, id: a.id, frames: Math.max(1, Math.round(a.length * ANIM_FPS)), keyframed: a.keyframed })),
           search: '',
-          selected: '',
-          frame: 0,
+          layers: [],
+          active: 0,
           playing: false,
+          fromRest: false,
+          hasPreview: false,
         }),
         mounted() {
           vm = this;
+          preview = createAnimationPreview(root);
+          if (preview && this.$refs && this.$refs.preview) {
+            this.$refs.preview.appendChild(preview.canvas);
+            this.hasPreview = true;
+          }
         },
         computed: {
           shown() {
             const q = this.search.trim().toLowerCase();
             return this.animations.filter((a) => !q || a.name.toLowerCase().includes(q) || a.id.toLowerCase().includes(q));
           },
-          current() {
-            return this.animations.find((a) => a.id === this.selected) || null;
+          activeLayer() {
+            return this.layers.find((l) => l.uid === this.active) || null;
           },
         },
         methods: {
+          inStack(a) {
+            return this.layers.some((l) => l.id === a.id);
+          },
+          // clicking an animation adds it to the stack (or selects it if it's already there)
           pick(a) {
-            this.selected = a.id;
-            this.frame = Math.min(this.frame, a.frames);
-            this.show();
+            const found = this.layers.find((l) => l.id === a.id);
+            if (found) {
+              this.active = found.uid;
+              return;
+            }
+            const layer = { uid: ++uid, id: a.id, name: a.name, frames: a.frames, frame: 0 };
+            this.layers.push(layer);
+            this.active = layer.uid;
+            update();
           },
-          show() {
-            const anim = animations.find((a) => a.id === this.selected);
-            if (anim) applyPose(root, animationPose(root, content, anim, this.frame / ANIM_FPS));
+          remove(layer) {
+            this.layers.splice(this.layers.indexOf(layer), 1);
+            if (this.active === layer.uid) {
+              this.active = this.layers.length ? this.layers[this.layers.length - 1].uid : 0;
+              if (this.playing) this.toggle();
+            }
+            update();
           },
-          step(n) {
-            if (!this.current) return;
-            this.frame = (this.frame + n + this.current.frames + 1) % (this.current.frames + 1);
-            this.show();
+          setFrame(layer, frame) {
+            layer.frame = Math.max(0, Math.min(layer.frames, frame));
+            update();
+          },
+          step(layer, n) {
+            this.active = layer.uid;
+            layer.frame = (layer.frame + n + layer.frames + 1) % (layer.frames + 1);
+            update();
           },
           toggle() {
-            if (!this.current) return;
             if (this.playing) {
               stop();
               this.playing = false;
               return;
             }
+            const layer = this.activeLayer;
+            if (!layer) return;
             this.playing = true;
-            timer = setInterval(() => this.step(1), 1000 / ANIM_FPS);
+            timer = setInterval(() => this.step(this.activeLayer || layer, 1), 1000 / ANIM_FPS);
+          },
+          changedBase() {
+            update();
           },
         },
         template: `
-          <div class="pose_studio_animation_frames">
-            <input type="text" v-model="search" placeholder="Search animations…" class="dark_bordered" style="width: 100%; margin-bottom: 6px;">
-            <div style="max-height: 220px; overflow-y: auto; border: 1px solid var(--color-border); border-radius: 4px; margin-bottom: 10px;">
-              <div v-for="a in shown" :key="a.id" @click="pick(a)" :title="a.id"
-                   :style="{ padding: '4px 8px', cursor: 'pointer', display: 'flex', justifyContent: 'space-between', gap: '8px',
-                             background: a.id === selected ? 'var(--color-selected)' : '' }">
-                <span>{{ a.name }}</span>
-                <span style="opacity: 0.55; font-size: 0.85em;">{{ a.keyframed ? a.frames + ' frames' : 'loop' }}</span>
+          <div class="pose_studio_animation" style="display: flex; gap: 12px;">
+            <div style="flex: 1; min-width: 0; display: flex; flex-direction: column;">
+              <input type="text" v-model="search" placeholder="Search animations…" class="dark_bordered" style="width: 100%; margin-bottom: 6px;">
+              <div style="flex: 1; max-height: 340px; overflow-y: auto; border: 1px solid var(--color-border); border-radius: 4px;">
+                <div v-for="a in shown" :key="a.id" @click="pick(a)" :title="'Add ' + a.id + ' to the stack'"
+                     :style="{ padding: '4px 8px', cursor: 'pointer', display: 'flex', justifyContent: 'space-between', gap: '8px',
+                               background: inStack(a) ? 'var(--color-selected)' : '' }">
+                  <span>{{ inStack(a) ? '✓ ' : '' }}{{ a.name }}</span>
+                  <span style="opacity: 0.55; font-size: 0.85em;">{{ a.keyframed ? a.frames + ' frames' : 'loop' }}</span>
+                </div>
+                <p v-if="!shown.length" style="padding: 6px 8px; opacity: 0.7;">No animations match.</p>
               </div>
-              <p v-if="!shown.length" style="padding: 6px 8px; opacity: 0.7;">No animations match.</p>
             </div>
-            <template v-if="current">
-              <div style="display: flex; align-items: center; gap: 6px;">
-                <button @click="step(-1)" title="Previous frame">◀</button>
-                <button @click="toggle()" :title="playing ? 'Pause' : 'Play'" style="min-width: 64px;">{{ playing ? 'Pause' : 'Play' }}</button>
-                <button @click="step(1)" title="Next frame">▶</button>
-                <input type="range" min="0" :max="current.frames" step="1" v-model.number="frame" @input="show()" style="flex: 1;">
-                <span style="min-width: 110px; text-align: right;">Frame {{ frame }} / {{ current.frames }}</span>
+            <div style="width: 300px; flex: none; display: flex; flex-direction: column; gap: 8px;">
+              <div ref="preview" style="display: flex; justify-content: center; min-height: 40px;"></div>
+              <p v-if="!hasPreview" style="opacity: 0.6; margin: 0;">(The viewport shows the pose.)</p>
+              <div style="display: flex; align-items: center; justify-content: space-between; gap: 6px;">
+                <b>Stack</b>
+                <button @click="toggle()" :disabled="!activeLayer" style="min-width: 70px;">{{ playing ? 'Pause' : 'Play' }}</button>
               </div>
-              <p style="opacity: 0.7; margin-top: 8px;">{{ (frame / ${ANIM_FPS}).toFixed(2) }} s. Walk and run cycles are shown moving at a steady pace. Only bone rotations are used: Minecraft's copy can't move or scale bones.</p>
-            </template>
-            <p v-else style="opacity: 0.7;">Pick an animation to preview it on ${root.name}.</p>
+              <p v-if="!layers.length" style="opacity: 0.7; margin: 0;">Click animations on the left to stack them. Each one adds to the pose at its own frame.</p>
+              <div v-for="l in layers" :key="l.uid" @click="active = l.uid"
+                   :style="{ border: '1px solid var(--color-border)', borderRadius: '4px', padding: '4px 6px',
+                             background: l.uid === active ? 'var(--color-selected)' : '' }">
+                <div style="display: flex; justify-content: space-between; gap: 6px;">
+                  <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{{ l.name }}</span>
+                  <a href="#" @click.prevent.stop="remove(l)" title="Remove from the stack">✕</a>
+                </div>
+                <div style="display: flex; align-items: center; gap: 4px;">
+                  <button @click.stop="step(l, -1)" title="Previous frame">◀</button>
+                  <input type="range" min="0" :max="l.frames" step="1" :value="l.frame" @input="setFrame(l, Number($event.target.value))" @mousedown="active = l.uid" style="flex: 1;">
+                  <button @click.stop="step(l, 1)" title="Next frame">▶</button>
+                  <span style="min-width: 58px; text-align: right; font-size: 0.85em;">{{ l.frame }} / {{ l.frames }}</span>
+                </div>
+              </div>
+              <label style="display: flex; gap: 6px; align-items: center;" title="Off: animations add to the pose you've already made. On: start from the model's default pose.">
+                <input type="checkbox" v-model="fromRest" @change="changedBase()"> Reset pose (start from the default pose)
+              </label>
+              <p style="opacity: 0.6; margin: 0; font-size: 0.85em;">Walk cycles move at a steady pace; attacks play once per loop. Only bone rotations are used.</p>
+            </div>
           </div>`,
       },
       onButton(index) {
-        finish(index === 0 && vm && vm.selected);
+        finish(index === 0 && vm && (vm.layers.length > 0 || vm.fromRest));
       },
       onCancel() {
         finish(false);
       },
     });
-    // Keep the frame (one undo step) or put the pose back. Runs once, whichever way it closes.
+    // Keep the pose (one undo step) or put it back. Runs once, whichever way the window closes.
     let done = false;
     function finish(keep) {
       stop();
+      if (preview) preview.dispose();
+      preview = null;
       if (done) return;
       done = true;
-      if (keep) Undo.finishEdit('Animation frame');
+      if (keep) Undo.finishEdit('Animation pose');
       else {
-        restore();
+        for (const [key, g] of target.groups) {
+          const r = current.get(key);
+          for (let i = 0; i < 3; i++) g.rotation[i] = r[i];
+        }
+        refreshGroups(groups);
         if (Undo.cancelEdit) Undo.cancelEdit();
       }
     }
@@ -4439,7 +4590,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   async function openOutfit(tab = 'skin') {
     const target = selectedPoseRoot();
     if (!target) {
-      Blockbench.showQuickMessage('Select a mannequin (mq_) or entity (ent_) first', 2000);
+      Blockbench.showQuickMessage('Select a player (Player_) or entity (ent_) first', 2000);
       return;
     }
     const isEntity = ENTITY_PREFIX.test(target.name);
@@ -4600,6 +4751,18 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.27.0",
+      "date": "2026-09-30",
+      "changes": [
+        "Animation Frame… is now Animation… and works for players as well as entities.",
+        "Animations add to the pose you already made (a head you turned stays turned). Tick Reset pose to start from the default pose instead.",
+        "Stack several animations, each at its own frame (for example walk plus attack), and remove any with ✕.",
+        "A live preview of the model in the Animation window.",
+        "Look-at-target and first-person animations are no longer listed.",
+        "New mannequins are named Player_1, Player_2… (older mq_ mannequins still work)."
+      ]
+    },
     {
       "version": "0.26.0",
       "date": "2026-09-30",
@@ -4919,9 +5082,9 @@ ${PLUGIN_URL}`,
           condition: () => selectionIs('entity'),
         }),
         animation: new Action('pose_studio_animation', {
-          name: 'Animation Frame…', icon: 'animation', click: openAnimationFrames,
-          description: "Pose the selected entity like a frame of one of its animations (walk, attack, sit...).",
-          condition: () => selectionIs('entity'),
+          name: 'Animation…', icon: 'animation', click: openAnimationFrames,
+          description: 'Pose the selected player or entity with frames of its animations (walk, attack, sit...), stacked on the pose it has.',
+          condition: () => selectionIs('entity') || selectionIs('mannequin'),
         }),
         skin: new Action('pose_studio_skin', {
           name: 'Skin Library…', icon: 'checkroom', click: openSkinLibrary,

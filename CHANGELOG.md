@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.27.0 (2026-09-30)
+
+- Animation Frame… is now Animation… and works for players as well as entities.
+- Animations add to the pose you already made (a head you turned stays turned). Tick Reset pose to start from the default pose instead.
+- Stack several animations, each at its own frame (for example walk plus attack), and remove any with ✕.
+- A live preview of the model in the Animation window.
+- Look-at-target and first-person animations are no longer listed.
+- New mannequins are named Player_1, Player_2… (older mq_ mannequins still work).
+
 ## 0.26.0 (2026-09-30)
 
 - New: Animation Frame… (with an entity selected). Pick one of the entity's animations, play or scrub through it, and keep the frame you like as its pose. Works with keyframed animations and with Minecraft's walk, attack and idle cycles.
