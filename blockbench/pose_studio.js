@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.25.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.26.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -588,6 +588,8 @@
       povLabel = null;
       if (povNav) povNav.remove();
       povNav = null;
+      if (povFov) povFov.box.remove();
+      povFov = null;
       if (povPreview) {
         if (povPreview.controls) povPreview.controls.enabled = true;
         povPreview.aspect_ratio = undefined;
@@ -623,6 +625,7 @@
   function updatePovViewport() {
     if (!povPreview || !povPreview.camera || typeof Project === 'undefined' || !Project) return;
     const cam = activeCamera();
+    syncPovFovSlider();
     if (povLabel) {
       const text = povLabelText(cam);
       if (povLabel.textContent !== text) povLabel.textContent = text;
@@ -678,7 +681,59 @@
       bar.appendChild(button);
     }
     node.appendChild(bar);
+    createPovFovSlider(node);
     return bar;
+  }
+
+  // FOV slider along the camera view's bottom-left corner, for the active camera.
+  let povFov = null; // { box, input, label }
+  function createPovFovSlider(node) {
+    const box = document.createElement('div');
+    box.className = 'pose_studio_pov_fov';
+    Object.assign(box.style, {
+      position: 'absolute', bottom: '8px', left: '8px', zIndex: 6, display: 'flex', alignItems: 'center', gap: '6px',
+      padding: '3px 8px', borderRadius: '6px', background: 'rgba(0, 0, 0, 0.55)', color: '#fff', font: '600 12px sans-serif',
+    });
+    const label = document.createElement('span');
+    label.style.minWidth = '64px';
+    const input = document.createElement('input');
+    input.type = 'range';
+    input.min = '10';
+    input.max = '120';
+    input.step = '1';
+    input.title = 'Field of view of the camera (degrees)';
+    input.style.width = '140px';
+    input.addEventListener('pointerdown', (e) => {
+      e.stopPropagation();
+      povFov.dragging = true;
+    });
+    input.addEventListener('change', () => (povFov.dragging = false));
+    input.addEventListener('input', () => {
+      const cam = activeCamera();
+      if (!cam) return;
+      const fov = Number(input.value);
+      applyFov(cam, fov);
+      label.textContent = `FOV ${fov}°`;
+      updatePovViewport();
+    });
+    box.appendChild(label);
+    box.appendChild(input);
+    node.appendChild(box);
+    povFov = { box, input, label, dragging: false };
+    syncPovFovSlider();
+  }
+
+  // Keeps the slider on the active camera's value (unless it's being dragged).
+  function syncPovFovSlider() {
+    if (!povFov) return;
+    const cam = activeCamera();
+    povFov.box.style.opacity = cam ? '1' : '0.5';
+    povFov.input.disabled = !cam;
+    const fov = Math.round((cam && cam.pose_fov) || mainViewportFov());
+    if (povFov.dragging) return;
+    if (String(povFov.input.value) !== String(fov)) povFov.input.value = String(fov);
+    const text = `FOV ${fov}°`;
+    if (povFov.label.textContent !== text) povFov.label.textContent = text;
   }
 
   const camQuaternion = (cam) => eulerQuaternion(cam.rotation);
@@ -3090,7 +3145,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   // Value of a Molang expression for an idle entity: queries are 0 (except IDLE_QUERIES),
   // variables come from `vars` (the entity's pre-animation scripts) or are 0, context is 0.
   // Statements and anything unrecognised count as 0.
-  function idleValue(expr, self = 0, vars = null) {
+  function idleValue(expr, self = 0, vars = null, queries = IDLE_QUERIES) {
     if (typeof expr === 'number') return expr;
     if (typeof expr !== 'string') return 0;
     let js = expr.toLowerCase().trim();
@@ -3099,7 +3154,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     js = js
       .replace(/\b(query|q|variable|v|temp|t|context|c)\.([a-z0-9_.]+)(\s*\([^()]*\))?/g, (m, kind, name) => {
         let value = 0;
-        if (kind === 'query' || kind === 'q') value = IDLE_QUERIES[name] || 0;
+        if (kind === 'query' || kind === 'q') value = queries[name] || 0;
         else if ((kind === 'variable' || kind === 'v') && vars && name in vars) value = vars[name];
         return `(${Number(value) || 0})`;
       })
@@ -3132,13 +3187,14 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
 
   // Variables the entity's initialize / pre_animation scripts set, evaluated for an idle mob
   // (e.g. the parrot's variable.state: standing).
-  function idleVariables(description) {
+  function idleVariables(description, queries = IDLE_QUERIES) {
     const scripts = description.scripts || {};
-    const vars = {};
+    // set by the game itself: humanoid walks divide by it (1 when not gliding)
+    const vars = { gliding_speed_value: 1 };
     for (const line of [].concat(scripts.initialize || [], scripts.pre_animation || [])) {
       for (const statement of String(line).split(';')) {
         const m = statement.match(/^\s*(?:variable|v)\.([a-z0-9_.]+)\s*=(?!=)\s*([\s\S]+?)\s*$/i);
-        if (m) vars[m[1].toLowerCase()] = idleValue(m[2], 0, vars);
+        if (m) vars[m[1].toLowerCase()] = idleValue(m[2], 0, vars, queries);
       }
     }
     return vars;
@@ -3294,6 +3350,259 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   function entityModel(content, entry) {
     const geometry = restGeometry(content, entry.id, entry.geometryId);
     return geometry ? bedrockToBlockbench(geometry) : null;
+  }
+
+  // ---- Animation frames ----------------------------------------------------------------------
+  // Poses an entity copy like a frame of one of its animations (walk, attack, sit...). Bone
+  // rotations only: Minecraft's copy can't move bones, so position and scale channels are left out.
+  const ANIM_FPS = 20; // one frame per game tick
+  const ANIM_WALK_SPEED = 6; // blocks per second fed to walk cycles (query.modified_distance_moved)
+  const ANIM_DEFAULT_LENGTH = 2; // seconds to scrub through for animations without a length
+
+  // The entity's own animations (not controllers), as { name, id, def, length, keyframed }.
+  function entityAnimations(content, entityId) {
+    const entity = content.entities.get(entityId);
+    if (!entity) return [];
+    const out = [];
+    const seen = new Set();
+    for (const [name, id] of Object.entries(entity.description.animations || {})) {
+      if (typeof id !== 'string' || /^controller\./.test(id) || seen.has(id)) continue;
+      const def = content.animations.get(id);
+      if (!def || !def.bones) continue;
+      const rotates = Object.values(def.bones).some((b) => b && b.rotation !== undefined);
+      if (!rotates) continue;
+      seen.add(id);
+      const keyframed = Object.values(def.bones).some((b) => b && b.rotation && typeof b.rotation === 'object' && !Array.isArray(b.rotation));
+      const length = Number(def.animation_length) > 0 ? Number(def.animation_length) : ANIM_DEFAULT_LENGTH;
+      out.push({ name, id, def, length, keyframed, loop: def.loop === true || def.loop === 'true' });
+    }
+    return out.sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  // Queries at time t of an animation: a mob walking along at ANIM_WALK_SPEED, and an attack
+  // (attack_time 0..1) spread over the animation's length.
+  function animQueries(t, length) {
+    const attack = length > 0 ? (t % length) / length : 0;
+    return Object.assign({}, IDLE_QUERIES, {
+      anim_time: t, life_time: t, time_stamp: t * ANIM_FPS,
+      modified_distance_moved: t * ANIM_WALK_SPEED, walk_distance: t * ANIM_WALK_SPEED,
+      modified_move_speed: 0.5, ground_speed: ANIM_WALK_SPEED, is_moving: 1, attack_time: attack,
+    });
+  }
+
+  // How strongly the entity plays an animation: entries like { "walk": "query.modified_move_speed" }
+  // in its animate list or its controllers blend it by that amount. A plain on/off condition that
+  // is off (the mob isn't a baby, say) still shows the animation in full, since it was picked.
+  function animationWeight(content, description, name, vars, queries) {
+    let expr = null;
+    const look = (list) => {
+      for (const entry of list || []) {
+        if (entry && typeof entry === 'object' && name in entry) expr = entry[name];
+      }
+    };
+    look((description.scripts || {}).animate);
+    for (const id of Object.values(description.animations || {})) {
+      const controller = typeof id === 'string' && content.animationControllers.get(id);
+      for (const state of Object.values((controller && controller.states) || {})) look(state.animations);
+    }
+    if (typeof expr !== 'string' && typeof expr !== 'number') return 1;
+    const w = idleValue(expr, 0, vars, queries);
+    return w > 0 && w < 1 ? w : 1;
+  }
+
+  // [x, y, z] of a rotation channel at time t (Bedrock convention), or null.
+  function channelAt(channel, t, self, vars, queries) {
+    if (channel === undefined || channel === null) return null;
+    const value = (v) => (Array.isArray(v) ? [0, 1, 2].map((i) => idleValue(v[i], self[i], vars, queries)) : [0, 1, 2].map((i) => idleValue(v, self[i], vars, queries)));
+    if (typeof channel !== 'object' || Array.isArray(channel)) return value(channel);
+    const keys = Object.keys(channel).filter((k) => !isNaN(parseFloat(k))).sort((a, b) => parseFloat(a) - parseFloat(b));
+    if (!keys.length) return null;
+    const side = (k, which) => {
+      const kf = channel[k];
+      if (kf && typeof kf === 'object' && !Array.isArray(kf)) return which === 'pre' ? kf.pre || kf.post || kf.value : kf.post || kf.pre || kf.value;
+      return kf;
+    };
+    let after = keys.findIndex((k) => parseFloat(k) > t);
+    if (after === -1) return value(side(keys[keys.length - 1], 'post'));
+    if (after === 0) return value(side(keys[0], 'pre'));
+    const k0 = keys[after - 1];
+    const k1 = keys[after];
+    const t0 = parseFloat(k0);
+    const t1 = parseFloat(k1);
+    const a = value(side(k0, 'post'));
+    const b = value(side(k1, 'pre'));
+    const f = t1 > t0 ? (t - t0) / (t1 - t0) : 0;
+    return a.map((v, i) => v + (b[i] - v) * f);
+  }
+
+  // Blockbench rotation for every bone of an entity copy at time t of an animation.
+  function animationPose(root, content, anim, t) {
+    const info = root.pose_entity;
+    const entity = content.entities.get(info.entity);
+    const queries = animQueries(t, anim.length);
+    const vars = Object.assign({ attack_time: queries.attack_time }, entity ? idleVariables(entity.description, queries) : {});
+    // walk cycles run on distance moved rather than time ("anim_time_update")
+    if (anim.def.anim_time_update !== undefined) queries.anim_time = idleValue(anim.def.anim_time_update, 0, vars, queries);
+    const weight = entity ? animationWeight(content, entity.description, anim.name, vars, queries) : 1;
+    const channels = new Map(Object.entries(anim.def.bones).map(([name, c]) => [name.toLowerCase(), c]));
+    const pose = new Map();
+    for (const [name, rest] of Object.entries(info.rest || {})) {
+      const channel = channels.get(name.toLowerCase());
+      const r = channel && channelAt(channel.rotation, queries.anim_time, toBedrockRot(rest), vars, queries);
+      if (r) for (let i = 0; i < 3; i++) r[i] *= weight;
+      // an animation's rotation adds to the bone's own (Bedrock convention; Blockbench flips X and Y)
+      pose.set(name.toLowerCase(), r ? [rest[0] - r[0], rest[1] - r[1], rest[2] + r[2]] : rest.slice());
+    }
+    return pose;
+  }
+
+  function entityBoneGroups(root) {
+    const groups = [];
+    eachDescendant(root, (node) => {
+      if (node instanceof Group) groups.push(node);
+    });
+    return groups;
+  }
+
+  function applyPose(root, pose) {
+    const groups = entityBoneGroups(root);
+    for (const g of groups) {
+      const r = pose.get(g.name.toLowerCase());
+      if (r) for (let i = 0; i < 3; i++) g.rotation[i] = round(r[i], 3);
+    }
+    refreshGroups(groups);
+  }
+
+  // Pose Studio ▸ Animation Frame… (an entity copy selected): pick an animation, play or scrub it,
+  // and keep the frame you like as the pose.
+  async function openAnimationFrames() {
+    const root = selectedPoseRoot();
+    if (!root || !ENTITY_PREFIX.test(root.name) || !root.pose_entity) {
+      Blockbench.showQuickMessage('Select an entity (ent_) first', 2000);
+      return;
+    }
+    let content;
+    try {
+      content = await previewContent();
+    } catch (e) {
+      showError('Pose Studio: animations', e);
+      return;
+    }
+    const animations = entityAnimations(content, root.pose_entity.entity);
+    if (!animations.length) {
+      Blockbench.showMessageBox({ title: 'Pose Studio', message: `${root.name} has no animations that turn its bones.` });
+      return;
+    }
+    const groups = entityBoneGroups(root);
+    const original = new Map(groups.map((g) => [g, g.rotation.slice()]));
+    const restore = () => {
+      for (const [g, r] of original) for (let i = 0; i < 3; i++) g.rotation[i] = r[i];
+      refreshGroups(groups);
+    };
+    Undo.initEdit({ groups });
+    let timer = null;
+    const stop = () => {
+      if (timer) clearInterval(timer);
+      timer = null;
+    };
+    let vm = null;
+    const dialog = new Dialog({
+      id: 'pose_studio_animation_frames',
+      title: `Animation Frame: ${root.name}`,
+      width: 560,
+      buttons: ['Use This Frame', 'Cancel'],
+      cancelIndex: 1,
+      component: {
+        data: () => ({
+          animations: animations.map((a) => ({ name: a.name, id: a.id, frames: Math.max(1, Math.round(a.length * ANIM_FPS)), keyframed: a.keyframed })),
+          search: '',
+          selected: '',
+          frame: 0,
+          playing: false,
+        }),
+        mounted() {
+          vm = this;
+        },
+        computed: {
+          shown() {
+            const q = this.search.trim().toLowerCase();
+            return this.animations.filter((a) => !q || a.name.toLowerCase().includes(q) || a.id.toLowerCase().includes(q));
+          },
+          current() {
+            return this.animations.find((a) => a.id === this.selected) || null;
+          },
+        },
+        methods: {
+          pick(a) {
+            this.selected = a.id;
+            this.frame = Math.min(this.frame, a.frames);
+            this.show();
+          },
+          show() {
+            const anim = animations.find((a) => a.id === this.selected);
+            if (anim) applyPose(root, animationPose(root, content, anim, this.frame / ANIM_FPS));
+          },
+          step(n) {
+            if (!this.current) return;
+            this.frame = (this.frame + n + this.current.frames + 1) % (this.current.frames + 1);
+            this.show();
+          },
+          toggle() {
+            if (!this.current) return;
+            if (this.playing) {
+              stop();
+              this.playing = false;
+              return;
+            }
+            this.playing = true;
+            timer = setInterval(() => this.step(1), 1000 / ANIM_FPS);
+          },
+        },
+        template: `
+          <div class="pose_studio_animation_frames">
+            <input type="text" v-model="search" placeholder="Search animations…" class="dark_bordered" style="width: 100%; margin-bottom: 6px;">
+            <div style="max-height: 220px; overflow-y: auto; border: 1px solid var(--color-border); border-radius: 4px; margin-bottom: 10px;">
+              <div v-for="a in shown" :key="a.id" @click="pick(a)" :title="a.id"
+                   :style="{ padding: '4px 8px', cursor: 'pointer', display: 'flex', justifyContent: 'space-between', gap: '8px',
+                             background: a.id === selected ? 'var(--color-selected)' : '' }">
+                <span>{{ a.name }}</span>
+                <span style="opacity: 0.55; font-size: 0.85em;">{{ a.keyframed ? a.frames + ' frames' : 'loop' }}</span>
+              </div>
+              <p v-if="!shown.length" style="padding: 6px 8px; opacity: 0.7;">No animations match.</p>
+            </div>
+            <template v-if="current">
+              <div style="display: flex; align-items: center; gap: 6px;">
+                <button @click="step(-1)" title="Previous frame">◀</button>
+                <button @click="toggle()" :title="playing ? 'Pause' : 'Play'" style="min-width: 64px;">{{ playing ? 'Pause' : 'Play' }}</button>
+                <button @click="step(1)" title="Next frame">▶</button>
+                <input type="range" min="0" :max="current.frames" step="1" v-model.number="frame" @input="show()" style="flex: 1;">
+                <span style="min-width: 110px; text-align: right;">Frame {{ frame }} / {{ current.frames }}</span>
+              </div>
+              <p style="opacity: 0.7; margin-top: 8px;">{{ (frame / ${ANIM_FPS}).toFixed(2) }} s. Walk and run cycles are shown moving at a steady pace. Only bone rotations are used: Minecraft's copy can't move or scale bones.</p>
+            </template>
+            <p v-else style="opacity: 0.7;">Pick an animation to preview it on ${root.name}.</p>
+          </div>`,
+      },
+      onButton(index) {
+        finish(index === 0 && vm && vm.selected);
+      },
+      onCancel() {
+        finish(false);
+      },
+    });
+    // Keep the frame (one undo step) or put the pose back. Runs once, whichever way it closes.
+    let done = false;
+    function finish(keep) {
+      stop();
+      if (done) return;
+      done = true;
+      if (keep) Undo.finishEdit('Animation frame');
+      else {
+        restore();
+        if (Undo.cancelEdit) Undo.cancelEdit();
+      }
+    }
+    dialog.show();
   }
 
   // ---- Thumbnail cache (IndexedDB, per viewer) ----
@@ -4292,6 +4601,14 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   // <changelog>
   const CHANGELOG = [
     {
+      "version": "0.26.0",
+      "date": "2026-09-30",
+      "changes": [
+        "New: Animation Frame… (with an entity selected). Pick one of the entity's animations, play or scrub through it, and keep the frame you like as its pose. Works with keyframed animations and with Minecraft's walk, attack and idle cycles.",
+        "New: a field of view slider in the bottom-left corner of the camera view."
+      ]
+    },
+    {
       "version": "0.25.0",
       "date": "2026-09-30",
       "changes": [
@@ -4601,6 +4918,11 @@ ${PLUGIN_URL}`,
           description: 'Armour and held items for the selected entity.',
           condition: () => selectionIs('entity'),
         }),
+        animation: new Action('pose_studio_animation', {
+          name: 'Animation Frame…', icon: 'animation', click: openAnimationFrames,
+          description: "Pose the selected entity like a frame of one of its animations (walk, attack, sit...).",
+          condition: () => selectionIs('entity'),
+        }),
         skin: new Action('pose_studio_skin', {
           name: 'Skin Library…', icon: 'checkroom', click: openSkinLibrary,
           description: 'Add, replace and remove skins (dress a mannequin from Skin & Equipment…).',
@@ -4672,6 +4994,7 @@ ${PLUGIN_URL}`,
         a.outfit,
         a.entity,
         a.equipment,
+        a.animation,
         { name: 'Add Camera', id: 'pose_studio_add_camera', icon: 'videocam', children: [a.grabcam, a.savecam] },
         {
           name: 'Camera', id: 'pose_studio_camera_menu', icon: 'photo_camera_front',

@@ -1,5 +1,13 @@
 [
   {
+    "version": "0.26.0",
+    "date": "2026-09-30",
+    "changes": [
+      "New: Animation Frame… (with an entity selected). Pick one of the entity's animations, play or scrub through it, and keep the frame you like as its pose. Works with keyframed animations and with Minecraft's walk, attack and idle cycles.",
+      "New: a field of view slider in the bottom-left corner of the camera view."
+    ]
+  },
+  {
     "version": "0.25.0",
     "date": "2026-09-30",
     "changes": [

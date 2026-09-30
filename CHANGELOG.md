@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.26.0 (2026-09-30)
+
+- New: Animation Frame… (with an entity selected). Pick one of the entity's animations, play or scrub through it, and keep the frame you like as its pose. Works with keyframed animations and with Minecraft's walk, attack and idle cycles.
+- New: a field of view slider in the bottom-left corner of the camera view.
+
 ## 0.25.0 (2026-09-30)
 
 - Add Camera ▸ From Minecraft View no longer moves the viewport you work in; only the camera view shows the new camera.
