@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.28.0 (2026-09-30)
+
+- New: Variant… (with an entity selected) shows every look of that mob with thumbnails: biome and colour variants and baby versions. Click one to swap it where it stands, keeping its pose.
+- New: a Baby checkbox in Add Entity adds baby versions directly.
+- All variants and babies are prepared for Minecraft along with the entities, so switching is instant in game too (one pack reload after this update).
+- Scan World is now Import World, and it is several times faster: the data comes back from Minecraft in large, checked batches and a more compact format. Update the Minecraft packs (Check for Updates) to get the speed-up.
+- Turning on Sync Game Camera sets the camera view to Match Minecraft Window.
+- The Animation window fits without a scroll bar.
+
 ## 0.27.1 (2026-09-30)
 
 - The Animation window remembers what you applied: reopening it shows the same stack and frames instead of adding the animation a second time. Bones you posed by hand in between keep that posing.

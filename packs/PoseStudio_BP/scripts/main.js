@@ -309,11 +309,13 @@ function debug(player) {
 
 // ---- Game -> Blockbench channel -------------------------------------------------------------
 // The websocket can only run commands, so results travel back as fake-player names on a scoreboard
-// objective that is never shown on screen. Blockbench asks for one page at a time
-// (`pose:page {"n":0}`), then reads it with `scoreboard players list`. Every name looks like
-// `PSD[op|page|item]`; page 0 always carries `M|ready|<pages>` or `M|busy|<percent>`.
+// objective that is never shown on screen. Blockbench asks for a batch of pages at a time
+// (`pose:page {"n":1,"k":8}` = pages 1 to 8), then reads them with `scoreboard players list`.
+// Every name looks like `PSD[op|page|item]`; page 0 always carries
+// `M|ready|<pages>|<items>|<items per page>` or `M|busy|<percent>`.
 const IO_OBJECTIVE = "pose_io";
 const ITEMS_PER_PAGE = 30;
+const MAX_PAGES_PER_BATCH = 16;
 const MAX_ITEM_LENGTH = 90;
 const MAX_SCAN_BLOCKS = 30000;
 
@@ -339,17 +341,26 @@ function finishResult(items) {
   result.busy = false;
 }
 
-function publishPage(n) {
+function publishPage(n, k = 1) {
   const scoreboard = world.scoreboard;
   if (scoreboard.getObjective(IO_OBJECTIVE)) scoreboard.removeObjective(IO_OBJECTIVE);
   if (n < 0) return; // -1 = clean up
   const objective = scoreboard.addObjective(IO_OBJECTIVE, IO_OBJECTIVE);
-  let meta = `M|ready|${result.pages.length}`;
-  if (result.busy) meta = `M|busy|${Math.round(result.progress * 100)}`;
-  else if (result.error) meta = `M|error|${result.error}`;
-  const items = n === 0 ? [meta] : [];
-  if (!result.busy) items.push(...(result.pages[n] ?? []));
-  items.forEach((item, i) => objective.setScore(`PSD[${result.op}|${n}|${item}]`, i));
+  const count = Math.max(1, Math.min(MAX_PAGES_PER_BATCH, Math.floor(k) || 1));
+  let score = 0;
+  for (let page = n; page < n + count; page++) {
+    const items = [];
+    if (page === 0) {
+      const total = result.pages.reduce((sum, list) => sum + list.length, 0);
+      let meta = `M|ready|${result.pages.length}|${total}|${ITEMS_PER_PAGE}`;
+      if (result.busy) meta = `M|busy|${Math.round(result.progress * 100)}`;
+      else if (result.error) meta = `M|error|${result.error}`;
+      items.push(meta);
+    }
+    if (!result.busy) items.push(...(result.pages[page] ?? []));
+    for (const item of items) objective.setScore(`PSD[${result.op}|${page}|${item}]`, score++);
+    if (result.busy) break;
+  }
 }
 
 // Packs short entries into items of at most MAX_ITEM_LENGTH characters: `B|a;b;c`.
@@ -364,6 +375,28 @@ function packItems(prefix, entries) {
     current += (current ? ";" : "") + entry;
   }
   if (current) items.push(prefix + current);
+  return items;
+}
+
+// Blocks as `Q|` items: 8 characters each, no separators: x, y, z (offset by 2048) and the palette
+// index, 2 characters of CODE_ALPHABET apiece.
+const CODE_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-_";
+const code2 = (n) => CODE_ALPHABET[(n >> 6) & 63] + CODE_ALPHABET[n & 63];
+function packBlocks(blocks) {
+  const perItem = Math.floor((MAX_ITEM_LENGTH - 2) / 8);
+  const items = [];
+  let current = "";
+  let count = 0;
+  for (const [key, palette] of blocks) {
+    const [x, y, z] = key.split(".").map(Number);
+    current += code2(x + 2048) + code2(y + 2048) + code2(z + 2048) + code2(palette);
+    if (++count === perItem) {
+      items.push("Q|" + current);
+      current = "";
+      count = 0;
+    }
+  }
+  if (current) items.push("Q|" + current);
   return items;
 }
 
@@ -485,7 +518,7 @@ function* scanJob(dimension, eye, anchor, { radius, rays, dist }) {
 
   const items = [];
   for (const [type, index] of palette) items.push(`P|${index}|${type}`);
-  items.push(...packItems("B|", Array.from(blocks, ([key, p]) => `${key}.${p}`)));
+  items.push(...packBlocks(blocks));
   finishResult(items);
 }
 
@@ -519,7 +552,7 @@ function handle(ev) {
     case "pose:hideplayer":
       return setPlayerHidden(player, !!data.hide);
     case "pose:page":
-      return publishPage(Number(data.n) || 0);
+      return publishPage(Number(data.n) || 0, Number(data.k) || 1);
     case "pose:grabcam":
       return grabCamera(player, data);
     case "pose:scan":

@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.27.1'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.28.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -1308,6 +1308,9 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
   function setCameraSync(value) {
     cameraSync = value;
     lastCamera = null;
+    // what the game shows is the Minecraft window, so the camera view takes its shape (unless a
+    // shape was already picked)
+    if (value && aspectMode === 'fill') setAspectMode('window');
     if (!value && link.connected) send('scriptevent pose:camclear');
   }
 
@@ -1434,29 +1437,39 @@ Write-Output $Out
 
   // ---- Game -> Blockbench transfers ----------------------------------------------------------
   // The websocket can only run commands, so the behavior pack publishes results as fake-player
-  // names on a hidden scoreboard objective (`PSD[op|page|item]`). We request one page at a time
-  // and read it back from the output of `scoreboard players list`.
+  // names on a hidden scoreboard objective (`PSD[op|page|item]`). We ask for a batch of pages at a
+  // time and read them back from the output of `scoreboard players list`. Page 0 says how many
+  // items there are, so a batch that comes back short is noticed and fetched again in smaller batches.
   let transferRunning = false;
+  const MAX_PAGE_BATCH = 16;
 
-  function parseItems(text, op, page) {
-    const items = [];
+  // Map(page -> items) for one op.
+  function parseItems(text, op) {
+    const pages = new Map();
     const re = /PSD\[(\w+)\|(-?\d+)\|([^\]]*)\]/g;
     let m;
     while ((m = re.exec(text))) {
-      if (m[1] === op && Number(m[2]) === page) items.push(m[3]);
+      if (m[1] !== op) continue;
+      const n = Number(m[2]);
+      if (!pages.has(n)) pages.set(n, []);
+      pages.get(n).push(m[3]);
     }
-    return items;
+    return pages;
   }
 
-  async function readPage(op, page) {
-    for (let attempt = 0; attempt < 8; attempt++) {
-      await link.command(`scriptevent pose:page ${JSON.stringify({ n: page })}`);
-      await sleep(100 + attempt * 100); // give the script a tick or two to write the page
+  async function readPages(op, page, count = 1, attempts = 8) {
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      await link.command(`scriptevent pose:page ${JSON.stringify({ n: page, k: count })}`);
+      await sleep(50 + attempt * 100); // give the script a tick to write the pages
       const body = await link.command('scoreboard players list').catch((e) => ({ statusMessage: String(e.message || e) }));
-      const items = parseItems(JSON.stringify(body), op, page);
-      if (page === 0 ? items.some((i) => i.startsWith('M|')) : items.length) return items;
+      const pages = parseItems(JSON.stringify(body), op);
+      const first = pages.get(page) || [];
+      if (page === 0 ? first.some((i) => i.startsWith('M|')) : first.length) return pages;
     }
     throw new Error(`Minecraft didn't return page ${page}. Is the Pose Studio behavior pack active in this world?`);
+  }
+  async function readPage(op, page) {
+    return (await readPages(op, page, 1)).get(page) || [];
   }
 
   // Runs `/scriptevent <eventId>` and returns every item the script publishes for it.
@@ -1479,9 +1492,37 @@ Write-Output $Out
         await sleep(500);
       }
       const pages = Number(meta[2]) || 1;
+      const total = Number(meta[3]);
+      const perPage = Number(meta[4]);
       const items = first.filter((i) => !i.startsWith('M|'));
-      for (let n = 1; n < pages; n++) {
-        items.push(...(await readPage(op, n)));
+      // an older behavior pack sends no counts: one page at a time
+      const checked = Number.isFinite(total) && perPage > 0;
+      const expected = (n) => Math.min(perPage, total - n * perPage);
+      let batch = checked ? 8 : 1;
+      for (let n = 1; n < pages; ) {
+        const count = Math.min(batch, pages - n);
+        let got;
+        try {
+          // a big batch gets two tries; if Minecraft won't send that much, smaller batches follow
+          got = checked ? await readPages(op, n, count, count > 1 ? 2 : 8) : new Map([[n, await readPage(op, n)]]);
+        } catch (e) {
+          if (count <= 1) throw e;
+          batch = Math.max(1, Math.floor(count / 2));
+          continue;
+        }
+        let done = 0;
+        while (done < count && (!checked || (got.get(n + done) || []).length === expected(n + done))) {
+          items.push(...(got.get(n + done) || []));
+          done++;
+        }
+        if (done < count) batch = Math.max(1, Math.floor(batch / 2)); // the reply was cut short
+        else if (batch < MAX_PAGE_BATCH) batch++;
+        if (!done && batch === 1 && checked) {
+          // even a single page came back short: take what arrived rather than loop forever
+          items.push(...(got.get(n) || []));
+          done = 1;
+        }
+        n += done;
         Blockbench.setProgress(n / pages);
       }
       return items;
@@ -1628,11 +1669,13 @@ Write-Output $Out
     return `hsl(${h % 360}, 25%, 50%)`;
   }
 
+  const CODE_ALPHABET = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-_';
+
   function scanWorldDialog() {
     if (!requireConnection()) return;
     new Dialog({
       id: 'pose_studio_scan',
-      title: 'Scan World Around Player',
+      title: 'Import World Around Player',
       form: {
         info: { type: 'info', text: 'Traces the ground from above in a circle around you, then casts rays from your eyes to pick up trunks, walls and overhangs. Every block found becomes a coloured cube.' },
         radius: { label: 'Terrain radius (blocks, 0 = off)', type: 'number', value: 48, min: 0, max: 128, step: 8 },
@@ -1649,9 +1692,9 @@ Write-Output $Out
     let items;
     try {
       await autoAnchor();
-      items = await runGameQuery('pose:scan', { radius, rays, dist }, 'Scanning world');
+      items = await runGameQuery('pose:scan', { radius, rays, dist }, 'Importing world');
     } catch (e) {
-      showError('Pose Studio: scan failed', e);
+      showError('Pose Studio: world import failed', e);
       return;
     }
     const palette = [];
@@ -1661,6 +1704,11 @@ Write-Output $Out
       if (parts[0] === 'P') palette[Number(parts[1])] = parts[2];
       if (parts[0] === 'B') {
         for (const entry of parts[1].split(';')) blocks.push(entry.split('.').map(Number));
+      } else if (parts[0] === 'Q') {
+        // 8 characters a block: x, y, z (offset by 2048) and palette index, 2 characters each
+        const s = parts[1];
+        const d = (i) => CODE_ALPHABET.indexOf(s[i]) * 64 + CODE_ALPHABET.indexOf(s[i + 1]);
+        for (let i = 0; i + 8 <= s.length; i += 8) blocks.push([d(i) - 2048, d(i + 2) - 2048, d(i + 4) - 2048, d(i + 6)]);
       }
     }
     await buildWorld(palette, blocks);
@@ -2643,11 +2691,13 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
 
   // Evaluates a render-controller condition for an idle entity: every query/variable is 0.
   // Anything too complex counts as "on".
-  function idleCondition(expr) {
+  function idleCondition(expr, flags = null) {
     if (typeof expr !== 'string') return true;
     const js = expr
       .toLowerCase()
-      .replace(/\b(query|q|variable|v|temp|t|context|c)\.[a-z0-9_.]+(\s*\([^)]*\))?/g, '0');
+      .replace(/\b(query|q|variable|v|temp|t|context|c)\.([a-z0-9_.]+)(\s*\([^)]*\))?/g, (m, kind, name) =>
+        flags && (kind === 'query' || kind === 'q') && name in flags ? `(${Number(flags[name]) || 0})` : '0'
+      );
     if (/[^0-9.\s<>=!&|?:()+\-*/]/.test(js)) return true;
     try {
       return !!Function(`return (${js});`)();
@@ -2700,6 +2750,97 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     const texturePath = pick((controller.textures || ['Texture.default'])[0], 'texture');
     const materials = description.materials || {};
     return { geometryId, texturePath, material: materials.default || Object.values(materials)[0] || 'entity_alphatest' };
+  }
+
+  // ---- Variants and babies ----
+  // Which geometry and texture the entity's render controller picks for a given state: the variant
+  // number (query.variant / skin_id / v.index...) and whether it's a baby. The controller's own
+  // expressions are evaluated, so this follows each mob's rules (warm/cold cows, wolf coats, cat
+  // breeds, baby models...).
+  const VARIANT_QUERIES = ['variant', 'skin_id', 'index', 'color', 'mark_variant'];
+
+  function lookFor(content, description, state) {
+    const controller = mainController(content, description);
+    const evaluate = (expr, kind) => {
+      if (typeof expr !== 'string') return null;
+      const map = description[kind === 'geometry' ? 'geometry' : 'textures'] || {};
+      const arrays = (controller.arrays || {})[kind === 'geometry' ? 'geometries' : 'textures'] || {};
+      const find = (obj, key) => obj[Object.keys(obj).find((k) => k.toLowerCase() === String(key).toLowerCase())];
+      const js = expr
+        .replace(/\b(array)\.(\w+)\s*\[/gi, (m, a, name) => `A(${JSON.stringify(name)},`)
+        .replace(/\]/g, ')')
+        .replace(/\b(texture|geometry)\.(\w+)/gi, (m, k, name) => JSON.stringify('K:' + name))
+        .replace(/\b(query|q|variable|v|temp|t|context|c)\.([a-z0-9_.]+)(\s*\([^()]*\))?/gi, (m, kind, name) => {
+          const n = name.toLowerCase();
+          return `(${Number(state[n] !== undefined ? state[n] : IDLE_QUERIES[n] || 0) || 0})`;
+        })
+        .replace(/\bmath\.\w+/gi, '0');
+      if (/[^\s\w"':.,()!?&|<>=+\-*/%]/.test(js)) return null;
+      const A = (name, index) => {
+        const list = find(arrays, `Array.${name}`) || [];
+        const item = list[Math.max(0, Math.min(list.length - 1, Math.floor(Number(index) || 0)))];
+        const m = typeof item === 'string' && item.match(/^(?:texture|geometry)\.(\w+)$/i);
+        return m ? 'K:' + m[1] : null;
+      };
+      let result;
+      try {
+        result = Function('A', `return (${js});`)(A);
+      } catch (e) {
+        return null;
+      }
+      const key = typeof result === 'string' && result.startsWith('K:') ? result.slice(2) : null;
+      return key ? { key, value: find(map, key) } : null;
+    };
+    const geometry = evaluate(controller.geometry || 'Geometry.default', 'geometry');
+    const texture = evaluate((controller.textures || ['Texture.default'])[0], 'texture');
+    // how many variants the expressions index into
+    let count = 1;
+    for (const expr of [controller.geometry, (controller.textures || [])[0]]) {
+      for (const m of String(expr || '').matchAll(/\barray\.(\w+)\s*\[/gi)) {
+        const all = Object.assign({}, (controller.arrays || {}).textures, (controller.arrays || {}).geometries);
+        const key = Object.keys(all).find((k) => k.toLowerCase() === `array.${m[1]}`.toLowerCase());
+        if (key) count = Math.max(count, all[key].length);
+      }
+    }
+    return { geometry, texture, count };
+  }
+
+  // Every variant of a list entry, baby versions included (the entry itself first). Each is an
+  // entry of its own: { ...entry, geometryId, texturePath, flags, variant, baby }.
+  function variantEntries(content, entry) {
+    const entity = content.entities.get(entry.id);
+    if (!entity) return [entry];
+    const description = entity.description;
+    const out = [];
+    const seen = new Set();
+    const label = (key) => String(key || '').replace(/^baby_?/i, '').replace(/_?(default|base|skin)$/i, '').replace(/^(base|skin)_/i, '').replace(/_/g, ' ').trim();
+    const adultCount = lookFor(content, description, { is_baby: 0 }).count;
+    for (const baby of [0, 1]) {
+      for (let i = 0; i < Math.min(adultCount, 32); i++) {
+        const state = { is_baby: baby };
+        for (const q of VARIANT_QUERIES) state[q] = i;
+        state.mark_variant = 0;
+        const look = lookFor(content, description, state);
+        const geometryId = (look.geometry && look.geometry.value) || entry.geometryId;
+        const texturePath = (look.texture && look.texture.value) || entry.texturePath;
+        const geometry = geometryId && resolveGeometry(content.geometries, geometryId);
+        if (!geometry || !geometry.bones.length || !texturePath || !findTexture(content, texturePath)) continue;
+        // a baby only counts when it looks different from the adult (its own model or texture)
+        if (baby && out.some((v) => !v.baby && v.geometryId === geometryId && v.texturePath === texturePath)) continue;
+        const key = `${geometryId}|${texturePath}|${baby}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push(Object.assign({}, entry, {
+          geometryId, texturePath, baby: !!baby, flags: baby ? { is_baby: 1 } : null,
+          variant: label(look.texture && look.texture.key) || (i ? `variant ${i + 1}` : 'default'),
+        }));
+      }
+    }
+    // the plain entry is always there, first
+    const plain = out.findIndex((v) => !v.baby && v.geometryId === entry.geometryId && v.texturePath === entry.texturePath);
+    if (plain > 0) out.unshift(out.splice(plain, 1)[0]);
+    else if (plain < 0) out.unshift(Object.assign({}, entry, { baby: false, flags: null, variant: 'default' }));
+    return out;
   }
 
   // Finds a texture file in the highest-priority layer that has it.
@@ -3173,16 +3314,16 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   // [x, y, z] from an animation channel at time 0 (plain value, array, or keyframes).
   // "this" is the channel's value before the animation: the bone's own rotation, or for position
   // its pivot in the legacy frame (Y measured as pivot - 24), so "C - this" sets an absolute value.
-  function channelAtStart(channel, self = [0, 0, 0], vars = null) {
+  function channelAtStart(channel, self = [0, 0, 0], vars = null, queries = IDLE_QUERIES) {
     if (channel === undefined || channel === null) return null;
     if (typeof channel === 'object' && !Array.isArray(channel)) {
       const times = Object.keys(channel).filter((k) => !isNaN(parseFloat(k)));
       if (!times.length) return null;
       const first = channel[times.sort((a, b) => parseFloat(a) - parseFloat(b))[0]];
-      return channelAtStart(first && typeof first === 'object' && !Array.isArray(first) ? first.post || first.pre || first.value : first, self, vars);
+      return channelAtStart(first && typeof first === 'object' && !Array.isArray(first) ? first.post || first.pre || first.value : first, self, vars, queries);
     }
-    if (!Array.isArray(channel)) return [0, 1, 2].map((i) => idleValue(channel, self[i], vars));
-    return [0, 1, 2].map((i) => idleValue(channel[i], self[i], vars));
+    if (!Array.isArray(channel)) return [0, 1, 2].map((i) => idleValue(channel, self[i], vars, queries));
+    return [0, 1, 2].map((i) => idleValue(channel[i], self[i], vars, queries));
   }
 
   // Variables the entity's initialize / pre_animation scripts set, evaluated for an idle mob
@@ -3202,10 +3343,11 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
 
   // The animations an idle entity plays: scripts.animate plus (older files) animation_controllers,
   // following controllers into their initial state.
-  function idleAnimations(content, description) {
+  function idleAnimations(content, description, flags = null) {
     const names = description.animations || {};
     const found = [];
-    const vars = idleVariables(description);
+    const queries = flags ? Object.assign({}, IDLE_QUERIES, flags) : IDLE_QUERIES;
+    const vars = idleVariables(description, queries);
     // Variables the game sets itself (attack_time, the cat's state...) are unknown; they aren't
     // really 0 for an idle mob (attack_time, for one, is negative).
     const unknownVars = (condition) =>
@@ -3219,7 +3361,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
       if (!controller.states[name]) name = Object.keys(controller.states)[0];
       for (let hop = 0; hop < 4; hop++) {
         const transitions = ((controller.states[name] || {}).transitions || []).map((t) => [Object.keys(t)[0], Object.values(t)[0]]);
-        let next = transitions.find(([target, condition]) => controller.states[target] && !unknownVars(condition) && idleValue(condition, 0, vars) !== 0);
+        let next = transitions.find(([target, condition]) => controller.states[target] && !unknownVars(condition) && idleValue(condition, 0, vars, queries) !== 0);
         if (!next && !IDLE_STATES.includes(name) && transitions.length && transitions.every(([, condition]) => unknownVars(condition))) {
           const idle = IDLE_STATES.find((s) => controller.states[s]);
           if (idle) next = [idle];
@@ -3238,7 +3380,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     const visit = (entry, depth) => {
       if (depth > 6 || !entry) return;
       const [name, condition] = typeof entry === 'string' ? [entry, true] : [Object.keys(entry)[0], Object.values(entry)[0]];
-      if (condition !== true && !idleCondition(condition)) return;
+      if (condition !== true && !idleCondition(condition, flags)) return;
       const id = names[name] || name;
       if (/^controller\.animation\./.test(id)) playController(id, depth);
       else if (content.animations.has(id)) found.push(content.animations.get(id));
@@ -3251,13 +3393,15 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
       else visit(entry, 0);
     }
     found.vars = vars;
+    found.queries = queries;
     return found;
   }
 
   const MISSING_BIND_POSE = { 'geometry.polarbear': 'body', 'geometry.cat': 'body', 'geometry.ocelot.v1.8': 'body' };
   const CAT_TAILS = ['geometry.cat', 'geometry.ocelot.v1.8'];
 
-  function restGeometry(content, entityId, geometryId) {
+  // flags: query values for this look, e.g. { is_baby: 1 } for a baby
+  function restGeometry(content, entityId, geometryId, flags = null) {
     const base = resolveGeometry(content.geometries, geometryId);
     if (!base) return null;
     const geometry = JSON.parse(JSON.stringify(base));
@@ -3285,7 +3429,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     }
     const rotation = new Map();
     const offset = new Map();
-    const animations = idleAnimations(content, entity.description);
+    const animations = idleAnimations(content, entity.description, flags);
     for (const animation of animations) {
       for (const [name, channels] of Object.entries(animation.bones || {})) {
         const key = name.toLowerCase();
@@ -3293,8 +3437,8 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
         const bone = byName.get(key);
         const ownRotation = bone.rotation ? bone.rotation.slice() : [0, 0, 0];
         const pivot = bone.pivot || [0, 0, 0];
-        const r = channelAtStart(channels.rotation, ownRotation, animations.vars);
-        const p = channelAtStart(channels.position, [pivot[0], pivot[1] - 24, pivot[2]], animations.vars);
+        const r = channelAtStart(channels.rotation, ownRotation, animations.vars, animations.queries);
+        const p = channelAtStart(channels.position, [pivot[0], pivot[1] - 24, pivot[2]], animations.vars, animations.queries);
         if (r) rotation.set(key, add(rotation.get(key), r));
         if (p) offset.set(key, add(offset.get(key), p));
       }
@@ -3337,7 +3481,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
         for (const [pattern, condition] of Object.entries(rule)) {
           const glob = pattern.toLowerCase().replace(/[.+?^${}()|[\]\\]/g, (ch) => '\\' + ch).replace(/\*/g, '.*');
           if (new RegExp('^' + glob + '$').test(name.toLowerCase())) {
-            visible = condition === true || (condition !== false && idleCondition(condition));
+            visible = condition === true || (condition !== false && idleCondition(condition, flags));
           }
         }
       }
@@ -3348,7 +3492,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   }
 
   function entityModel(content, entry) {
-    const geometry = restGeometry(content, entry.id, entry.geometryId);
+    const geometry = restGeometry(content, entry.id, entry.geometryId, entry.flags);
     return geometry ? bedrockToBlockbench(geometry) : null;
   }
 
@@ -3624,7 +3768,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     const dialog = new Dialog({
       id: 'pose_studio_animation_frames',
       title: `Animation: ${root.name}`,
-      width: 760,
+      width: 820,
       buttons: ['Apply', 'Cancel'],
       cancelIndex: 1,
       component: {
@@ -3636,6 +3780,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
           playing: false,
           fromRest: false,
           hasPreview: false,
+          smallButton: { minWidth: '0', width: '28px', height: '24px', padding: '0', flex: 'none' },
         }),
         mounted() {
           vm = this;
@@ -3703,7 +3848,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
           },
         },
         template: `
-          <div class="pose_studio_animation" style="display: flex; gap: 12px;">
+          <div class="pose_studio_animation" style="display: flex; gap: 14px; overflow: hidden;">
             <div style="flex: 1; min-width: 0; display: flex; flex-direction: column;">
               <input type="text" v-model="search" placeholder="Search animations…" class="dark_bordered" style="width: 100%; margin-bottom: 6px;">
               <div style="flex: 1; max-height: 340px; overflow-y: auto; border: 1px solid var(--color-border); border-radius: 4px;">
@@ -3716,12 +3861,12 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
                 <p v-if="!shown.length" style="padding: 6px 8px; opacity: 0.7;">No animations match.</p>
               </div>
             </div>
-            <div style="width: 300px; flex: none; display: flex; flex-direction: column; gap: 8px;">
+            <div style="width: 320px; flex: none; min-width: 0; display: flex; flex-direction: column; gap: 8px;">
               <div ref="preview" style="display: flex; justify-content: center; min-height: 40px;"></div>
               <p v-if="!hasPreview" style="opacity: 0.6; margin: 0;">(The viewport shows the pose.)</p>
               <div style="display: flex; align-items: center; justify-content: space-between; gap: 6px;">
                 <b>Stack</b>
-                <button @click="toggle()" :disabled="!activeLayer" style="min-width: 70px;">{{ playing ? 'Pause' : 'Play' }}</button>
+                <button @click="toggle()" :disabled="!activeLayer" style="min-width: 0; padding: 0 14px;">{{ playing ? 'Pause' : 'Play' }}</button>
               </div>
               <p v-if="!layers.length" style="opacity: 0.7; margin: 0;">Click animations on the left to stack them (click again to take one off). Each adds to the pose at its own frame.</p>
               <div v-for="l in layers" :key="l.uid" @click="active = l.uid"
@@ -3729,10 +3874,10 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
                              background: l.uid === active ? 'var(--color-selected)' : '' }">
                 <div style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{{ l.name }}</div>
                 <div style="display: flex; align-items: center; gap: 4px;">
-                  <button @click.stop="step(l, -1)" title="Previous frame">◀</button>
-                  <input type="range" min="0" :max="l.frames" step="1" :value="l.frame" @input="setFrame(l, Number($event.target.value))" @mousedown="active = l.uid" style="flex: 1;">
-                  <button @click.stop="step(l, 1)" title="Next frame">▶</button>
-                  <span style="min-width: 58px; text-align: right; font-size: 0.85em;">{{ l.frame }} / {{ l.frames }}</span>
+                  <button @click.stop="step(l, -1)" title="Previous frame" :style="smallButton">◀</button>
+                  <input type="range" min="0" :max="l.frames" step="1" :value="l.frame" @input="setFrame(l, Number($event.target.value))" @mousedown="active = l.uid" style="flex: 1; min-width: 0;">
+                  <button @click.stop="step(l, 1)" title="Next frame" :style="smallButton">▶</button>
+                  <span style="flex: none; width: 52px; text-align: right; font-size: 0.85em;">{{ l.frame }} / {{ l.frames }}</span>
                 </div>
               </div>
               <label style="display: flex; gap: 6px; align-items: center;" title="Off: animations add to the pose you've already made. On: start from the model's default pose.">
@@ -3838,33 +3983,32 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
       .map((x) => x.b.name);
   }
 
-  async function importEntity(content, entry) {
-    if (typeof Project === 'undefined' || !Project) newProject(Formats.free);
-    const model = entityModel(content, entry);
-    if (!model) throw new Error(`No model found for ${entry.id}.`);
-    const bones = posableBones(model);
-
+  // The texture for an entity look (shared by copies with the same look).
+  function entityTexture(content, entry, model) {
     const short = entry.id.replace(/^[^:]+:/, '').replace(/[^a-z0-9_]/gi, '_');
-    const used = Outliner.root.filter((n) => n instanceof Group && n.name.startsWith(`ent_${short}_`)).length;
-    const name = `ent_${short}_${used + 1}`;
-    const { origin: at, yaw } = placement();
-
-    const textureName = `ent_${short}`;
-    let texture = Texture.all.find((t) => t.name === textureName);
-    const cubes = [];
-    Undo.initEdit({ outliner: true, elements: [], textures: [] });
+    const look = [entry.variant && entry.variant !== 'default' ? entry.variant : '', entry.baby ? 'baby' : ''].filter(Boolean).join('_');
+    const name = `ent_${short}${look ? '_' + look.replace(/[^a-z0-9_]/gi, '_') : ''}`;
+    let texture = Texture.all.find((t) => t.name === name);
+    let created = false;
     if (!texture) {
       const url = entityTextureUrl(content, entry);
       if (url) {
-        texture = new Texture({ name: textureName }).fromDataURL(url);
+        texture = new Texture({ name }).fromDataURL(url);
         texture.add(false);
         texture.uv_width = model.texture_width;
         texture.uv_height = model.texture_height;
+        created = true;
       }
     }
+    return { texture, created };
+  }
+
+  // Builds a model's bones and cubes inside `root`, offset by `at`. Returns the cubes and the
+  // rest rotation of every bone.
+  function buildEntityBones(root, model, texture, at) {
     const shift = (v) => [v[0] + at[0], v[1] + at[1], v[2] + at[2]];
-    const root = new Group({ name, origin: at.slice(), rotation: [0, yaw, 0] }).init();
     const rest = {};
+    const cubes = [];
     const groups = new Map();
     // Blockbench needs a parent group set up before its children; model files don't always list
     // bones in that order (e.g. armour attachment bones inherited from geometry.humanoid).
@@ -3921,12 +4065,82 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
         cubes.push(cube);
       }
     }
-    root.pose_entity = { entity: entry.id, key: entryKey(entry), bones, rest, source: entry.source };
+    return { cubes, rest };
+  }
+
+  function entityInfo(entry, model, rest) {
+    return {
+      entity: entry.id, key: entryKey(entry), bones: posableBones(model), rest, source: entry.source,
+      variant: entry.variant || 'default', baby: !!entry.baby,
+    };
+  }
+
+  async function importEntity(content, entry) {
+    if (typeof Project === 'undefined' || !Project) newProject(Formats.free);
+    const model = entityModel(content, entry);
+    if (!model) throw new Error(`No model found for ${entry.id}.`);
+    const short = entry.id.replace(/^[^:]+:/, '').replace(/[^a-z0-9_]/gi, '_');
+    const used = Outliner.root.filter((n) => n instanceof Group && n.name.startsWith(`ent_${short}_`)).length;
+    const name = `ent_${short}_${used + 1}`;
+    const { origin: at, yaw } = placement();
+    Undo.initEdit({ outliner: true, elements: [], textures: [] });
+    const { texture } = entityTexture(content, entry, model);
+    const root = new Group({ name, origin: at.slice(), rotation: [0, yaw, 0] }).init();
+    const { cubes, rest } = buildEntityBones(root, model, texture, at);
+    root.pose_entity = entityInfo(entry, model, rest);
     Undo.finishEdit('Add entity', { outliner: true, elements: cubes, textures: texture ? [texture] : [] });
     Canvas.updateAll();
     root.select();
     return { root };
   }
+
+  // Swaps an entity copy to another look (variant, baby or adult) where it stands. Bones keep how
+  // far they were turned from their rest pose, and animations stay applied.
+  function setEntityVariant(root, content, entry) {
+    const model = entityModel(content, entry);
+    if (!model) throw new Error(`No model found for this variant of ${entry.id}.`);
+    const info = root.pose_entity || {};
+    const oldRest = new Map(Object.entries(info.rest || {}).map(([k, r]) => [k.toLowerCase(), r]));
+    const turned = new Map();
+    const oldNodes = [];
+    eachDescendant(root, (node) => {
+      oldNodes.push(node);
+      if (node instanceof Group) {
+        const r0 = oldRest.get(node.name.toLowerCase()) || [0, 0, 0];
+        turned.set(node.name.toLowerCase(), node.rotation.map((v, i) => v - r0[i]));
+      }
+    });
+    Undo.initEdit({ outliner: true, elements: oldNodes.filter((n) => !(n instanceof Group)), groups: [root], textures: [] });
+    for (const node of oldNodes.slice().reverse()) {
+      if (!(node instanceof Group) && node.remove) node.remove();
+    }
+    for (const node of oldNodes.slice().reverse()) {
+      if (node instanceof Group && node.remove) node.remove(false);
+    }
+    const { texture } = entityTexture(content, entry, model);
+    const { cubes, rest } = buildEntityBones(root, model, texture, root.origin.slice());
+    eachDescendant(root, (node) => {
+      if (!(node instanceof Group)) return;
+      const d = turned.get(node.name.toLowerCase());
+      if (d) for (let i = 0; i < 3; i++) node.rotation[i] += d[i];
+    });
+    // remembered animations were added to a pose measured from the old rest pose
+    if (root.pose_animation && root.pose_animation.base) {
+      const base = {};
+      for (const [k, r] of Object.entries(root.pose_animation.base)) {
+        const r0 = oldRest.get(k) || [0, 0, 0];
+        const r1 = Object.entries(rest).find(([n]) => n.toLowerCase() === k);
+        base[k] = r.map((v, i) => v - r0[i] + (r1 ? r1[1][i] : 0));
+      }
+      root.pose_animation = Object.assign({}, root.pose_animation, { base });
+    }
+    root.pose_entity = entityInfo(entry, model, rest);
+    Undo.finishEdit('Change entity variant', { outliner: true, elements: cubes, groups: [root], textures: texture ? [texture] : [] });
+    if (root.pose_equipment && Object.values(root.pose_equipment).some(Boolean)) refreshEquipmentPreview(root);
+    Canvas.updateAll();
+    lastSent.delete(mannequinId(root.name));
+  }
+
 
   // ---- The universal posable copy (generated into the development packs) ----
   // Minecraft only loads entity types when packs load, so instead of one generated entity per
@@ -3937,7 +4151,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   const PROXY_TYPE = 'pose:proxy';
   const PROXY_REGISTRY = () => `${devPackDir('resource')}\\pose_studio_proxies.json`;
 
-  const entryKey = (entry) => `${entry.id}|${entry.geometryId}|${entry.texturePath}`;
+  const entryKey = (entry) => `${entry.id}|${entry.geometryId}|${entry.texturePath}${entry.flags && entry.flags.is_baby ? '|baby' : ''}`;
 
   let registryCache = null;
   function proxyRegistry() {
@@ -3971,11 +4185,11 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
 
   function prepareProxy(content, list) {
     const models = list.map((entry) => {
-      const geometry = restGeometry(content, entry.id, entry.geometryId);
+      const geometry = restGeometry(content, entry.id, entry.geometryId, entry.flags);
       const model = geometry ? bedrockToBlockbench(geometry) : null;
       return { key: entryKey(entry), entry, geometry, bones: model ? posableBones(model) : [] };
     });
-    const hash = hashString('v10|' + JSON.stringify(models.map((m) => [m.key, m.entry.material, m.bones, m.geometry && m.geometry.bones.length])));
+    const hash = hashString('v11|' + JSON.stringify(models.map((m) => [m.key, m.entry.material, m.bones, m.geometry && m.geometry.bones.length])));
     const registry = proxyRegistry();
     if (registry.hash === hash) return 0;
 
@@ -4027,17 +4241,37 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     const arrays = { geos: [], skins: [], mats: [] };
     const registryModels = {};
     const geometries = [];
+    // variants that only change the texture share a geometry (and its pose animation)
+    const shared = new Map(); // geometry key -> { g, indices }
+    const geometryOf = [];
     models.forEach((m, i) => {
-      const geometryId = `geometry.pose_studio.proxy.${i}`;
-      geometries.push({
-        description: { identifier: geometryId, texture_width: m.geometry.texture_width, texture_height: m.geometry.texture_height, visible_bounds_width: 8, visible_bounds_height: 8, visible_bounds_offset: [0, 2, 0] },
-        bones: [
-          { name: PROXY_ROOT_BONE, pivot: [0, 0, 0] },
-          // legacy "neverRender" bones keep their place in the hierarchy but lose their cubes
-          ...m.geometry.bones.map((b) => Object.assign({}, b, { parent: b.parent || PROXY_ROOT_BONE }, b.neverRender ? { cubes: [] } : {})),
-        ],
-      });
-      description.geometry[`g${i}`] = geometryId;
+      const geoKey = `${m.entry.id}|${m.entry.geometryId}|${m.entry.flags && m.entry.flags.is_baby ? 'baby' : ''}`;
+      let slot = shared.get(geoKey);
+      if (!slot) {
+        const g = shared.size;
+        const geometryId = `geometry.pose_studio.proxy.${g}`;
+        geometries.push({
+          description: { identifier: geometryId, texture_width: m.geometry.texture_width, texture_height: m.geometry.texture_height, visible_bounds_width: 8, visible_bounds_height: 8, visible_bounds_offset: [0, 2, 0] },
+          bones: [
+            { name: PROXY_ROOT_BONE, pivot: [0, 0, 0] },
+            // legacy "neverRender" bones keep their place in the hierarchy but lose their cubes
+            ...m.geometry.bones.map((b) => Object.assign({}, b, { parent: b.parent || PROXY_ROOT_BONE }, b.neverRender ? { cubes: [] } : {})),
+          ],
+        });
+        description.geometry[`g${g}`] = geometryId;
+        description.animations[`a${g}`] = `animation.pose_studio.proxy.${g}`;
+        // angles 0-2: the whole model (pose_root); then 3 per posable bone
+        const bones = { [PROXY_ROOT_BONE]: { rotation: [angleExpr(0), angleExpr(1), angleExpr(2)] } };
+        m.bones.forEach((bone, k) => {
+          const a = (k + 1) * 3;
+          bones[bone] = { rotation: [angleExpr(a), angleExpr(a + 1), angleExpr(a + 2)] };
+        });
+        animations.animations[`animation.pose_studio.proxy.${g}`] = { loop: true, bones };
+        slot = { g, indices: [] };
+        shared.set(geoKey, slot);
+      }
+      slot.indices.push(i);
+      geometryOf[i] = slot.g;
       description.textures[`t${i}`] = m.entry.texturePath;
       let masked = null;
       try {
@@ -4051,20 +4285,15 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
         description.textures[`t${i}`] = `textures/entity/pose_studio/baked/${name}`;
       }
       description.materials[`m${i}`] = proxyMaterial(m.entry.material);
-      description.animations[`a${i}`] = `animation.pose_studio.proxy.${i}`;
-      description.scripts.animate.push({ [`a${i}`]: `q.property('pose:model') == ${i}` });
-      arrays.geos.push(`Geometry.g${i}`);
+      arrays.geos.push(`Geometry.g${slot.g}`);
       arrays.skins.push(`Texture.t${i}`);
       arrays.mats.push(`Material.m${i}`);
-      // angles 0-2: the whole model (pose_root); then 3 per posable bone
-      const bones = { [PROXY_ROOT_BONE]: { rotation: [angleExpr(0), angleExpr(1), angleExpr(2)] } };
-      m.bones.forEach((bone, k) => {
-        const a = (k + 1) * 3;
-        bones[bone] = { rotation: [angleExpr(a), angleExpr(a + 1), angleExpr(a + 2)] };
-      });
-      animations.animations[`animation.pose_studio.proxy.${i}`] = { loop: true, bones };
       registryModels[m.key] = { index: i, bones: m.bones, entity: m.entry.id, source: m.entry.source };
     });
+    // each pose animation plays for every model that uses its geometry
+    for (const { g, indices } of shared.values()) {
+      description.scripts.animate.push({ [`a${g}`]: indices.map((i) => `q.property('pose:model') == ${i}`).join(' || ') });
+    }
     // Minecraft finds the hand bones for held items in the entity's "default" geometry, which the
     // arrays above never use. Point it at a humanoid model (the zombie's if there is one) so
     // humanoid copies draw what they hold.
@@ -4073,7 +4302,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     const fallback = models.findIndex(hasHands);
     const defaultIndex = handModel >= 0 ? handModel : fallback;
     if (defaultIndex >= 0) {
-      description.geometry.default = description.geometry[`g${defaultIndex}`];
+      description.geometry.default = description.geometry[`g${geometryOf[defaultIndex]}`];
       description.textures.default = description.textures[`t${defaultIndex}`];
       description.materials.default = description.materials[`m${defaultIndex}`];
     }
@@ -4213,13 +4442,14 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
 
   // Prepares pose:proxy for the browser's world and offers the one reload it needs.
   function prepareForWorld(state) {
-    const count = prepareProxy(state.content, state.list);
+    // every variant and baby of every entity, so switching variants never needs a reload
+    const count = prepareProxy(state.content, state.list.flatMap((e) => variantEntries(state.content, e)));
     if (!count) return;
     Blockbench.showMessageBox(
       {
         title: 'Pose Studio: entities prepared',
         message:
-          `Pose Studio prepared all ${count} entities in this world for Minecraft. Minecraft needs to reload its packs once to load them. ` +
+          `Pose Studio prepared all ${state.list.length} entities in this world for Minecraft (${count} looks, counting variants and babies). Minecraft needs to reload its packs once to load them. ` +
           "After that, adding any of these entities is instant.\n\nYou'll only be asked again when this world's packs change. Reload now?",
         buttons: ['Reload now', 'Later'],
         confirm: 0,
@@ -4227,6 +4457,85 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
       },
       (button) => button === 0 && reloadMinecraftPacks()
     );
+  }
+
+  // ---- Variants window ----
+  // Pose Studio ▸ Variant… (an entity copy selected): every look of that mob, adults and babies,
+  // with thumbnails. Clicking one swaps the copy's model and texture where it stands.
+  async function openVariants() {
+    const root = selectedPoseRoot();
+    if (!root || !ENTITY_PREFIX.test(root.name) || !root.pose_entity) {
+      Blockbench.showQuickMessage('Select an entity (ent_) first', 2000);
+      return;
+    }
+    let state;
+    try {
+      state = contentCache || (await loadWorldContent(null));
+    } catch (e) {
+      showError('Pose Studio: variants', e);
+      return;
+    }
+    const base = state.list.find((e) => e.id === root.pose_entity.entity);
+    const looks = base ? variantEntries(state.content, base) : [];
+    if (looks.length < 2) {
+      Blockbench.showMessageBox({ title: 'Pose Studio', message: `${base ? base.name : root.pose_entity.entity} has no other variants.` });
+      return;
+    }
+    new Dialog({
+      id: 'pose_studio_variants',
+      title: `Variant: ${root.name}`,
+      width: 640,
+      buttons: ['Done'],
+      component: {
+        data: () => ({
+          looks: looks.map((v, i) => ({ i, label: v.variant, baby: v.baby, key: entryKey(v), thumb: '' })),
+          current: root.pose_entity.key,
+        }),
+        computed: {
+          adults() {
+            return this.looks.filter((l) => !l.baby);
+          },
+          babies() {
+            return this.looks.filter((l) => l.baby);
+          },
+        },
+        async mounted() {
+          for (const look of this.looks) {
+            try {
+              look.thumb = (await makeThumbnail(state.content, looks[look.i])) || 'none';
+            } catch (e) {
+              look.thumb = 'none';
+            }
+            await sleep(0);
+          }
+        },
+        methods: {
+          pick(look) {
+            try {
+              setEntityVariant(root, state.content, looks[look.i]);
+              this.current = look.key;
+            } catch (e) {
+              showError('Pose Studio: variant', e);
+            }
+          },
+        },
+        template: `
+          <div class="pose_studio_variants">
+            <template v-for="section in [['Adult', adults], ['Baby', babies]]">
+              <h3 v-if="section[1].length" style="margin: 4px 0 6px;">{{ section[0] }}</h3>
+              <div v-if="section[1].length" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 6px; margin-bottom: 10px;">
+                <div v-for="l in section[1]" :key="l.key" @click="pick(l)" :title="l.label + (l.baby ? ' (baby)' : '')"
+                     :style="{ cursor: 'pointer', border: '1px solid var(--color-border)', borderRadius: '6px', padding: '4px', textAlign: 'center',
+                               background: l.key === current ? 'var(--color-selected)' : '' }">
+                  <img v-if="l.thumb && l.thumb !== 'none'" :src="l.thumb" style="width: 72px; height: 72px; image-rendering: pixelated;">
+                  <div v-else style="width: 72px; height: 72px; margin: auto; display: flex; align-items: center; justify-content: center; opacity: 0.4;">{{ l.thumb === 'none' ? '' : '…' }}</div>
+                  <div style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-transform: capitalize;">{{ l.label }}</div>
+                </div>
+              </div>
+            </template>
+          </div>`,
+      },
+    }).show();
   }
 
   // ---- The browser ----
@@ -4262,6 +4571,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
           search: '',
           source: 'all',
           busy: false,
+          baby: false,
         }),
         computed: {
           sources() {
@@ -4315,8 +4625,16 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
           },
           async add(item) {
             try {
-              const { root } = await importEntity(browserState.content, item);
-              Blockbench.showQuickMessage(`Added ${item.name} as ${root.name}`, 1500);
+              let entry = item;
+              if (this.baby) {
+                entry = variantEntries(browserState.content, item).find((v) => v.baby);
+                if (!entry) {
+                  Blockbench.showQuickMessage(`${item.name} has no baby version`, 2000);
+                  return;
+                }
+              }
+              const { root } = await importEntity(browserState.content, entry);
+              Blockbench.showQuickMessage(`Added ${entry.baby ? 'baby ' : ''}${item.name} as ${root.name}`, 1500);
             } catch (e) {
               showError('Pose Studio: add entity', e);
             }
@@ -4349,6 +4667,9 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
                 <option value="all">All sources</option>
                 <option v-for="s in sources" :value="s">{{ s }}</option>
               </select>
+              <label style="display: flex; align-items: center; gap: 4px; white-space: nowrap;" title="Add the baby version (for mobs that have one). Other variants: select the entity, then Pose Studio ▸ Variant…">
+                <input type="checkbox" v-model="baby"> Baby
+              </label>
             </div>
             <p v-if="!ready" style="opacity: 0.7;">{{ busy ? 'Loading entities…' : '' }}</p>
             <div style="flex: 1; min-height: 0; overflow-y: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); grid-auto-rows: min-content; gap: 6px;">
@@ -4617,7 +4938,13 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     let slots = [];
     let content;
     try {
-      if (!isEntity) slots = await readLibrary();
+      if (!isEntity) {
+        // without the skin library the Equipment tab still works
+        slots = await readLibrary().catch((e) => {
+          Blockbench.showQuickMessage(`Skin library unavailable: ${(e && e.message) || e}`, 4000);
+          return [];
+        });
+      }
       content = await previewContent();
     } catch (e) {
       showError('Pose Studio: skin & equipment', e);
@@ -4771,6 +5098,18 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.28.0",
+      "date": "2026-09-30",
+      "changes": [
+        "New: Variant… (with an entity selected) shows every look of that mob with thumbnails: biome and colour variants and baby versions. Click one to swap it where it stands, keeping its pose.",
+        "New: a Baby checkbox in Add Entity adds baby versions directly.",
+        "All variants and babies are prepared for Minecraft along with the entities, so switching is instant in game too (one pack reload after this update).",
+        "Scan World is now Import World, and it is several times faster: the data comes back from Minecraft in large, checked batches and a more compact format. Update the Minecraft packs (Check for Updates) to get the speed-up.",
+        "Turning on Sync Game Camera sets the camera view to Match Minecraft Window.",
+        "The Animation window fits without a scroll bar."
+      ]
+    },
     {
       "version": "0.27.1",
       "date": "2026-09-30",
@@ -5110,6 +5449,11 @@ ${PLUGIN_URL}`,
           description: 'Armour and held items for the selected entity.',
           condition: () => selectionIs('entity'),
         }),
+        variant: new Action('pose_studio_variant', {
+          name: 'Variant…', icon: 'palette', click: openVariants,
+          description: 'Other looks of the selected entity: biome and colour variants, and its baby version.',
+          condition: () => selectionIs('entity'),
+        }),
         animation: new Action('pose_studio_animation', {
           name: 'Animation…', icon: 'animation', click: openAnimationFrames,
           description: 'Pose the selected player or entity with frames of its animations (walk, attack, sit...), stacked on the pose it has.',
@@ -5136,7 +5480,8 @@ ${PLUGIN_URL}`,
           name: 'Sync Game Camera', icon: 'videocam', value: false, onChange: setCameraSync,
           description: 'The Minecraft camera follows the active camera, or the viewport if there is none.',
         })),
-        scan: new Action('pose_studio_scan', { name: 'Scan World…', icon: 'travel_explore', click: scanWorldDialog }),
+        scan: new Action('pose_studio_scan', { name: 'Import World…', icon: 'travel_explore', click: scanWorldDialog,
+          description: 'Brings the terrain around you in Minecraft into Blockbench as one mesh.' }),
         capture: new Action('pose_studio_capture', { name: 'Capture Screenshot', icon: 'photo_camera', click: capture }),
         anchor: new Action('pose_studio_anchor', {
           name: 'Recenter Scene on Me', icon: 'my_location', click: setAnchor,
@@ -5186,6 +5531,7 @@ ${PLUGIN_URL}`,
         a.outfit,
         a.entity,
         a.equipment,
+        a.variant,
         a.animation,
         { name: 'Add Camera', id: 'pose_studio_add_camera', icon: 'videocam', children: [a.grabcam, a.savecam] },
         {
