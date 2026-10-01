@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.34.2'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.35.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -2588,7 +2588,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     return entries;
   }
 
-  const INDEXED_FOLDERS = /^(entity|models|render_controllers|animations|animation_controllers|textures|texts)\//;
+  const INDEXED_FOLDERS = /^(entity|models|render_controllers|animations|animation_controllers|attachables|textures|texts)\//;
 
   // A pack's files, from plain folders and from __brarchive archives. Keys are lower-case paths
   // without extension handling, e.g. "textures/entity/cow/cow.png".
@@ -2613,7 +2613,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
         }
         if (stat.isDirectory()) {
           if (name === '__brarchive') walkArchives(full, '');
-          else if (!rel ? /^(entity|models|render_controllers|animations|animation_controllers|textures|texts)$/i.test(name) : true) walk(full, relPath);
+          else if (!rel ? /^(entity|models|render_controllers|animations|animation_controllers|attachables|textures|texts)$/i.test(name) : true) walk(full, relPath);
         } else if (INDEXED_FOLDERS.test(relPath.toLowerCase())) {
           files.set(relPath.toLowerCase(), { plain: true, read: () => fs.readFileSync(full) });
         }
@@ -2821,6 +2821,9 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     const animations = new Map();
     const animationControllers = new Map();
     const names = new Map();
+    const attachables = new Map(); // item id -> [{ description, layer, condition }]
+    const itemNames = new Map();
+    const itemTextures = new Map(); // item_texture.json short name -> texture path
     for (const layer of layers) {
       for (const [path, file] of layer.files) {
         if (!path.endsWith('.json') && !path.endsWith('.lang')) continue;
@@ -2829,6 +2832,8 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
           for (const line of String(file.read()).split(/\r?\n/)) {
             const m = line.match(/^entity\.([^=]+)\.name=([^\t#]+)/);
             if (m) names.set(m[1].trim(), m[2].trim());
+            const item = line.match(/^item\.([^=]+?)(?:\.name)?=([^\t#]+)/);
+            if (item) itemNames.set(item[1].trim(), item[2].trim());
           }
           continue;
         }
@@ -2849,11 +2854,65 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
           for (const [id, def] of Object.entries(json.animations || {})) animations.set(id, def);
         } else if (path.startsWith('animation_controllers/')) {
           for (const [id, def] of Object.entries(json.animation_controllers || {})) animationControllers.set(id, def);
+        } else if (path.startsWith('attachables/') && layer.label !== 'Minecraft') {
+          // pack attachables only: they're what draws custom (and restyled vanilla) armour
+          const d = json['minecraft:attachable'] && json['minecraft:attachable'].description;
+          if (d && d.identifier) {
+            const targets = d.item && typeof d.item === 'object' ? Object.entries(d.item) : [[d.identifier, '']];
+            for (const [item, condition] of targets) {
+              const list = attachables.get(item) || [];
+              list.push({ description: d, layer, condition: typeof condition === 'string' ? condition : '' });
+              attachables.set(item, list);
+            }
+          }
+        } else if (path === 'textures/item_texture.json') {
+          for (const [key, def] of Object.entries(json.texture_data || {})) {
+            let t = def && def.textures;
+            if (Array.isArray(t)) t = t[0];
+            if (t && typeof t === 'object') t = t.path;
+            if (typeof t === 'string') itemTextures.set(key, t);
+          }
         }
       }
     }
-    return { layers, rp, bp, entities, geometries, controllers, animations, animationControllers, names };
+    const items = new Map();
+    for (const pack of bp) if (pack.dir) readPackItems(fs, pack, items);
+    return { layers, rp, bp, entities, geometries, controllers, animations, animationControllers, names, attachables, itemNames, itemTextures, items };
   }
+
+  // A behavior pack's items: { id -> { slot (for armour), icon, name, source } }.
+  function readPackItems(fs, pack, out) {
+    const walk = (dir, depth) => {
+      let names = [];
+      try {
+        names = fs.readdirSync(dir);
+      } catch (e) {
+        return;
+      }
+      for (const name of names) {
+        const full = `${dir}\\${name}`;
+        if (/\.json$/i.test(name)) {
+          let item;
+          try {
+            item = parseLooseJson(fs.readFileSync(full))['minecraft:item'];
+          } catch (e) {
+            continue;
+          }
+          const id = item && item.description && item.description.identifier;
+          if (!id) continue;
+          const c = item.components || {};
+          const wearable = c['minecraft:wearable'];
+          const slot = ARMOR_SLOTS[String((wearable && (wearable.slot || wearable.equip_slot)) || '').toLowerCase()] || '';
+          let icon = c['minecraft:icon'];
+          if (icon && typeof icon === 'object') icon = icon.texture || (icon.textures && (icon.textures.default || Object.values(icon.textures)[0]));
+          const display = c['minecraft:display_name'];
+          out.set(id, { id, slot, icon: typeof icon === 'string' ? icon : '', name: display && typeof display.value === 'string' ? display.value : '', source: pack.name });
+        } else if (depth < 6 && !/\.[a-z0-9]{1,5}$/i.test(name)) walk(full, depth + 1);
+      }
+    };
+    walk(`${pack.dir}\\items`, 0);
+  }
+  const ARMOR_SLOTS = { 'slot.armor.head': 'head', 'slot.armor.chest': 'chest', 'slot.armor.legs': 'legs', 'slot.armor.feet': 'feet' };
 
   // Evaluates a render-controller condition for an idle entity: every query/variable is 0.
   // Anything too complex counts as "on".
@@ -5490,8 +5549,213 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
 
   // Content for previews: the browser's world if it has been opened, otherwise vanilla only.
   async function previewContent() {
-    const state = contentCache || (await loadWorldContent(null));
+    let world = null;
+    if (!contentCache) {
+      try {
+        world = worldChoices()[0] || null; // the picked world, else the last played one
+      } catch (e) {
+        world = null;
+      }
+    }
+    const state = contentCache || (await loadWorldContent(world));
     return state.content;
+  }
+
+  // ---- Custom armour ----
+  // Armour from the world's packs: items with a wearable armour slot (behavior pack) drawn by an
+  // attachable (resource pack). Attachable models are built on the player's bones (head, body,
+  // rightArm, leftLeg…), so each piece snaps onto the same bones of the mannequin; the attachable's
+  // render controller decides which parts of a shared armour model a piece shows.
+  const ARMOR_SLOT_ORDER = ['head', 'chest', 'legs', 'feet'];
+  const SLOT_WORDS = /\b(helmet|helm|hood|hat|cap|mask|crown|chestplate|chest|tunic|robe|armou?r|leggings|legs|pants|trousers|boots|shoes|feet|greaves|sabatons)\b/gi;
+
+  function itemName(content, id) {
+    const info = content.items && content.items.get(id);
+    const key = info && info.name && /^[\w.:-]+$/.test(info.name) ? info.name.replace(/^item\./, '').replace(/\.name$/, '') : id;
+    return (content.itemNames && (content.itemNames.get(key) || content.itemNames.get(id))) || (info && info.name && !/^[\w.:-]+$/.test(info.name) ? info.name : '') || prettyName(id);
+  }
+
+  function itemIconPath(content, id) {
+    const info = content.items && content.items.get(id);
+    const key = info && info.icon;
+    return (key && content.itemTextures && content.itemTextures.get(key)) || '';
+  }
+
+  // The attachable that draws an item on the mannequin (not one meant only for players).
+  function findAttachable(content, itemId) {
+    const list = (content.attachables && content.attachables.get(itemId)) || [];
+    const forOwner = (a) => {
+      const c = String(a.condition || '').toLowerCase();
+      if (!c) return true;
+      const m = c.match(/owner_identifier\s*(==|!=)\s*'([^']+)'/);
+      if (m) return (m[2] === 'minecraft:player') === (m[1] === '!=');
+      return idleCondition(c);
+    };
+    return list.slice().reverse().find((a) => !a.condition && forOwner(a)) || list.slice().reverse().find(forOwner) || null;
+  }
+
+  function armorSlotOf(content, id) {
+    const info = content.items && content.items.get(id);
+    if (info && info.slot) return info.slot;
+    const n = id.toLowerCase();
+    if (/helmet|helm|hood|_hat|_cap|mask|crown/.test(n)) return 'head';
+    if (/chestplate|chest|tunic|robe/.test(n)) return 'chest';
+    if (/leggings|_legs|pants|trousers|greaves/.test(n)) return 'legs';
+    if (/boots|shoes|feet|sabatons/.test(n)) return 'feet';
+    return '';
+  }
+
+  // Every 3D armour piece in the world's packs, grouped into sets (pieces sharing one model and
+  // texture): [{ key, name, source, icon, pieces: { head, chest, legs, feet } }] and a flat list.
+  function customArmour(content) {
+    const pieces = [];
+    const ids = new Set([...((content.items && content.items.keys()) || [])].concat([...((content.attachables && content.attachables.keys()) || [])]));
+    for (const id of ids) {
+      if (/^minecraft:/.test(id)) continue; // vanilla armour has its own list (and uses a pack's restyle automatically)
+      const info = content.items && content.items.get(id);
+      const attachable = findAttachable(content, id);
+      if (!attachable) continue;
+      const slot = (info && info.slot) || (!info ? armorSlotOf(content, id) : '');
+      if (!slot) continue;
+      const d = attachable.description;
+      const geometry = (d.geometry && (d.geometry.default || Object.values(d.geometry)[0])) || '';
+      const texture = (d.textures && (d.textures.default || Object.values(d.textures)[0])) || '';
+      pieces.push({ id, slot, name: itemName(content, id), source: (info && info.source) || attachable.layer.label, iconPath: itemIconPath(content, id), setKey: `${geometry}|${texture}` });
+    }
+    const sets = new Map();
+    for (const piece of pieces) {
+      const set = sets.get(piece.setKey) || { key: piece.setKey, source: piece.source, pieces: {} };
+      if (!set.pieces[piece.slot]) set.pieces[piece.slot] = piece;
+      sets.set(piece.setKey, set);
+    }
+    for (const set of sets.values()) set.name = setName(Object.values(set.pieces));
+    const list = [...sets.values()].sort((a, b) => a.name.localeCompare(b.name));
+    return { sets: list, pieces: pieces.sort((a, b) => ARMOR_SLOT_ORDER.indexOf(a.slot) - ARMOR_SLOT_ORDER.indexOf(b.slot) || a.name.localeCompare(b.name)) };
+  }
+
+  // A set's name: the words its pieces' names share ("Helmet of the Elder Raze" and "Boots of the
+  // Elder Raze" -> "Elder Raze"), else the item id without the piece word.
+  function setName(pieces) {
+    const words = pieces.map((p) => p.name.replace(SLOT_WORDS, ' ').split(/\s+/).filter(Boolean));
+    let shared = words[0] || [];
+    for (const w of words.slice(1)) shared = shared.filter((x) => w.includes(x));
+    const name = shared.join(' ').replace(/^(of|the)\s+/i, '').replace(/^(of|the)\s+/i, '').trim();
+    if (name && pieces.length > 1) return name;
+    if (pieces.length === 1) return pieces[0].name;
+    return prettyName(pieces[0].id.replace(/_?(helmet|chestplate|leggings|boots)$/i, ''));
+  }
+
+  // Which bones of the attachable's model this piece shows (its render controllers' part_visibility).
+  function attachableVisibility(content, attachable, vars) {
+    const rules = [];
+    for (const rc of attachable.description.render_controllers || []) {
+      const id = typeof rc === 'string' ? rc : Object.keys(rc)[0];
+      const def = content.controllers.get(id);
+      for (const entry of (def && def.part_visibility) || []) {
+        for (const [pattern, value] of Object.entries(entry)) {
+          const re = new RegExp('^' + pattern.toLowerCase().replace(/[.+?^$(){}|[\]\\]/g, '\\$&').replace(/\*/g, '.*') + '$');
+          let on = value;
+          if (typeof value === 'string') {
+            const expr = value.replace(/\b(variable|v)\.([a-z0-9_]+)/gi, (m, k, n) => (n.toLowerCase() in vars ? `(${Number(vars[n.toLowerCase()]) || 0})` : m));
+            on = idleCondition(expr);
+          }
+          rules.push({ re, on: !!on });
+        }
+      }
+    }
+    return (bone) => {
+      let on = true;
+      for (const r of rules) if (r.re.test(bone.toLowerCase())) on = r.on;
+      return on;
+    };
+  }
+
+  const MANNEQUIN_BONE_KEYS = ['head', 'body', 'rightarm', 'leftarm', 'rightleg', 'leftleg'];
+
+  // Adds an attachable's model to the mannequin (or entity): its bones snap onto the bones of the
+  // same name; parts in between (armour pieces) become eq_ groups that keep their own pivots.
+  async function addAttachablePreview(mannequin, content, itemId, slot, shift, cubes, textures) {
+    const attachable = findAttachable(content, itemId);
+    if (!attachable) return false;
+    const d = attachable.description;
+    const geometryId = d.geometry && (d.geometry.default || Object.values(d.geometry)[0]);
+    const geometry = geometryId && resolveGeometry(content.geometries, geometryId);
+    if (!geometry) return false;
+    const texturePath = d.textures && (d.textures.default || Object.values(d.textures)[0]);
+    const texture = await previewTexture(content, `eq_${String(texturePath).split('/').pop()}`, texturePath, geometry.texture_width, geometry.texture_height);
+    if (texture && !textures.includes(texture)) textures.push(texture);
+    const visible = attachableVisibility(content, attachable, { slim_arms: mannequin.pose_slim ? 1 : 0, is_enchanted: 0, has_trim: 0 });
+    const model = bedrockToBlockbench({ bones: geometry.bones, texture_width: geometry.texture_width, texture_height: geometry.texture_height });
+    const byName = new Map(model.bones.map((b) => [b.name.toLowerCase(), b]));
+    const anchorOf = (bone) => {
+      for (let b = bone, i = 0; b && i < 64; b = b.parent && byName.get(b.parent.toLowerCase()), i++) {
+        const key = b.name.toLowerCase();
+        if (MANNEQUIN_BONE_KEYS.includes(key)) return key;
+      }
+      return '';
+    };
+    // only bones that show something (themselves or below)
+    const shows = new Map();
+    const showsSomething = (bone, depth = 0) => {
+      const key = bone.name.toLowerCase();
+      if (shows.has(key)) return shows.get(key);
+      shows.set(key, false);
+      const own = bone.cubes.length > 0 && visible(bone.name);
+      const below = depth < 64 && model.bones.some((b) => b.parent && b.parent.toLowerCase() === key && showsSomething(b, depth + 1));
+      shows.set(key, own || below);
+      return own || below;
+    };
+    const groups = new Map();
+    const groupFor = (bone, depth = 0) => {
+      const key = bone.name.toLowerCase();
+      if (MANNEQUIN_BONE_KEYS.includes(key)) return boneGroupOf(mannequin, bone.name);
+      if (groups.has(key)) return groups.get(key);
+      const parentBone = bone.parent && byName.get(bone.parent.toLowerCase());
+      const parentGroup = parentBone && depth < 64 ? groupFor(parentBone, depth + 1) : null;
+      // bones above the body (root, waist) hang off the mannequin itself
+      const host = parentGroup || (anchorOf(bone) ? boneGroupOf(mannequin, anchorOf(bone)) : mannequin) || mannequin;
+      const isArmourPart = !['root', 'waist'].includes(key);
+      const group = isArmourPart
+        ? new Group({ name: `eq_${bone.name}`, origin: shift(bone.origin), rotation: bone.rotation.slice() }).addTo(host).init()
+        : host;
+      groups.set(key, group);
+      return group;
+    };
+    for (const bone of model.bones) {
+      if (!bone.cubes.length || !visible(bone.name) || !showsSomething(bone)) continue;
+      const group = groupFor(bone);
+      if (!group) continue;
+      for (const c of bone.cubes) {
+        const cube = new Cube({
+          name: `eq_${slot}`,
+          from: shift(c.from),
+          to: shift(c.to),
+          origin: shift(c.origin),
+          rotation: c.rotation.slice(),
+          inflate: c.inflate,
+          mirror_uv: c.mirror_uv,
+          box_uv: c.box_uv,
+          uv_offset: c.uv_offset.slice(),
+          autouv: 0,
+        })
+          .addTo(group)
+          .init();
+        if (texture) cube.applyTexture(texture, true);
+        if (!c.box_uv) {
+          for (const key of Object.keys(cube.faces)) {
+            const face = c.faces[key];
+            if (!face || !face.enabled) {
+              cube.faces[key].texture = null;
+              continue;
+            }
+            cube.faces[key].uv = face.uv.slice();
+            cube.faces[key].rotation = face.rotation || 0;
+          }
+        }
+        cubes.push(cube);
+      }
+    }
+    return true;
   }
 
   // Leather armour is grey in its texture and tinted in game; tint the preview the default brown.
@@ -5578,19 +5842,27 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
 
   async function buildEquipmentPreview(mannequin) {
     const old = [];
-    mannequin.forEachChild((c) => c instanceof Cube && /^eq_/.test(c.name) && old.push(c));
+    const oldGroups = [];
+    mannequin.forEachChild((c) => {
+      if (c instanceof Cube && /^eq_/.test(c.name)) old.push(c);
+      else if (c instanceof Group && /^eq_/.test(c.name) && !(c.parent instanceof Group && /^eq_/.test(c.parent.name))) oldGroups.push(c);
+    });
     const equipment = mannequin.pose_equipment || {};
     const content = Object.values(equipment).some(Boolean) ? await previewContent() : null;
     Undo.initEdit({ outliner: true, elements: old, textures: [] });
     for (const cube of old) cube.remove();
+    for (const group of oldGroups) group.remove(false);
     const [rx, ry, rz] = mannequin.origin;
     const shift = (v) => [v[0] + rx, v[1] + ry, v[2] + rz];
     const cubes = [];
     const textures = [];
 
     for (const piece of ARMOR_PIECES) {
-      const material = ARMOR_MATERIALS.find((m) => armorItem(m, piece) === equipment[piece.slot]);
-      if (!material || !content) continue;
+      const itemId = equipment[piece.slot];
+      if (!itemId || !content) continue;
+      if (await addAttachablePreview(mannequin, content, itemId, piece.slot, shift, cubes, textures)) continue;
+      const material = ARMOR_MATERIALS.find((m) => armorItem(m, piece) === itemId);
+      if (!material) continue;
       const geometry = resolveGeometry(content.geometries, `geometry.humanoid.armor.${piece.piece}`);
       const layer = material.item === 'turtle' ? 1 : piece.layer;
       const texture = await previewTexture(content, `eq_armor_${material.texture}_${layer}`, `textures/models/armor/${material.texture}_${layer}`, geometry ? geometry.texture_width : 64, geometry ? geometry.texture_height : 32, material.tint);
@@ -5682,6 +5954,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
           return [];
         });
       }
+      if (!contentCache) Blockbench.showQuickMessage("Reading the world's packs for armour and items (only the first time)…", 4000);
       content = await previewContent();
     } catch (e) {
       showError('Pose Studio: skin & equipment', e);
@@ -5731,13 +6004,23 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     };
     const items = HAND_ITEMS.map((i) => Object.assign({ icon: icon(i.texture) }, i));
     const eq = mannequin.pose_equipment || {};
-    const armorValue = (piece) => {
-      const m = ARMOR_MATERIALS.find((mat) => armorItem(mat, piece) === eq[piece.slot]);
-      return m ? m.item : '';
-    };
+    const custom = customArmour(content);
+    const armorSets = custom.sets.map((s) => {
+      const shown = s.pieces.chest || s.pieces.head || Object.values(s.pieces)[0];
+      return { key: s.key, name: s.name, source: s.source, icon: shown.iconPath ? icon(shown.iconPath) : '', pieces: ARMOR_SLOT_ORDER.map((slot) => s.pieces[slot] && s.pieces[slot].id).filter(Boolean), slots: Object.assign({}, ...Object.entries(s.pieces).map(([slot, piece]) => ({ [slot]: piece.id }))) };
+    });
+    const armorValue = (piece) => eq[piece.slot] || '';
     return {
         data: () => ({
-          pieces: ARMOR_PIECES.map((p) => ({ slot: p.slot, label: p.label, value: armorValue(p), options: ARMOR_MATERIALS.filter((m) => !m.only || m.only === p.slot) })),
+          pieces: ARMOR_PIECES.map((p) => ({
+            slot: p.slot,
+            label: p.label,
+            value: armorValue(p),
+            options: ARMOR_MATERIALS.filter((m) => !m.only || m.only === p.slot).map((m) => ({ id: armorItem(m, p), name: m.name })),
+            custom: custom.pieces.filter((c) => c.slot === p.slot).map((c) => ({ id: c.id, name: c.name })),
+            other: armorValue(p) && !ARMOR_MATERIALS.some((m) => armorItem(m, p) === armorValue(p)) && !custom.pieces.some((c) => c.id === armorValue(p)) ? armorValue(p) : '',
+          })),
+          armorSets,
           items,
           hand: 'mainhand',
           mainhand: eq.mainhand || '',
@@ -5748,9 +6031,23 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
         }),
         methods: {
           setArmor(p) {
-            const piece = ARMOR_PIECES.find((x) => x.slot === p.slot);
-            const material = ARMOR_MATERIALS.find((m) => m.item === p.value);
-            setEquipment(mannequin, p.slot, material ? armorItem(material, piece) : '');
+            setEquipment(mannequin, p.slot, p.value || '');
+          },
+          // a whole set at once (one preview rebuild)
+          wearSet(set) {
+            const on = this.setWorn(set);
+            const next = Object.assign({}, mannequin.pose_equipment);
+            for (const p of this.pieces) {
+              if (!set.slots[p.slot]) continue;
+              p.value = on ? '' : set.slots[p.slot];
+              next[p.slot] = p.value;
+            }
+            mannequin.pose_equipment = next;
+            lastSent.delete(mannequinId(mannequin.name));
+            refreshEquipmentPreview(mannequin);
+          },
+          setWorn(set) {
+            return this.pieces.every((p) => !set.slots[p.slot] || p.value === set.slots[p.slot]);
           },
           pick(id) {
             const value = id ? `minecraft:${shortItem(id)}` : '';
@@ -5778,12 +6075,27 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
               This model {{ !canHold && !canWear ? "has no hand bones or humanoid body bones, so Minecraft probably won't show items or armour on it" : !canHold ? "has no hand bones (rightItem / leftItem), so Minecraft probably won't show held items" : "doesn't have humanoid body bones, so armour probably won't fit" }}.
             </p>
             <h3 style="margin: 0 0 6px;">Armour</h3>
+            <div v-if="armorSets.length" style="margin-bottom: 10px;">
+              <div style="opacity: 0.8; margin-bottom: 4px;">Armour sets from your packs (click to put on or take off the whole set):</div>
+              <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 6px; max-height: 170px; overflow-y: auto;">
+                <div v-for="s in armorSets" :key="s.key" @click="wearSet(s)" :title="s.name + ' (' + s.source + '): ' + s.pieces.join(', ')"
+                     :style="{ border: '1px solid var(--color-border)', borderRadius: '4px', padding: '4px', cursor: 'pointer', textAlign: 'center',
+                               background: setWorn(s) ? 'var(--color-selected)' : '' }">
+                  <img v-if="s.icon" :src="s.icon" style="width: 32px; height: 32px; image-rendering: pixelated;">
+                  <div style="font-size: 0.8em; line-height: 1.2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{{ s.name }}</div>
+                </div>
+              </div>
+            </div>
             <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 14px;">
-              <label v-for="p in pieces" :key="p.slot" style="display: flex; flex-direction: column; gap: 4px;">
+              <label v-for="p in pieces" :key="p.slot" style="display: flex; flex-direction: column; gap: 4px; min-width: 0;">
                 <span>{{ p.label }}</span>
-                <select v-model="p.value" @change="setArmor(p)">
+                <select v-model="p.value" @change="setArmor(p)" style="max-width: 100%;">
                   <option value="">None</option>
-                  <option v-for="m in p.options" :value="m.item">{{ m.name }}</option>
+                  <option v-for="m in p.options" :value="m.id">{{ m.name }}</option>
+                  <optgroup v-if="p.custom.length" label="From your packs">
+                    <option v-for="m in p.custom" :value="m.id">{{ m.name }}</option>
+                  </optgroup>
+                  <option v-if="p.other" :value="p.other">{{ p.other }}</option>
                 </select>
               </label>
             </div>
@@ -5806,7 +6118,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
               <input type="text" v-model="custom" placeholder="e.g. minecraft:torch or mypack:magic_staff" class="dark_bordered" style="flex: 1;" @keydown.enter="setCustom()">
               <button @click="setCustom()">Give</button>
             </div>
-            <p style="opacity: 0.7; margin-top: 8px;">Minecraft shows the real items. The Blockbench preview shows armour and a flat icon for held items.</p>
+            <p style="opacity: 0.7; margin-top: 8px;">Minecraft shows the real items. The Blockbench preview shows armour (3D armour from your packs snaps onto the matching bones) and a flat icon for held items.</p>
           </div>`,
     };
   }
@@ -6868,6 +7180,16 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.35.0",
+      "date": "2026-10-01",
+      "changes": [
+        "New: 3D armour from your packs (DragonCraft's, say) in Skin & Equipment. Whole sets are listed with icons (click a set to put it on or take it off), and every piece appears in its slot's list under From your packs.",
+        "Custom armour snaps onto the mannequin in Blockbench: each piece's model goes on the matching bones (head, body, arms, legs) and shows only the parts that piece shows, with slim or classic sleeves to match the skin. Minecraft shows the real items.",
+        "Packs that restyle vanilla armour (like DragonCraft's iron armour) are previewed restyled.",
+        "Skin & Equipment reads the open world's packs (the picked world, else the last played one) even if Add Entity hasn't been opened yet."
+      ]
+    },
     {
       "version": "0.34.2",
       "date": "2026-10-01",

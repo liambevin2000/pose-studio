@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.35.0",
+    "date": "2026-10-01",
+    "changes": [
+      "New: 3D armour from your packs (DragonCraft's, say) in Skin & Equipment. Whole sets are listed with icons (click a set to put it on or take it off), and every piece appears in its slot's list under From your packs.",
+      "Custom armour snaps onto the mannequin in Blockbench: each piece's model goes on the matching bones (head, body, arms, legs) and shows only the parts that piece shows, with slim or classic sleeves to match the skin. Minecraft shows the real items.",
+      "Packs that restyle vanilla armour (like DragonCraft's iron armour) are previewed restyled.",
+      "Skin & Equipment reads the open world's packs (the picked world, else the last played one) even if Add Entity hasn't been opened yet."
+    ]
+  },
+  {
     "version": "0.34.2",
     "date": "2026-10-01",
     "changes": [
