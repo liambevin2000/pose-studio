@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.34.0 (2026-10-01)
+
+- New: More > Folders… sets the scenes folder (a shared Dropbox folder, say) and the Minecraft data folder (for Minecraft Preview or other installs). Locations are looked for in the scenes folder and its subfolders.
+- New: worlds shared through git work for everyone. A location saved on someone else's PC is found in your scenes folder by its file name.
+- New: Locations > Pick Minecraft World… points Pose Studio at the open world's folder when it isn't found by itself (worlds opened through ToolBox, say). It's remembered for that world, and a folder of zipped worlds is caught with advice.
+- New: More > Install Minecraft Packs downloads the behavior and resource packs into the development pack folders. Connect to Minecraft offers it when they aren't installed.
+- World names now come from level.dat (what ToolBox sets) rather than levelname.txt.
+
 ## 0.33.6 (2026-10-01)
 
 - Fixed: after going to another location, the camera view could show a much narrower (more zoomed in) picture than Minecraft, even though the game camera was right. Switching projects left the view drawn at an old size and shape, so the picture was cropped. The camera view now checks its size, aspect and zoom every frame and puts them right.

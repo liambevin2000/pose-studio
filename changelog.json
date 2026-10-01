@@ -1,5 +1,16 @@
 [
   {
+    "version": "0.34.0",
+    "date": "2026-10-01",
+    "changes": [
+      "New: More > Folders… sets the scenes folder (a shared Dropbox folder, say) and the Minecraft data folder (for Minecraft Preview or other installs). Locations are looked for in the scenes folder and its subfolders.",
+      "New: worlds shared through git work for everyone. A location saved on someone else's PC is found in your scenes folder by its file name.",
+      "New: Locations > Pick Minecraft World… points Pose Studio at the open world's folder when it isn't found by itself (worlds opened through ToolBox, say). It's remembered for that world, and a folder of zipped worlds is caught with advice.",
+      "New: More > Install Minecraft Packs downloads the behavior and resource packs into the development pack folders. Connect to Minecraft offers it when they aren't installed.",
+      "World names now come from level.dat (what ToolBox sets) rather than levelname.txt."
+    ]
+  },
+  {
     "version": "0.33.6",
     "date": "2026-10-01",
     "changes": [

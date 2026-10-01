@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.33.6'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.34.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -1308,18 +1308,21 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
     };
     if (!tickTimer) tickTimer = setInterval(tick, TICK_MS);
     const command = `/connect 127.0.0.1:${PORT}`;
+    const noPacks = !!installedPacks().missing;
     Blockbench.showMessageBox(
       {
         title: 'Pose Studio',
         message:
           `Listening on 127.0.0.1:${PORT}.\n\nIn Minecraft (cheats on), open chat and run:\n` +
-          `${command}\n\nAn empty scene is centred on wherever you're standing in Minecraft.`,
-        buttons: ['Copy Command', 'OK'],
+          `${command}\n\nAn empty scene is centred on wherever you're standing in Minecraft.` +
+          (noPacks ? "\n\nThe Pose Studio Minecraft packs aren't installed on this PC yet: Install Packs downloads them, then add them to the world (Edit World > Behavior Packs and Resource Packs)." : ''),
+        buttons: noPacks ? ['Copy Command', 'Install Packs', 'OK'] : ['Copy Command', 'OK'],
         confirm: 0,
-        cancel: 1,
+        cancel: noPacks ? 2 : 1,
       },
       (button) => {
         if (button === 0) copyText(command);
+        if (noPacks && button === 1) installPacksNow();
       }
     );
     return true;
@@ -2102,8 +2105,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   }
 
   function devSkinFolder() {
-    const appdata = (typeof SystemInfo !== 'undefined' && SystemInfo.appdata_directory) || '';
-    return [appdata, 'Minecraft Bedrock', 'Users', 'Shared', 'games', 'com.mojang', 'development_resource_packs', 'PoseStudio_RP', 'textures', 'entity', 'pose_studio'].join('\\');
+    return `${devPackDir('resource')}\\textures\\entity\\pose_studio`;
   }
 
   function loadImage(dataUrl) {
@@ -2692,11 +2694,13 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
       }
       for (const id of names) {
         const path = `${dir}\\${id}`;
-        let name = id;
-        try {
-          name = String(fs.readFileSync(`${path}\\levelname.txt`, 'utf8')).trim() || id;
-        } catch (e) {
-          // no name file
+        let name = levelDatName(fs, path);
+        if (!name) {
+          try {
+            name = String(fs.readFileSync(`${path}\\levelname.txt`, 'utf8')).trim() || id;
+          } catch (e) {
+            name = id; // no name file
+          }
         }
         // The open world keeps writing to its database, so its newest db file is the most recent.
         let lastActive = 0;
@@ -3465,7 +3469,336 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   const NEUTRAL_PACKED = 2048 * 4096 + 2048; // both angles 0°
 
   function bedrockRoot() {
-    return `${SystemInfo.appdata_directory}\\Minecraft Bedrock`;
+    return storedFolder('pose_studio_bedrock_folder') || defaultBedrockRoot();
+  }
+  const defaultBedrockRoot = () => `${SystemInfo.appdata_directory}\\Minecraft Bedrock`;
+
+  // ---- Folders -------------------------------------------------------------------------------
+  // Where scenes are saved (a shared Dropbox folder, say) and where Minecraft keeps its data
+  // (worlds and development packs). Both are set in Pose Studio ▸ More ▸ Folders…
+  const defaultScenesFolder = () => `${SystemInfo.home_directory}\\Documents\\Pose Studio\\Scenes`;
+  function storedFolder(key) {
+    try {
+      return localStorage.getItem(key) || '';
+    } catch (e) {
+      return '';
+    }
+  }
+  function storeFolder(key, value) {
+    try {
+      if (value) localStorage.setItem(key, value);
+      else localStorage.removeItem(key);
+    } catch (e) {
+      // storage unavailable
+    }
+  }
+  function scenesFolder() {
+    return storedFolder('pose_studio_scenes_folder') || defaultScenesFolder();
+  }
+  // the scenes folder, plus the default one (scenes saved before the folder was changed)
+  function sceneFolders() {
+    const folders = [scenesFolder()];
+    if (!samePath(folders[0], defaultScenesFolder())) folders.push(defaultScenesFolder());
+    return folders;
+  }
+  // File access to a scenes folder (the default one keeps the permission it always asked for).
+  function sceneFs(folder, quiet) {
+    const scope = samePath(folder, defaultScenesFolder()) ? dirName(folder) : folder;
+    return requireNativeModule('fs', { scope, message: `Pose Studio saves scenes in, and finds them in, ${folder}.`, show_permission_dialog: !quiet });
+  }
+
+  // Every .bbmodel in the scenes folders (and up to three folders deep), listed every few seconds.
+  let sceneIndex = null;
+  function sceneFileList() {
+    if (sceneIndex && Date.now() - sceneIndex.at < 5000) return sceneIndex.files;
+    const files = [];
+    sceneFolders().forEach((folder, i) => {
+      let sfs = null;
+      try {
+        sfs = sceneFs(folder, i > 0);
+      } catch (e) {
+        sfs = null;
+      }
+      if (!sfs || !sfs.existsSync(folder)) return;
+      const walk = (dir, depth) => {
+        let names = [];
+        try {
+          names = sfs.readdirSync(dir);
+        } catch (e) {
+          return;
+        }
+        for (const name of names) {
+          if (files.length >= 5000 || name.startsWith('.')) continue;
+          const path = `${dir}\\${name}`;
+          if (/\.bbmodel$/i.test(name)) {
+            files.push({ path, fs: sfs });
+            continue;
+          }
+          if (depth >= 3 || /\.[a-z0-9]{1,5}$/i.test(name)) continue; // files other than scenes
+          try {
+            if (sfs.statSync(path).isDirectory()) walk(path, depth + 1);
+          } catch (e) {
+            // gone or unreadable
+          }
+        }
+      };
+      walk(folder, 0);
+    });
+    sceneIndex = { at: Date.now(), files };
+    return files;
+  }
+
+  // A location's scene path as saved in the world can come from someone else's PC (worlds shared
+  // through git): it's found in this PC's scenes folder by its file name.
+  function resolveScenePath(path) {
+    if (!path) return path;
+    const files = sceneFileList();
+    if (files.some((f) => samePath(f.path, path))) return path;
+    const home = forwardSlashes(SystemInfo.home_directory || '').toLowerCase();
+    const mine = home && forwardSlashes(path).toLowerCase().startsWith(home + '/');
+    if (mine) {
+      // a scene of yours saved somewhere else: keep it unless it's known to be gone
+      let exists = null;
+      try {
+        const dfs = requireNativeModule('fs', { scope: dirName(path), show_permission_dialog: false });
+        if (dfs) exists = dfs.existsSync(path);
+      } catch (e) {
+        exists = null;
+      }
+      if (exists !== false) return path;
+    }
+    const name = fileName(path).toLowerCase();
+    const match = files.find((f) => fileName(f.path).toLowerCase() === name);
+    return match ? match.path : path;
+  }
+
+  // A world's name as Minecraft shows it: level.dat's LevelName (what tools like ToolBox set),
+  // otherwise levelname.txt.
+  function levelDatName(wfs, worldPath) {
+    try {
+      const buf = wfs.readFileSync(`${worldPath}\\level.dat`);
+      for (let i = buf.indexOf('LevelName'); i >= 3; i = buf.indexOf('LevelName', i + 1)) {
+        if (buf[i - 3] !== 8 || buf.readUInt16LE(i - 2) !== 9) continue; // a string tag named LevelName
+        const length = buf.readUInt16LE(i + 9);
+        const name = buf.toString('utf8', i + 11, i + 11 + length).trim();
+        if (name) return name;
+      }
+    } catch (e) {
+      // no level.dat
+    }
+    return '';
+  }
+
+  // A world picked by hand (Locations ▸ Pick Minecraft World…), kept per world.
+  function pickedWorlds() {
+    try {
+      return JSON.parse(localStorage.getItem('pose_studio_world_folders') || '{}') || {};
+    } catch (e) {
+      return {};
+    }
+  }
+  function storePickedWorlds(map) {
+    try {
+      localStorage.setItem('pose_studio_world_folders', JSON.stringify(map));
+    } catch (e) {
+      // storage unavailable
+    }
+  }
+  function pickedWorldFolder() {
+    const map = pickedWorlds();
+    const id = connectedWorld && connectedWorld.id;
+    return (id ? map[id] : map['']) || '';
+  }
+  // a world picked before Minecraft connected belongs to the world that connects
+  function adoptPickedWorld(worldId) {
+    const map = pickedWorlds();
+    if (!worldId || !map[''] || map[worldId]) return;
+    map[worldId] = map[''];
+    delete map[''];
+    storePickedWorlds(map);
+  }
+  function pickedWorldInfo() {
+    const path = pickedWorldFolder();
+    if (!path) return null;
+    try {
+      const wfs = bedrockFs();
+      if (!wfs.existsSync(`${path}\\level.dat`)) return null;
+      return { id: fileName(path), name: levelDatName(wfs, path) || fileName(path), path, lastActive: Infinity, picked: true };
+    } catch (e) {
+      return null;
+    }
+  }
+  // the worlds for the entity browser: the picked one first
+  function worldChoices() {
+    const worlds = listWorlds(bedrockFs(), bedrockRoot());
+    const picked = pickedWorldInfo();
+    if (!picked) return worlds;
+    return [picked].concat(worlds.filter((w) => !samePath(w.path, picked.path)));
+  }
+
+  // Locations ▸ Pick Minecraft World…: for when the open world isn't found by itself (the most
+  // recently played world folder is used otherwise).
+  function pickWorldFolder() {
+    const current = pickedWorldFolder();
+    if (current) {
+      Blockbench.showMessageBox(
+        {
+          title: 'Pose Studio',
+          message: `Pose Studio is using this world folder:\n${current}`,
+          buttons: ['Pick Another…', 'Find It Automatically', 'Cancel'],
+          confirm: 0,
+          cancel: 2,
+        },
+        (button) => {
+          if (button === 0) chooseWorldFolder();
+          if (button === 1) {
+            const map = pickedWorlds();
+            delete map[(connectedWorld && connectedWorld.id) || ''];
+            storePickedWorlds(map);
+            browserWorlds = [];
+            Blockbench.showQuickMessage('Pose Studio finds the world by itself again (the most recently played one)', 3000);
+          }
+        }
+      );
+      return;
+    }
+    chooseWorldFolder();
+  }
+
+  function chooseWorldFolder() {
+    let start = bedrockRoot();
+    try {
+      const bfs = bedrockFs();
+      const mojang = mojangFolders(bfs, bedrockRoot()).find((m) => bfs.existsSync(`${m}\\minecraftWorlds`));
+      if (mojang) start = `${mojang}\\minecraftWorlds`;
+    } catch (e) {
+      // start at the data folder
+    }
+    const picked = Blockbench.pickDirectory({ title: 'Pick the Minecraft world folder (the one with level.dat)', startpath: start, resource_id: 'pose_studio_world' });
+    if (picked) useWorldFolder(String(picked).replace(/[\\/]+$/, ''));
+  }
+
+  function useWorldFolder(folder) {
+    // it has to be inside the Minecraft data folder Pose Studio reads (a different install, like
+    // Preview, changes the data folder)
+    const inside = (root) => forwardSlashes(folder).toLowerCase().startsWith(forwardSlashes(root).toLowerCase() + '/');
+    if (!inside(bedrockRoot())) {
+      const m = /^(.*?)[\\/]Users[\\/][^\\/]+[\\/]games[\\/]com\.mojang[\\/]/i.exec(folder);
+      if (!m) {
+        Blockbench.showMessageBox({ title: 'Pose Studio', message: `That folder isn't in the Minecraft data folder Pose Studio uses:\n${bedrockRoot()}\n\nWorlds live in ...\\Users\\<account>\\games\\com.mojang\\minecraftWorlds. If Minecraft keeps its data elsewhere, set it in Pose Studio ▸ More ▸ Folders….` });
+        return;
+      }
+      storeFolder('pose_studio_bedrock_folder', samePath(m[1], defaultBedrockRoot()) ? '' : m[1]);
+      foldersChanged();
+      Blockbench.showQuickMessage(`Minecraft data folder is now ${m[1]}`, 3000);
+    }
+    const wfs = bedrockFs();
+    let world = folder;
+    if (!wfs.existsSync(`${world}\\level.dat`)) {
+      let names = [];
+      try {
+        names = wfs.readdirSync(folder);
+      } catch (e) {
+        names = [];
+      }
+      const inner = names.filter((n) => wfs.existsSync(`${folder}\\${n}\\level.dat`));
+      if (inner.length === 1) world = `${folder}\\${inner[0]}`;
+      else {
+        const zips = names.some((n) => /\.(zip|mcworld)$/i.test(n));
+        Blockbench.showMessageBox({
+          title: 'Pose Studio',
+          message: zips
+            ? "That folder holds zipped worlds (like ToolBox's world_files). Pick the world folder Minecraft plays from instead: the one with level.dat and a db folder (for ToolBox, the folder that contains world_files)."
+            : "That folder isn't a Minecraft world: pick the folder with level.dat and a db folder in it.",
+        });
+        return;
+      }
+    }
+    const map = pickedWorlds();
+    map[(connectedWorld && connectedWorld.id) || ''] = world;
+    storePickedWorlds(map);
+    browserWorlds = [];
+    const name = levelDatName(wfs, world) || fileName(world);
+    if (connectedWorld && !connectedWorld.name) connectedWorld.name = name;
+    Blockbench.showQuickMessage(`Pose Studio is using the world "${name}"`, 3000);
+  }
+
+  // Pose Studio ▸ More ▸ Folders…
+  function foldersDialog() {
+    const dialog = new Dialog({
+      id: 'pose_studio_folders',
+      title: 'Pose Studio Folders',
+      width: 640,
+      form: {
+        scenes: { label: 'Scenes folder', type: 'folder', value: scenesFolder() },
+        scenes_info: { type: 'info', text: "Where Save Location saves scenes, and where they're looked for when a world opens (with its subfolders). A shared folder (Dropbox, say) lets everyone open the same locations: scenes are found by file name, wherever each person's copy of the folder is." },
+        bedrock: { label: 'Minecraft data folder', type: 'folder', value: bedrockRoot() },
+        bedrock_info: { type: 'info', text: 'Where Minecraft keeps its worlds and development packs. Normally %APPDATA%\\Minecraft Bedrock; change it for another install (Minecraft Preview: Minecraft Bedrock Preview).' },
+      },
+      buttons: ['Save', 'Use Defaults', 'Cancel'],
+      confirmIndex: 0,
+      cancelIndex: 2,
+      onButton(index) {
+        if (index !== 1) return;
+        storeFolder('pose_studio_scenes_folder', '');
+        storeFolder('pose_studio_bedrock_folder', '');
+        foldersChanged();
+        Blockbench.showQuickMessage('Pose Studio uses the default folders', 2500);
+      },
+      onConfirm(form) {
+        const scenes = String(form.scenes || '').replace(/[\\/]+$/, '');
+        const bedrock = String(form.bedrock || '').replace(/[\\/]+$/, '');
+        storeFolder('pose_studio_scenes_folder', !scenes || samePath(scenes, defaultScenesFolder()) ? '' : scenes);
+        storeFolder('pose_studio_bedrock_folder', !bedrock || samePath(bedrock, defaultBedrockRoot()) ? '' : bedrock);
+        foldersChanged();
+        try {
+          if (!bedrockFs().existsSync(`${bedrockRoot()}\\Users`)) {
+            Blockbench.showMessageBox({ title: 'Pose Studio', message: `There's no Users folder in ${bedrockRoot()}, so it doesn't look like Minecraft's data folder. Worlds and packs won't be found there.` });
+            return;
+          }
+        } catch (e) {
+          // permission denied: reported when it's used
+        }
+        Blockbench.showQuickMessage(`Scenes: ${scenesFolder()}`, 3000);
+      },
+    });
+    dialog.show();
+  }
+  function foldersChanged() {
+    bedrockFsCache = null;
+    sceneIndex = null;
+    browserWorlds = [];
+  }
+
+  // Pose Studio ▸ More ▸ Install Minecraft Packs: downloads the packs into this PC's development
+  // pack folders, ready to add to any world.
+  async function installPacksNow() {
+    const base = updateBase();
+    if (!base) {
+      Blockbench.showMessageBox({ title: 'Pose Studio', message: `This copy was installed from a file, so it can't download the packs. Install the plugin with File > Plugins > Load Plugin from URL:\n\n${PLUGIN_URL}` });
+      return;
+    }
+    let packList;
+    try {
+      packList = await fetchRepo(base, 'packs.json');
+    } catch (e) {
+      return showError('Pose Studio: downloading the Minecraft packs', e);
+    }
+    const firstInstall = !!installedPacks().missing;
+    try {
+      await installPacks(base, packList);
+    } catch (e) {
+      Blockbench.setProgress(0);
+      return showError('Pose Studio: installing the Minecraft packs', e);
+    }
+    if (!firstInstall && link.connected) reloadMinecraftPacks();
+    Blockbench.showMessageBox({
+      title: 'Pose Studio',
+      message:
+        `The Pose Studio packs are installed in:\n${devPackDir('behavior')}\n${devPackDir('resource')}\n\n` +
+        'In Minecraft: Edit World > Behavior Packs and Resource Packs > add "Pose Studio" to both, and turn on cheats. Then open the world and Connect to Minecraft.' +
+        (firstInstall ? '' : '\n\nWorlds that already have the packs pick up the update when they reopen.'),
+    });
   }
   function devPackDir(kind) {
     const folder = kind === 'behavior' ? 'development_behavior_packs\\PoseStudio_BP' : 'development_resource_packs\\PoseStudio_RP';
@@ -4979,8 +5312,9 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
             this.busy = true;
             try {
               await findInstallData();
-              if (!browserWorlds.length || force) browserWorlds = listWorlds(bedrockFs(), bedrockRoot());
-              this.worlds = browserWorlds.map((w, i) => ({ path: w.path, label: `${w.name}${i === 0 ? ' (last played)' : ''}` }));
+              if (!browserWorlds.length || force) browserWorlds = worldChoices();
+              const lastPlayed = browserWorlds.find((w) => !w.picked);
+              this.worlds = browserWorlds.map((w) => ({ path: w.path, label: `${w.name}${w.picked ? ' (picked)' : w === lastPlayed ? ' (last played)' : ''}` }));
               const world = browserWorlds.find((w) => w.path === this.worldPath) || browserWorlds[0] || null;
               browserState = await loadWorldContent(world, force);
               this.worldPath = world ? world.path : '';
@@ -5765,7 +6099,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
       const parts = item ? item.split('|') : null;
       return parts ? { x: Number(parts[1]), y: Number(parts[2]), z: Number(parts[3]), dim: parts[4] || '' } : null;
     };
-    const locations = scene.locations.map((l) => Object.assign({}, l, { path: windowsPath(l.path) }));
+    const locations = scene.locations.map((l) => Object.assign({}, l, { path: resolveScenePath(windowsPath(l.path)) }));
     const version = items.find((i) => i.startsWith('V|'));
     return { id: idItem.slice(2), name: scene.world || '', anchor: point('A|'), player: point('P|'), locations, removed: scene.removed || [], protocol: version ? Number(version.slice(2)) : 0 };
   }
@@ -5773,30 +6107,27 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   const EXPECTED_PACK_PROTOCOL = 7; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
   let warnedOldPack = false;
 
-  // Scene files in Documents\Pose Studio\Scenes that belong to a world (their pose_world says so),
-  // as locations. They're found even if the world's own list was never written.
+  // Scene files in the scenes folders that belong to a world (their pose_world says so), as
+  // locations. They're found even if the world's own list was never written (or was written on
+  // someone else's PC). Each file is only read again when it changes.
+  const sceneLinks = new Map(); // path -> { mtime, link }
   function sceneFilesForWorld(worldId) {
     const found = [];
-    try {
-      const root = `${SystemInfo.home_directory}\\Documents\\Pose Studio`;
-      const dir = `${root}\\Scenes`;
-      const fs = requireNativeModule('fs', { scope: root, message: 'Pose Studio looks for the scenes that belong to this world in Documents\\Pose Studio\\Scenes.' });
-      if (!fs || !fs.existsSync(dir)) return found;
-      for (const name of fs.readdirSync(dir)) {
-        if (!/\.bbmodel$/i.test(name)) continue;
-        const path = `${dir}\\${name}`;
-        let text;
-        try {
-          text = String(fs.readFileSync(path, 'utf8'));
-        } catch (e) {
-          continue;
+    for (const { path, fs: sfs } of sceneFileList()) {
+      let link = null;
+      try {
+        const mtime = sfs.statSync(path).mtimeMs;
+        const known = sceneLinks.get(path);
+        if (known && known.mtime === mtime) link = known.link;
+        else {
+          link = extractJsonValue(String(sfs.readFileSync(path, 'utf8')), '"pose_world"');
+          sceneLinks.set(path, { mtime, link });
         }
-        const link = extractJsonValue(text, '"pose_world"');
-        if (!link || link.id !== worldId) continue;
-        found.push({ loc: link.loc || 'main', name: link.locName || 'Main', path, anchor: link.anchor || null, worldName: link.name || '' });
+      } catch (e) {
+        continue;
       }
-    } catch (e) {
-      // no permission or no folder: nothing found
+      if (!link || link.id !== worldId) continue;
+      found.push({ loc: link.loc || 'main', name: link.locName || 'Main', path, anchor: link.anchor || null, worldName: link.name || '' });
     }
     return found;
   }
@@ -5831,6 +6162,8 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   // The world's name, from the most recently played world folder (the one that's open).
   function currentWorldName() {
     try {
+      const picked = pickedWorldInfo();
+      if (picked) return picked.name;
       const worlds = listWorlds(bedrockFs(), bedrockRoot());
       return (worlds[0] && worlds[0].name) || 'Minecraft world';
     } catch (e) {
@@ -6040,7 +6373,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     return String(text).replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').trim() || 'Scene';
   }
 
-  // Locations ▸ Save Location: saves the open location (to Documents\Pose Studio\Scenes the first
+  // Locations ▸ Save Location: saves the open location (to the scenes folder the first
   // time) and links it with the world Minecraft has open.
   async function saveScene() {
     if (typeof Project === 'undefined' || !Project) {
@@ -6069,12 +6402,13 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     const l = projectLink();
     let path = projectPath();
     if (!path) {
-      const dir = `${SystemInfo.home_directory}\\Documents\\Pose Studio\\Scenes`;
-      const fs = requireNativeModule('fs', { scope: `${SystemInfo.home_directory}\\Documents\\Pose Studio`, message: 'Pose Studio saves scenes in Documents\\Pose Studio\\Scenes.' });
+      const dir = scenesFolder();
+      const fs = sceneFs(dir);
       if (!fs) {
-        Blockbench.showMessageBox({ title: 'Pose Studio', message: 'Permission to save in Documents\\Pose Studio was denied. Use File > Save Project instead.' });
+        Blockbench.showMessageBox({ title: 'Pose Studio', message: `Permission to save in ${dir} was denied. Use File > Save Project instead, or pick another scenes folder in Pose Studio ▸ More ▸ Folders….` });
         return;
       }
+      sceneIndex = null;
       fs.mkdirSync(dir, { recursive: true });
       const base = safeFileName(l && l.loc && l.loc !== 'main' ? `${worldName} - ${l.locName}` : worldName);
       path = `${dir}\\${base}.bbmodel`;
@@ -6121,6 +6455,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   // Locations ▸ Locations…: this world's locations, nearest first.
   async function openLocations() {
     if (!requireConnection()) return;
+    sceneIndex = null; // look at the scenes folder afresh
     const world = await readWorldScene().catch(() => null);
     if (!world) {
       Blockbench.showMessageBox({ title: 'Pose Studio', message: "Couldn't read the world. Is the Pose Studio behavior pack up to date?" });
@@ -6143,7 +6478,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
         methods: {
           open(r) {
             if (!fileExists(r.path)) {
-              Blockbench.showMessageBox({ title: 'Pose Studio', message: `The scene for ${r.name} wasn't found:\n${r.path}` });
+              Blockbench.showMessageBox({ title: 'Pose Studio', message: `The scene for ${r.name} wasn't found:\n${r.path}\n\nScenes are looked for in ${scenesFolder()} (set it in Pose Studio ▸ More ▸ Folders…).` });
               return;
             }
             dialog.hide();
@@ -6389,6 +6724,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
 
   // Runs when Minecraft connects: matches the open scene with the world's locations.
   async function checkWorldScene() {
+    sceneIndex = null; // look at the scenes folder afresh
     let world;
     try {
       world = await readWorldScene();
@@ -6424,8 +6760,10 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
       send(`scriptevent pose:setloc ${JSON.stringify(msg)}`);
       if (!world.name && f.worldName) world.name = f.worldName;
     }
+    adoptPickedWorld(world.id);
+    connectedWorld = world;
     const worldName = world.name || currentWorldName();
-    connectedWorld = Object.assign(world, { name: worldName });
+    connectedWorld.name = worldName;
     const project = typeof Project !== 'undefined' && Project ? Project : null;
     const linked = projectLink();
     const hasContent = project && (mannequinRoots().length || entityRoots().length || cameraRoots().length);
@@ -6467,7 +6805,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
         (button) => {
           if (button === 0) {
             if (fileExists(nearest.path)) openSceneFile(nearest.path);
-            else Blockbench.showMessageBox({ title: 'Pose Studio', message: `The scene for ${nearest.name} wasn't found:\n${nearest.path}` });
+            else Blockbench.showMessageBox({ title: 'Pose Studio', message: `The scene for ${nearest.name} wasn't found:\n${nearest.path}\n\nScenes are looked for in ${scenesFolder()} (set it in Pose Studio ▸ More ▸ Folders…).` });
           } else if (button === 1) openLocations();
         }
       );
@@ -6515,6 +6853,17 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.34.0",
+      "date": "2026-10-01",
+      "changes": [
+        "New: More > Folders… sets the scenes folder (a shared Dropbox folder, say) and the Minecraft data folder (for Minecraft Preview or other installs). Locations are looked for in the scenes folder and its subfolders.",
+        "New: worlds shared through git work for everyone. A location saved on someone else's PC is found in your scenes folder by its file name.",
+        "New: Locations > Pick Minecraft World… points Pose Studio at the open world's folder when it isn't found by itself (worlds opened through ToolBox, say). It's remembered for that world, and a folder of zipped worlds is caught with advice.",
+        "New: More > Install Minecraft Packs downloads the behavior and resource packs into the development pack folders. Connect to Minecraft offers it when they aren't installed.",
+        "World names now come from level.dat (what ToolBox sets) rather than levelname.txt."
+      ]
+    },
     {
       "version": "0.33.6",
       "date": "2026-10-01",
@@ -7080,6 +7429,18 @@ ${PLUGIN_URL}`,
         lookcam: new Action('pose_studio_lookcam', { name: 'Look Through Camera', icon: 'visibility', click: () => lookThroughCamera() }),
         follow: new Action('pose_studio_follow_viewport', { name: 'Follow Viewport (No Active Camera)', icon: '3d_rotation', click: followViewport }),
         clear: new Action('pose_studio_clear', { name: 'Remove Mannequins from World', icon: 'delete_sweep', click: clearWorld }),
+        pickworld: new Action('pose_studio_pick_world', {
+          name: 'Pick Minecraft World…', icon: 'folder_open', click: pickWorldFolder,
+          description: "Points Pose Studio at the open world's folder when it isn't found by itself (worlds opened through other tools, say).",
+        }),
+        folders: new Action('pose_studio_folders', {
+          name: 'Folders…', icon: 'folder_shared', click: foldersDialog,
+          description: 'Where scenes are saved (a shared Dropbox folder, say) and where Minecraft keeps its worlds and packs.',
+        }),
+        installpacks: new Action('pose_studio_install_packs', {
+          name: 'Install Minecraft Packs', icon: 'download', click: () => installPacksNow(),
+          description: 'Downloads the Pose Studio behavior and resource packs into your development pack folders.',
+        }),
         reloadpacks: new Action('pose_studio_reload_packs', {
           name: 'Reload Minecraft Packs', icon: 'refresh', click: reloadMinecraftPacks,
           description: 'Runs /reload all so Minecraft loads new skin images (the world briefly closes and reopens).',
@@ -7113,6 +7474,10 @@ ${PLUGIN_URL}`,
             followLocations = value;
           },
         }),
+        setting('pose_studio_folders', {
+          name: 'Pose Studio: Folders', type: 'click', icon: 'folder_shared', click: foldersDialog,
+          description: 'Where scenes are saved (a shared Dropbox folder, say) and where Minecraft keeps its worlds and packs.',
+        }),
         setting('pose_studio_check_updates', {
           name: 'Pose Studio: Check for Updates', type: 'click', icon: 'update', click: () => checkForUpdates(true),
           description: 'Updates this plugin and installs or updates the Pose Studio Minecraft packs.',
@@ -7134,7 +7499,7 @@ ${PLUGIN_URL}`,
 
       menu = new BarMenu('pose_studio', [
         a.link,
-        { name: 'Locations', id: 'pose_studio_scene_menu', icon: 'place', children: [a.savescene, a.newlocation, a.locations, '_', a.refreshloc, a.realign, a.unlinkscene] },
+        { name: 'Locations', id: 'pose_studio_scene_menu', icon: 'place', children: [a.savescene, a.newlocation, a.locations, '_', a.refreshloc, a.realign, a.unlinkscene, '_', a.pickworld] },
         '_',
         a.add,
         a.outfit,
@@ -7151,7 +7516,7 @@ ${PLUGIN_URL}`,
         a.scan,
         a.capture,
         '_',
-        { name: 'More', id: 'pose_studio_more', icon: 'more_horiz', children: [a.anchor, a.skin, a.reloadpacks, a.clear] },
+        { name: 'More', id: 'pose_studio_more', icon: 'more_horiz', children: [a.folders, a.installpacks, '_', a.anchor, a.skin, a.reloadpacks, a.clear] },
       ], { name: 'Pose Studio' });
       MenuBar.addMenu(menu, 'tools');
       startupTimer = setTimeout(() => {
