@@ -33,6 +33,12 @@
         "pose": "animation.pose_studio.mannequin.pose"
       },
       "scripts": {
+        "variables": {
+          "variable.cloak_angle": "public"
+        },
+        "pre_animation": [
+          "v.cloak_angle = (q.property('pose:o13') - math.floor(q.property('pose:o13') / 4096) * 4096) * 0.087890625 - 180;"
+        ],
         "animate": [
           "pose"
         ]

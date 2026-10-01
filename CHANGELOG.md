@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.39.0 (2026-10-01)
+
+- Fixed: cloaks (and other armour parts a pack animates from the wearer) can be posed. Turn the eq_cloak group forward or back in Blockbench and Minecraft follows: the mannequin passes the angle to the armour the way a player does (DragonCraft's cloak_angle).
+- Armour previews now include the armour's own animations, so a cloak hangs at the same angle as in Minecraft.
+- Update the Minecraft packs (Check for Updates, then close and reopen the world).
+
 ## 0.38.0 (2026-10-01)
 
 - Fixed: animations now move bones as well as turn them, like in Minecraft. A block drops and shifts the waist and steps the legs apart; holds pull the arms in. This works in Blockbench and in Minecraft (waist, body, head, arms, legs and hand bones).

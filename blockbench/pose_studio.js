@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.38.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.39.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -1292,7 +1292,9 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
     }
     // two characters per value keeps the command short: 12-bit turns (360/4096 steps) then moves
     // (1/64 pixel steps, ±32 pixels)
-    const code = turns.map(encodeAngle12).concat(moves.map(encodeOffset12)).map(code12).join('');
+    const vars = ownerVariables(root);
+    const extra = OWNER_VARIABLES.map((name) => encodeAngle12(Math.max(-180, Math.min(180, Number(vars[name]) || 0))));
+    const code = turns.map(encodeAngle12).concat(moves.map(encodeOffset12)).map(code12).join('') + extra.map(code12).join('');
     return JSON.stringify({ id: mannequinId(root.name), p: toWorld(root.origin), q: code, s: root.pose_skin_slot || 0, sl: root.pose_slim ? 1 : 0 });
   }
 
@@ -4708,9 +4710,13 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
 
   // The attachable's own third-person animations at their first frame (the "offset" that puts a
   // weapon in the hand): bone -> { rotation, position, scale } (Bedrock convention).
-  function attachableOffsets(content, description) {
+  // Variables the mannequin offers the items it wears (an attachable reads them with
+  // "c.owning_entity -> v.cloak_angle"). Minecraft gets them in the pose's spare slot.
+  const OWNER_VARIABLES = ['cloak_angle'];
+
+  function attachableOffsets(content, description, ownerVars = {}) {
     const out = new Map();
-    const vars = idleVariables(description);
+    const vars = Object.assign(idleVariables(description), ownerVars);
     for (const entry of (description.scripts && description.scripts.animate) || []) {
       const key = typeof entry === 'string' ? entry : Object.keys(entry)[0];
       const cond = typeof entry === 'string' ? true : Object.values(entry)[0];
@@ -4733,6 +4739,51 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     return out;
   }
 
+  // Bones an attachable turns by one of the wearer's variables ("v.cloak_angle * 0.8"): turning such
+  // a bone in Blockbench sets the variable, which is what Minecraft can follow.
+  function attachableDrivers(content, description) {
+    const out = new Map();
+    const scripts = description.scripts || {};
+    const fromOwner = (name) => [].concat(scripts.pre_animation || [], scripts.initialize || []).some((line) => new RegExp(`owning_entity\\s*->\\s*(?:v|variable)\\.${name}\\b`, 'i').test(String(line)));
+    for (const entry of scripts.animate || []) {
+      const key = typeof entry === 'string' ? entry : Object.keys(entry)[0];
+      const cond = typeof entry === 'string' ? true : Object.values(entry)[0];
+      if (cond !== true && !idleCondition(cond)) continue;
+      const animId = description.animations && description.animations[key];
+      const def = typeof animId === 'string' && !/^controller\./.test(animId) && content.animations.get(animId);
+      for (const [bone, ch] of Object.entries((def && def.bones) || {})) {
+        if (!ch || !Array.isArray(ch.rotation)) continue;
+        ch.rotation.forEach((expr, axis) => {
+          const m = typeof expr === 'string' && expr.match(/^\s*(?:v|variable)\.(\w+)\s*(?:\*\s*(-?[\d.]+))?\s*$/i);
+          if (!m || out.has(bone.toLowerCase())) return;
+          const variable = m[1].toLowerCase();
+          if (!OWNER_VARIABLES.includes(variable) || !fromOwner(variable)) return;
+          out.set(bone.toLowerCase(), { variable, axis, factor: m[2] ? Number(m[2]) : 1 });
+        });
+      }
+    }
+    return out;
+  }
+
+  // Remembers which bone sets a variable, and the turn it was built with.
+  function markDriver(group, driver, ownerVars) {
+    group.pose_driver = { variable: driver.variable, axis: driver.axis, factor: driver.factor, built: group.rotation[driver.axis], value: Number(ownerVars[driver.variable]) || 0 };
+  }
+
+  // The wearer's variables from the bones that drive them (turned by hand since they were built).
+  function ownerVariables(root) {
+    const vars = Object.assign({}, root.pose_vars || {});
+    root.forEachChild((g) => {
+      const d = g instanceof Group && g.pose_driver;
+      if (!d || !d.factor) return;
+      const sign = d.axis === 2 ? 1 : -1; // Blockbench -> Bedrock turns
+      vars[d.variable] = round(d.value + (sign * (g.rotation[d.axis] - d.built)) / d.factor, 2);
+    });
+    const changed = JSON.stringify(vars) !== JSON.stringify(root.pose_vars || {});
+    if (changed) root.pose_vars = vars;
+    return vars;
+  }
+
   // A 3D item (a weapon) in the hand: its model's bound bones go on the hand bone it binds to,
   // placed the way Minecraft and Blockbench do it (the bone's pivot 24 below the hand bone's), then
   // moved by the attachable's offset animation.
@@ -4749,7 +4800,9 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     const texture = await previewTexture(content, `eq_${String(texturePath).split('/').pop()}`, texturePath, geometry.texture_width, geometry.texture_height);
     if (texture && !textures.includes(texture)) textures.push(texture);
     const visible = attachableVisibility(content, attachable, {});
-    const offsets = attachableOffsets(content, d);
+    const ownerVars = ownerVariables(root);
+    const offsets = attachableOffsets(content, d, ownerVars);
+    const drivers = attachableDrivers(content, d);
     const raw = new Map(geometry.bones.map((b) => [String(b.name).toLowerCase(), b]));
     const model = bedrockToBlockbench({ bones: geometry.bones, texture_width: geometry.texture_width, texture_height: geometry.texture_height });
     const byName = new Map(model.bones.map((b) => [b.name.toLowerCase(), b]));
@@ -4795,6 +4848,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
       group.rotation = [group.rotation[0] - o.rotation[0], group.rotation[1] - o.rotation[1], group.rotation[2] + o.rotation[2]];
       translateTree(group, [-o.position[0], o.position[1], o.position[2]]);
     }
+    for (const { key, group } of built) if (drivers.has(key)) markDriver(group, drivers.get(key), ownerVars);
     return built.length > 0;
   }
 
@@ -6067,6 +6121,19 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
       if (!group) continue;
       addPreviewCubes(group, bone, shift, texture, `eq_${slot}`, cubes);
     }
+    // the armour's own animations (a cloak's angle), on its parts only (not the player's bones)
+    const ownerVars = ownerVariables(mannequin);
+    const offsets = attachableOffsets(content, d, ownerVars);
+    const drivers = attachableDrivers(content, d);
+    for (const [key, group] of groups) {
+      if (!group || group === mannequin || !/^eq_/.test(group.name)) continue;
+      const o = offsets.get(key);
+      if (o) {
+        group.rotation = [group.rotation[0] - o.rotation[0], group.rotation[1] - o.rotation[1], group.rotation[2] + o.rotation[2]];
+        translateTree(group, [-o.position[0], o.position[1], o.position[2]]);
+      }
+      if (drivers.has(key)) markDriver(group, drivers.get(key), ownerVars);
+    }
     return true;
   }
 
@@ -6203,6 +6270,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
 
   async function buildEquipmentPreview(mannequin) {
     ensureRig(mannequin);
+    ownerVariables(mannequin); // a cloak turned by hand keeps its angle through the rebuild
     const old = [];
     const oldGroups = [];
     mannequin.forEachChild((c) => {
@@ -6836,7 +6904,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     return { id: idItem.slice(2), name: scene.world || '', anchor: point('A|'), player: point('P|'), locations, removed: scene.removed || [], protocol: version ? Number(version.slice(2)) : 0 };
   }
 
-  const EXPECTED_PACK_PROTOCOL = 10; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
+  const EXPECTED_PACK_PROTOCOL = 11; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
   let warnedOldPack = false;
 
   // Scene files in the scenes folders that belong to a world (their pose_world says so), as
@@ -7587,6 +7655,15 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   // <changelog>
   const CHANGELOG = [
     {
+      "version": "0.39.0",
+      "date": "2026-10-01",
+      "changes": [
+        "Fixed: cloaks (and other armour parts a pack animates from the wearer) can be posed. Turn the eq_cloak group forward or back in Blockbench and Minecraft follows: the mannequin passes the angle to the armour the way a player does (DragonCraft's cloak_angle).",
+        "Armour previews now include the armour's own animations, so a cloak hangs at the same angle as in Minecraft.",
+        "Update the Minecraft packs (Check for Updates, then close and reopen the world)."
+      ]
+    },
+    {
       "version": "0.38.0",
       "date": "2026-10-01",
       "changes": [
@@ -8121,6 +8198,8 @@ ${PLUGIN_URL}`,
         new Property(Group, 'object', 'pose_entity'),
         new Property(Group, 'object', 'pose_equipment'),
         new Property(Group, 'object', 'pose_animation'),
+        new Property(Group, 'object', 'pose_vars'),
+        new Property(Group, 'object', 'pose_driver'),
         new Property(Group, 'number', 'pose_skin_slot', { default: 0 }),
         new Property(Group, 'boolean', 'pose_slim', { default: false }),
       ];

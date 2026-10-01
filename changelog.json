@@ -1,5 +1,14 @@
 [
   {
+    "version": "0.39.0",
+    "date": "2026-10-01",
+    "changes": [
+      "Fixed: cloaks (and other armour parts a pack animates from the wearer) can be posed. Turn the eq_cloak group forward or back in Blockbench and Minecraft follows: the mannequin passes the angle to the armour the way a player does (DragonCraft's cloak_angle).",
+      "Armour previews now include the armour's own animations, so a cloak hangs at the same angle as in Minecraft.",
+      "Update the Minecraft packs (Check for Updates, then close and reopen the world)."
+    ]
+  },
+  {
     "version": "0.38.0",
     "date": "2026-10-01",
     "changes": [
