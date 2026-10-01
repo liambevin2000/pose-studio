@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.40.2 (2026-10-01)
+
+- Fixed: Time & Weather opened empty (a broken tooltip stopped the window from drawing).
+
 ## 0.40.1 (2026-10-01)
 
 - New: Put Pose Studio on Top (Time & Weather, when the pack order stops the sun tilt). With the world closed, it moves Pose Studio's resource pack to first in the world's list, keeping a backup of the old order.

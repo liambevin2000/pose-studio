@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.40.1'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.40.2'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -6926,7 +6926,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
               </div>
               <div style="display: flex; gap: 6px; margin-top: 6px; align-items: center;">
                 <button @click="applyTilt(false)" :disabled="busy" style="min-width: 0; padding: 0 12px;">Apply</button>
-                <button @click="applyTilt(true)" :disabled="busy" style="min-width: 0; padding: 0 12px;" :title="'The packs\' own tilt: ' + packTilt + '°'">Pack Default ({{ packTilt }}°)</button>
+                <button @click="applyTilt(true)" :disabled="busy" style="min-width: 0; padding: 0 12px;" :title="'Back to the tilt the packs set: ' + packTilt + '°'">Pack Default ({{ packTilt }}°)</button>
               </div>
               <p v-if="tiltNote" style="margin: 6px 0 0;">{{ tiltNote }}</p>
               <button v-if="needsTop" @click="moveTop()" style="min-width: 0; padding: 0 12px; margin-top: 6px;" title="For when Minecraft's screen won't reorder the packs">Put Pose Studio on Top</button>
@@ -7872,6 +7872,13 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.40.2",
+      "date": "2026-10-01",
+      "changes": [
+        "Fixed: Time & Weather opened empty (a broken tooltip stopped the window from drawing)."
+      ]
+    },
     {
       "version": "0.40.1",
       "date": "2026-10-01",

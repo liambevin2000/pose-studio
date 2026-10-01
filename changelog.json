@@ -1,5 +1,12 @@
 [
   {
+    "version": "0.40.2",
+    "date": "2026-10-01",
+    "changes": [
+      "Fixed: Time & Weather opened empty (a broken tooltip stopped the window from drawing)."
+    ]
+  },
+  {
     "version": "0.40.1",
     "date": "2026-10-01",
     "changes": [
