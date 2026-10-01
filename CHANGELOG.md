@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.33.1 (2026-10-01)
+
+- Fixed: after going to a far location, its players and entities could exist in Minecraft without being drawn. Entities created while you were away are not always sent to your screen when you arrive, so Pose Studio now places them again once you are there.
+- New: Locations ▸ Refresh in Minecraft removes and re-places the open location's players and entities, for whenever they are missing.
+
 ## 0.33.0 (2026-09-30)
 
 - Switching between far-apart locations now works reliably: Minecraft only draws terrain and entities around the player, so switching to a location more than about 100 blocks away takes you there automatically. The area loads, then its players and entities are placed. Turn off Go to Locations in the plugin settings to be asked instead.

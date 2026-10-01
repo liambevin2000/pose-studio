@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.33.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.33.1'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -5833,9 +5833,19 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     if (!link.connected || !anchor) return;
     const cmd = `tp @s ${anchor.x} ${Number(anchor.y) + 1} ${anchor.z}`;
     await link.command(anchor.dim ? `execute in ${anchor.dim} run ${cmd}` : cmd).catch(logFailure);
-    // the area loads over the next moments; send everything again once it has
-    setTimeout(resync, 1500);
-    setTimeout(resync, 4000);
+    // Once the area has loaded around you, the location's entities are made again: ones created
+    // while you were away (kept by the ticking area) aren't always sent to your screen.
+    setTimeout(refreshLocationEntities, 2000);
+    setTimeout(resync, 5000);
+  }
+
+  // Locations ▸ Refresh in Minecraft: removes the open location's players and entities in the
+  // world and places them again (fixes ones Minecraft has but isn't drawing).
+  function refreshLocationEntities() {
+    if (!link.connected || typeof Project === 'undefined' || !Project) return;
+    for (const root of mannequinRoots().concat(entityRoots())) send(`scriptevent pose:remove ${JSON.stringify({ id: mannequinId(root.name) })}`);
+    // the next updates place them all again
+    setTimeout(resync, 300);
   }
 
   // After switching to a location: offer to go there when the player is far from it.
@@ -6368,6 +6378,14 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   // <changelog>
   const CHANGELOG = [
     {
+      "version": "0.33.1",
+      "date": "2026-10-01",
+      "changes": [
+        "Fixed: after going to a far location, its players and entities could exist in Minecraft without being drawn. Entities created while you were away are not always sent to your screen when you arrive, so Pose Studio now places them again once you are there.",
+        "New: Locations ▸ Refresh in Minecraft removes and re-places the open location's players and entities, for whenever they are missing."
+      ]
+    },
+    {
       "version": "0.33.0",
       "date": "2026-09-30",
       "changes": [
@@ -6812,6 +6830,10 @@ ${PLUGIN_URL}`,
           name: 'Locations…', icon: 'place', click: openLocations,
           description: "This world's locations, nearest first: open, rename or remove them.",
         }),
+        refreshloc: new Action('pose_studio_refresh_location', {
+          name: 'Refresh in Minecraft', icon: 'refresh', click: () => refreshLocationEntities(),
+          description: "Removes this location's players and entities in Minecraft and places them again, for when they're missing or not drawn.",
+        }),
         unlinkscene: new Action('pose_studio_unlink_scene', { name: 'Remove Location from World', icon: 'wrong_location', click: unlinkScene }),
         realign: new Action('pose_studio_realign_scene', {
           name: 'Realign with World', icon: 'my_location', click: () => realignScene(),
@@ -6934,7 +6956,7 @@ ${PLUGIN_URL}`,
 
       menu = new BarMenu('pose_studio', [
         a.link,
-        { name: 'Locations', id: 'pose_studio_scene_menu', icon: 'place', children: [a.savescene, a.newlocation, a.locations, '_', a.realign, a.unlinkscene] },
+        { name: 'Locations', id: 'pose_studio_scene_menu', icon: 'place', children: [a.savescene, a.newlocation, a.locations, '_', a.refreshloc, a.realign, a.unlinkscene] },
         '_',
         a.add,
         a.outfit,
