@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.33.3'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.33.4'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -1607,14 +1607,26 @@ Write-Output $Out
   // ---- Camera actions ------------------------------------------------------------------------
   async function grabCameraFromPlayer() {
     if (!requireConnection()) return;
-    // The grab reads the player's own view, which the synced game camera hides: give the view
-    // back first so the next shot can be framed.
+    // While the game camera is synced, what Minecraft shows is the active camera's view: save that
+    // as a new camera (a spare, or a starting point to tweak). To frame a shot from your own view,
+    // turn Sync Game Camera off first.
     if (cameraSync) {
+      const source = activeCamera();
+      if (source) {
+        const copy = createCamera(source.origin.slice(), cameraForward(source));
+        for (let i = 0; i < 3; i++) copy.rotation[i] = source.rotation[i]; // keeps any roll too
+        if (source.pose_fov) copy.pose_fov = source.pose_fov;
+        Canvas.updateAll();
+        useNewCamera(copy);
+        Blockbench.showQuickMessage(`Saved Minecraft's current view (${source.name}) as ${copy.name}. To frame a shot from your own view, turn off Camera ▸ Sync Game Camera first.`, 5000);
+        return;
+      }
+      // synced to the viewport (no camera): the player's view is hidden, so give it back
       if (cameraToggle) cameraToggle.set(false);
       else setCameraSync(false);
       Blockbench.showMessageBox({
         title: 'Pose Studio',
-        message: 'The game camera is back to your own view. Frame the next shot in Minecraft, then choose Add Camera ▸ From Minecraft View again.',
+        message: 'The game camera is back to your own view. Frame the shot in Minecraft, then choose Add Camera ▸ From Minecraft View again.',
       });
       return;
     }
@@ -6431,6 +6443,13 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.33.4",
+      "date": "2026-10-01",
+      "changes": [
+        "Add Camera ▸ From Minecraft View while Sync Game Camera is on now saves the view Minecraft is showing as a new camera (same position, angle and field of view), instead of switching the camera off. To frame a new shot from your own view, turn Sync Game Camera off first."
+      ]
+    },
     {
       "version": "0.33.3",
       "date": "2026-10-01",

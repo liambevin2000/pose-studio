@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.33.4 (2026-10-01)
+
+- Add Camera ▸ From Minecraft View while Sync Game Camera is on now saves the view Minecraft is showing as a new camera (same position, angle and field of view), instead of switching the camera off. To frame a new shot from your own view, turn Sync Game Camera off first.
+
 ## 0.33.3 (2026-10-01)
 
 - Fixed: going to a far location and keeping locations loaded never actually worked in game. The teleport and ticking-area commands named the dimension "minecraft:overworld", which Bedrock's execute command rejects (it wants "overworld"), and the failure was silent.

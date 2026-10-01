@@ -1,5 +1,12 @@
 [
   {
+    "version": "0.33.4",
+    "date": "2026-10-01",
+    "changes": [
+      "Add Camera ▸ From Minecraft View while Sync Game Camera is on now saves the view Minecraft is showing as a new camera (same position, angle and field of view), instead of switching the camera off. To frame a new shot from your own view, turn Sync Game Camera off first."
+    ]
+  },
+  {
     "version": "0.33.3",
     "date": "2026-10-01",
     "changes": [
