@@ -1,5 +1,12 @@
 [
   {
+    "version": "0.33.6",
+    "date": "2026-10-01",
+    "changes": [
+      "Fixed: after going to another location, the camera view could show a much narrower (more zoomed in) picture than Minecraft, even though the game camera was right. Switching projects left the view drawn at an old size and shape, so the picture was cropped. The camera view now checks its size, aspect and zoom every frame and puts them right."
+    ]
+  },
+  {
     "version": "0.33.5",
     "date": "2026-10-01",
     "changes": [

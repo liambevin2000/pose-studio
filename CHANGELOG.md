@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.33.6 (2026-10-01)
+
+- Fixed: after going to another location, the camera view could show a much narrower (more zoomed in) picture than Minecraft, even though the game camera was right. Switching projects left the view drawn at an old size and shape, so the picture was cropped. The camera view now checks its size, aspect and zoom every frame and puts them right.
+
 ## 0.33.5 (2026-10-01)
 
 - Fixed: the camera view could drift away from its camera (showing the camera from behind, or the inside of the terrain). Blockbench's orbit controls kept applying leftover movement to it, and a split view rebuilt by Blockbench (after switching tabs) was no longer followed. The camera view is now locked to its camera on every frame.

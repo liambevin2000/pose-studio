@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.33.5'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.33.6'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -655,6 +655,42 @@
     return text;
   }
 
+  // Switching projects (going to another location opens its project) makes Blockbench restore each
+  // view's saved state and can leave the camera view drawn at a stale size, or with a stale aspect
+  // or zoom: the picture is then cropped and looks far more zoomed in than Minecraft. Put it right.
+  function checkPovProjection() {
+    const pv = povPreview;
+    if (pv.isOrtho && pv.setProjectionMode) pv.setProjectionMode(false);
+    const pers = pv.camPers || pv.camera;
+    let fix = false;
+    if (pers.zoom !== undefined && pers.zoom !== 1) {
+      pers.zoom = 1;
+      fix = true;
+    }
+    if (pers.view && pers.clearViewOffset) {
+      pers.clearViewOffset();
+      fix = true;
+    }
+    const parent = pv.node && pv.node.parentElement;
+    if (parent && parent.clientWidth && parent.clientHeight && pv.resize) {
+      let w = parent.clientWidth;
+      let h = parent.clientHeight;
+      if (pv.aspect_ratio && Math.abs(w / h - pv.aspect_ratio) > 0.02) {
+        if (w / h < pv.aspect_ratio) h = w / pv.aspect_ratio;
+        else w = h * pv.aspect_ratio;
+      }
+      const sized = Math.abs(pv.width - w) < 2 && Math.abs(pv.height - h) < 2;
+      const shaped = pv.height > 0 && Math.abs(pers.aspect - pv.width / pv.height) < 0.01;
+      const canvas = pv.canvas;
+      const drawn = !canvas || !canvas.clientWidth || (Math.abs(canvas.clientWidth - pv.width) < 2 && Math.abs(canvas.clientHeight - pv.height) < 2);
+      if (!sized || !shaped || !drawn) {
+        pv.resize();
+        fix = false; // resize rebuilt the projection
+      }
+    }
+    if (fix && pers.updateProjectionMatrix) pers.updateProjectionMatrix();
+  }
+
   function updatePovViewport() {
     // Blockbench can rebuild its split views (switching tabs, for one): take over the new one
     const split = typeof Preview !== 'undefined' && Preview.split_screen;
@@ -664,6 +700,7 @@
       applyPovAspect();
     }
     if (!povPreview || !povPreview.camera || typeof Project === 'undefined' || !Project) return;
+    checkPovProjection();
     const cam = activeCamera();
     syncPovFovSlider();
     if (povLabel) {
@@ -6478,6 +6515,13 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.33.6",
+      "date": "2026-10-01",
+      "changes": [
+        "Fixed: after going to another location, the camera view could show a much narrower (more zoomed in) picture than Minecraft, even though the game camera was right. Switching projects left the view drawn at an old size and shape, so the picture was cropped. The camera view now checks its size, aspect and zoom every frame and puts them right."
+      ]
+    },
     {
       "version": "0.33.5",
       "date": "2026-10-01",
