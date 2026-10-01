@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.38.0 (2026-10-01)
+
+- Fixed: animations now move bones as well as turn them, like in Minecraft. A block drops and shifts the waist and steps the legs apart; holds pull the arms in. This works in Blockbench and in Minecraft (waist, body, head, arms, legs and hand bones).
+- Fixed: animations that keep the head relative to the entity (it stays level while the body leans) now do so.
+- Moving a player's bone by hand (the waist, an arm, a leg) now shows in Minecraft too.
+- Equipment is sent to Minecraft separately and only when it changes, so a fully equipped player's pose always fits in one command.
+- Update the Minecraft packs (Check for Updates, then close and reopen the world): the mannequin's pose is stored in a new, more compact way.
+
 ## 0.37.0 (2026-10-01)
 
 - Fixed: players now have the same bone chain as Minecraft's player model: a waist, the body in the waist, the head and arms in the body (legs on their own). Animations that lean the waist or body (a sprint leans forward) carry the head and arms with them, in Blockbench and in Minecraft.

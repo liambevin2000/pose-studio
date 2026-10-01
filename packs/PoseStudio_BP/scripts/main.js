@@ -6,16 +6,53 @@ import { world, system } from "@minecraft/server";
 
 const TYPE = "pose:mannequin";
 const TAG_PREFIX = "pose_id.";
-const BONES = ["root", "head", "body", "right_arm", "left_arm", "right_leg", "left_leg"];
-const PROPS = BONES.flatMap((b) => ["x", "y", "z"].map((a) => `pose:${b}_${a}`));
-// The hand bones (rightItem, leftItem): turn x, y, z and move x, y, z, packed three ints each
-// (two 12-bit values per int: angles in 360/4096 steps, offsets in 1/64 pixel steps).
-const HAND_PROPS = ["r", "l"].flatMap((s) => [0, 1, 2].map((i) => `pose:hand_${s}${i}`));
-function packHand(v) {
-  const a = (deg) => ((Math.round(((Number(deg) || 0) + 180) * 4096 / 360) % 4096) + 4096) % 4096;
-  const p = (u) => Math.max(0, Math.min(4095, Math.round((Number(u) || 0) * 64) + 2048));
-  const h = Array.isArray(v) ? v : [];
-  return [a(h[0]) * 4096 + a(h[1]), a(h[2]) * 4096 + p(h[3]), p(h[4]) * 4096 + p(h[5])];
+// The mannequin's pose, packed two 12-bit values per int property: turns (x, y, z per bone, in
+// 360/4096 steps) in pose:a0..14 and moves (x, y, z per bone, in 1/64 pixel steps) in pose:o0..13.
+const ANGLE_BONES = ["pose_root","waist","body","head","rightArm","leftArm","rightLeg","leftLeg","rightItem","leftItem"];
+const POS_BONES = ["waist","body","head","rightArm","leftArm","rightLeg","leftLeg","rightItem","leftItem"];
+const ANGLE_PROPS = Array.from({ length: 15 }, (_, i) => `pose:a${i}`);
+const POS_PROPS = Array.from({ length: 14 }, (_, i) => `pose:o${i}`);
+const encodeAngle = (deg) => ((Math.round(((Number(deg) || 0) + 180) * 4096 / 360) % 4096) + 4096) % 4096;
+const encodeOffset = (u) => Math.max(0, Math.min(4095, Math.round((Number(u) || 0) * 64) + 2048));
+function packPairs(values, count, encode) {
+  const out = [];
+  for (let i = 0; i < count; i++) out.push(encode(values[i * 2]) * 4096 + encode(values[i * 2 + 1]));
+  return out;
+}
+// turns: ANGLE_BONES x 3 (Bedrock convention), moves: POS_BONES x 3
+function setPoseProperties(entity, turns, moves) {
+  const a = packPairs(Array.isArray(turns) ? turns : [], ANGLE_PROPS.length, encodeAngle);
+  const o = packPairs(Array.isArray(moves) ? moves : [], POS_PROPS.length, encodeOffset);
+  for (let i = 0; i < a.length; i++) entity.setProperty(ANGLE_PROPS[i], a[i]);
+  for (let i = 0; i < o.length; i++) entity.setProperty(POS_PROPS[i], o[i]);
+}
+// What Blockbench sends: two characters per 12-bit value, the turns then the moves.
+const CODE_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+function setPoseCode(entity, code) {
+  const text = String(code || "");
+  const values = [];
+  for (let i = 0; i + 1 < text.length; i += 2) {
+    const a = CODE_CHARS.indexOf(text[i]);
+    const b = CODE_CHARS.indexOf(text[i + 1]);
+    values.push(a < 0 || b < 0 ? 2048 : a * 64 + b);
+  }
+  const turns = ANGLE_BONES.length * 3;
+  const pair = (list, i) => (list[i] ?? 2048) * 4096 + (list[i + 1] ?? 2048);
+  const t = values.slice(0, turns);
+  const o = values.slice(turns);
+  for (let i = 0; i < ANGLE_PROPS.length; i++) entity.setProperty(ANGLE_PROPS[i], pair(t, i * 2));
+  for (let i = 0; i < POS_PROPS.length; i++) entity.setProperty(POS_PROPS[i], pair(o, i * 2));
+}
+function decodePose(entity) {
+  const values = (props, decode) => props.flatMap((p) => {
+    const v = Number(entity.getProperty(p));
+    if (!Number.isFinite(v)) return [NaN, NaN];
+    return [decode(Math.floor(v / 4096)), decode(v % 4096)];
+  });
+  return {
+    turns: values(ANGLE_PROPS, (n) => Math.round(n * 360 / 4096 - 180)),
+    moves: values(POS_PROPS, (n) => Math.round(((n - 2048) / 64) * 10) / 10),
+  };
 }
 
 let warnedFov = false;
@@ -78,20 +115,25 @@ function setPose(player, data) {
   }
   entity.teleport(loc, { rotation: { x: 0, y: 0 } });
 
-  const b = data.b || [];
-  for (let i = 0; i < PROPS.length; i++) entity.setProperty(PROPS[i], clampAngle(b[i]));
+  setPoseCode(entity, data.q);
   // skin slot (0 = default Steve, 1-16 = textures/entity/pose_studio/skin_N.png) and arm type
   entity.setProperty("pose:skin", Math.max(0, Math.min(16, Math.round(Number(data.s) || 0))));
   entity.setProperty("pose:slim", !!data.sl);
   entity.setProperty("pose:hidden", false);
-  const hands = Array.isArray(data.h) ? data.h : [];
-  const packed = [...packHand(hands[0]), ...packHand(hands[1])];
-  for (let i = 0; i < HAND_PROPS.length; i++) entity.setProperty(HAND_PROPS[i], packed[i]);
-  // the waist (the body, head and arms hang off it): turn x, y, z in two packed ints
-  const waist = packHand(Array.isArray(data.w) ? data.w : []);
-  entity.setProperty("pose:waist0", waist[0]);
-  entity.setProperty("pose:waist1", waist[1]);
-  if (data.e) applyEquipment(entity, data.e);
+  if (data.e) wantedEquipment.set(data.id, data.e);
+  const equipment = wantedEquipment.get(data.id);
+  if (equipment) applyEquipment(entity, equipment);
+}
+
+// `pose:eq {"id","e"}` — a mannequin's equipment, sent only when it changes. It's remembered, so
+// a mannequin made again later (after a refresh, say) gets it back.
+const wantedEquipment = new Map(); // mannequin id -> equipment
+function setEquipmentFor(player, data) {
+  if (!data.id) return;
+  wantedEquipment.set(data.id, data.e || {});
+  const anchor = requireAnchor(player);
+  const entity = findMannequins(world.getDimension(anchor.dim), data.id)[0];
+  if (entity) applyEquipment(entity, data.e || {});
 }
 
 // `pose:ent {"id","t","m","p","y","q"}` — a posable copy of an entity: t is pose:proxy, m which of
@@ -182,8 +224,7 @@ function applyHolder(player, data) {
     holder.setProperty("pose:hidden", !data.v);
   }
   holder.teleport(loc, { rotation: { x: 0, y: 0 } });
-  const angles = [...data.r.map(Number), ...new Array(PROPS.length - 3).fill(0)];
-  for (let i = 0; i < PROPS.length; i++) holder.setProperty(PROPS[i], clampAngle(angles[i]));
+  setPoseProperties(holder, data.r.map(Number), []);
   holder.setProperty("pose:hidden", !data.v); // "v":1 = visible, for testing
   // always the main hand: the off hand refuses most items (swords, tools...)
   applyEquipment(holder, { mainhand: data.i });
@@ -298,12 +339,12 @@ function debug(player) {
   }
   for (const e of world.getDimension(anchor.dim).getEntities({ type: TYPE })) {
     const id = e.getTags().find((t) => t.startsWith(TAG_PREFIX))?.slice(TAG_PREFIX.length) ?? "?";
-    const parts = BONES.map((b) => {
-      const v = ["x", "y", "z"].map((a) => {
-        const raw = e.getProperty(`pose:${b}_${a}`);
-        return raw === undefined ? "MISSING" : Math.round(Number(raw));
-      });
-      return `${b} ${v.join("/")}`;
+    const { turns, moves } = decodePose(e);
+    const parts = ANGLE_BONES.map((b, i) => {
+      const t = turns.slice(i * 3, i * 3 + 3).map((v) => (Number.isFinite(v) ? v : "MISSING"));
+      const p = POS_BONES.indexOf(b);
+      const o = p >= 0 ? moves.slice(p * 3, p * 3 + 3) : [];
+      return `${b} ${t.join("/")}${o.some((v) => v) ? ` moved ${o.join("/")}` : ""}`;
     });
     say(`§e${id}§r ${parts.join(", ")}`);
   }
@@ -340,7 +381,7 @@ function debug(player) {
 // Every name looks like `PSD[op|page|item]`; page 0 always carries
 // `M|ready|<pages>|<items>|<items per page>` or `M|busy|<percent>`.
 // What this script understands; Blockbench warns when the world runs an older one.
-const PACK_PROTOCOL = 9;
+const PACK_PROTOCOL = 10;
 const IO_OBJECTIVE = "pose_io";
 const ITEMS_PER_PAGE = 30;
 const MAX_PAGES_PER_BATCH = 16;
@@ -646,6 +687,8 @@ function handle(ev) {
     }
     case "pose:set":
       return setPose(player, data);
+    case "pose:eq":
+      return setEquipmentFor(player, data);
     case "pose:ent":
       return setEntity(player, data);
     case "pose:hold":

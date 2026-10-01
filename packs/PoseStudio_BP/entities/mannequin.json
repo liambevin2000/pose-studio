@@ -6,130 +6,265 @@
       "is_spawnable": true,
       "is_summonable": true,
       "properties": {
-        "pose:root_x": {
-          "type": "float",
-          "range": [-180.0, 180.0],
-          "default": 0.0,
+        "pose:a0": {
+          "type": "int",
+          "range": [
+            0,
+            16777215
+          ],
+          "default": 8390656,
           "client_sync": true
         },
-        "pose:root_y": {
-          "type": "float",
-          "range": [-180.0, 180.0],
-          "default": 0.0,
+        "pose:a1": {
+          "type": "int",
+          "range": [
+            0,
+            16777215
+          ],
+          "default": 8390656,
           "client_sync": true
         },
-        "pose:root_z": {
-          "type": "float",
-          "range": [-180.0, 180.0],
-          "default": 0.0,
+        "pose:a2": {
+          "type": "int",
+          "range": [
+            0,
+            16777215
+          ],
+          "default": 8390656,
           "client_sync": true
         },
-        "pose:head_x": {
-          "type": "float",
-          "range": [-180.0, 180.0],
-          "default": 0.0,
+        "pose:a3": {
+          "type": "int",
+          "range": [
+            0,
+            16777215
+          ],
+          "default": 8390656,
           "client_sync": true
         },
-        "pose:head_y": {
-          "type": "float",
-          "range": [-180.0, 180.0],
-          "default": 0.0,
+        "pose:a4": {
+          "type": "int",
+          "range": [
+            0,
+            16777215
+          ],
+          "default": 8390656,
           "client_sync": true
         },
-        "pose:head_z": {
-          "type": "float",
-          "range": [-180.0, 180.0],
-          "default": 0.0,
+        "pose:a5": {
+          "type": "int",
+          "range": [
+            0,
+            16777215
+          ],
+          "default": 8390656,
           "client_sync": true
         },
-        "pose:body_x": {
-          "type": "float",
-          "range": [-180.0, 180.0],
-          "default": 0.0,
+        "pose:a6": {
+          "type": "int",
+          "range": [
+            0,
+            16777215
+          ],
+          "default": 8390656,
           "client_sync": true
         },
-        "pose:body_y": {
-          "type": "float",
-          "range": [-180.0, 180.0],
-          "default": 0.0,
+        "pose:a7": {
+          "type": "int",
+          "range": [
+            0,
+            16777215
+          ],
+          "default": 8390656,
           "client_sync": true
         },
-        "pose:body_z": {
-          "type": "float",
-          "range": [-180.0, 180.0],
-          "default": 0.0,
+        "pose:a8": {
+          "type": "int",
+          "range": [
+            0,
+            16777215
+          ],
+          "default": 8390656,
           "client_sync": true
         },
-        "pose:right_arm_x": {
-          "type": "float",
-          "range": [-180.0, 180.0],
-          "default": 0.0,
+        "pose:a9": {
+          "type": "int",
+          "range": [
+            0,
+            16777215
+          ],
+          "default": 8390656,
           "client_sync": true
         },
-        "pose:right_arm_y": {
-          "type": "float",
-          "range": [-180.0, 180.0],
-          "default": 0.0,
+        "pose:a10": {
+          "type": "int",
+          "range": [
+            0,
+            16777215
+          ],
+          "default": 8390656,
           "client_sync": true
         },
-        "pose:right_arm_z": {
-          "type": "float",
-          "range": [-180.0, 180.0],
-          "default": 0.0,
+        "pose:a11": {
+          "type": "int",
+          "range": [
+            0,
+            16777215
+          ],
+          "default": 8390656,
           "client_sync": true
         },
-        "pose:left_arm_x": {
-          "type": "float",
-          "range": [-180.0, 180.0],
-          "default": 0.0,
+        "pose:a12": {
+          "type": "int",
+          "range": [
+            0,
+            16777215
+          ],
+          "default": 8390656,
           "client_sync": true
         },
-        "pose:left_arm_y": {
-          "type": "float",
-          "range": [-180.0, 180.0],
-          "default": 0.0,
+        "pose:a13": {
+          "type": "int",
+          "range": [
+            0,
+            16777215
+          ],
+          "default": 8390656,
           "client_sync": true
         },
-        "pose:left_arm_z": {
-          "type": "float",
-          "range": [-180.0, 180.0],
-          "default": 0.0,
+        "pose:a14": {
+          "type": "int",
+          "range": [
+            0,
+            16777215
+          ],
+          "default": 8390656,
           "client_sync": true
         },
-        "pose:right_leg_x": {
-          "type": "float",
-          "range": [-180.0, 180.0],
-          "default": 0.0,
+        "pose:o0": {
+          "type": "int",
+          "range": [
+            0,
+            16777215
+          ],
+          "default": 8390656,
           "client_sync": true
         },
-        "pose:right_leg_y": {
-          "type": "float",
-          "range": [-180.0, 180.0],
-          "default": 0.0,
+        "pose:o1": {
+          "type": "int",
+          "range": [
+            0,
+            16777215
+          ],
+          "default": 8390656,
           "client_sync": true
         },
-        "pose:right_leg_z": {
-          "type": "float",
-          "range": [-180.0, 180.0],
-          "default": 0.0,
+        "pose:o2": {
+          "type": "int",
+          "range": [
+            0,
+            16777215
+          ],
+          "default": 8390656,
           "client_sync": true
         },
-        "pose:left_leg_x": {
-          "type": "float",
-          "range": [-180.0, 180.0],
-          "default": 0.0,
+        "pose:o3": {
+          "type": "int",
+          "range": [
+            0,
+            16777215
+          ],
+          "default": 8390656,
           "client_sync": true
         },
-        "pose:left_leg_y": {
-          "type": "float",
-          "range": [-180.0, 180.0],
-          "default": 0.0,
+        "pose:o4": {
+          "type": "int",
+          "range": [
+            0,
+            16777215
+          ],
+          "default": 8390656,
           "client_sync": true
         },
-        "pose:left_leg_z": {
-          "type": "float",
-          "range": [-180.0, 180.0],
-          "default": 0.0,
+        "pose:o5": {
+          "type": "int",
+          "range": [
+            0,
+            16777215
+          ],
+          "default": 8390656,
+          "client_sync": true
+        },
+        "pose:o6": {
+          "type": "int",
+          "range": [
+            0,
+            16777215
+          ],
+          "default": 8390656,
+          "client_sync": true
+        },
+        "pose:o7": {
+          "type": "int",
+          "range": [
+            0,
+            16777215
+          ],
+          "default": 8390656,
+          "client_sync": true
+        },
+        "pose:o8": {
+          "type": "int",
+          "range": [
+            0,
+            16777215
+          ],
+          "default": 8390656,
+          "client_sync": true
+        },
+        "pose:o9": {
+          "type": "int",
+          "range": [
+            0,
+            16777215
+          ],
+          "default": 8390656,
+          "client_sync": true
+        },
+        "pose:o10": {
+          "type": "int",
+          "range": [
+            0,
+            16777215
+          ],
+          "default": 8390656,
+          "client_sync": true
+        },
+        "pose:o11": {
+          "type": "int",
+          "range": [
+            0,
+            16777215
+          ],
+          "default": 8390656,
+          "client_sync": true
+        },
+        "pose:o12": {
+          "type": "int",
+          "range": [
+            0,
+            16777215
+          ],
+          "default": 8390656,
+          "client_sync": true
+        },
+        "pose:o13": {
+          "type": "int",
+          "range": [
+            0,
+            16777215
+          ],
+          "default": 8390656,
           "client_sync": true
         },
         "pose:skin": {
@@ -149,54 +284,6 @@
         "pose:hidden": {
           "type": "bool",
           "default": false,
-          "client_sync": true
-        },
-        "pose:hand_r0": {
-          "type": "int",
-          "range": [0, 16777215],
-          "default": 8390656,
-          "client_sync": true
-        },
-        "pose:hand_r1": {
-          "type": "int",
-          "range": [0, 16777215],
-          "default": 8390656,
-          "client_sync": true
-        },
-        "pose:hand_r2": {
-          "type": "int",
-          "range": [0, 16777215],
-          "default": 8390656,
-          "client_sync": true
-        },
-        "pose:hand_l0": {
-          "type": "int",
-          "range": [0, 16777215],
-          "default": 8390656,
-          "client_sync": true
-        },
-        "pose:hand_l1": {
-          "type": "int",
-          "range": [0, 16777215],
-          "default": 8390656,
-          "client_sync": true
-        },
-        "pose:hand_l2": {
-          "type": "int",
-          "range": [0, 16777215],
-          "default": 8390656,
-          "client_sync": true
-        },
-        "pose:waist0": {
-          "type": "int",
-          "range": [0, 16777215],
-          "default": 8390656,
-          "client_sync": true
-        },
-        "pose:waist1": {
-          "type": "int",
-          "range": [0, 16777215],
-          "default": 8390656,
           "client_sync": true
         }
       }

@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.37.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.38.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -44,6 +44,14 @@
   // so leaning the waist or body carries the head and arms (a sprint leans forward).
   const RIG_PARENTS = { waist: '', body: 'waist', head: 'body', rightArm: 'body', leftArm: 'body', rightLeg: '', leftLeg: '' };
   const RIG_KEYS = new Set(['waist', 'body', 'head', 'rightarm', 'leftarm', 'rightleg', 'leftleg', 'rightitem', 'leftitem']);
+  const RIG_REST = {
+    waist: [0, 12, 0], body: [0, 24, 0], head: [0, 24, 0], rightarm: [5, 22, 0], leftarm: [-5, 22, 0],
+    rightleg: [1.9, 12, 0], leftleg: [-1.9, 12, 0], rightitem: [6, 15, 1], leftitem: [-6, 15, 1],
+  };
+  const RIG_HOLDER = { waist: '', body: 'waist', head: 'body', rightarm: 'body', leftarm: 'body', rightleg: '', leftleg: '', rightitem: 'rightarm', leftitem: 'leftarm' };
+  // the order Minecraft gets them in (turns: the whole player first; moves: the bones)
+  const SENT_TURNS = ['waist', 'body', 'head', 'rightArm', 'leftArm', 'rightLeg', 'leftLeg', 'rightItem', 'leftItem'];
+  const SENT_MOVES = SENT_TURNS;
   const ITEM_BONES = [
     { key: 'rightItem', arm: 'rightArm', offset: [1, -7, 1] },
     { key: 'leftItem', arm: 'leftArm', offset: [-1, -7, 1] },
@@ -453,11 +461,20 @@
     if (changed && Canvas.updateAll) Canvas.updateAll();
     return changed;
   }
-  // How far a hand bone has been moved from where it sits on the arm (Blockbench space).
+  // How far a mannequin bone has been moved from where it sits on what holds it (Blockbench
+  // space): a pose can move bones as well as turn them, and moving a bone moves what it holds.
+  function boneOffset(root, key) {
+    const k = String(key).toLowerCase();
+    const g = mannequinBone(root, k);
+    if (!g || !RIG_REST[k]) return [0, 0, 0];
+    const holderKey = RIG_HOLDER[k];
+    const holder = holderKey ? mannequinBone(root, holderKey) : root;
+    const from = holder ? holder.origin : root.origin;
+    const restFrom = holderKey ? RIG_REST[holderKey] : [0, 0, 0];
+    return g.origin.map((v, i) => round(v - from[i] - (RIG_REST[k][i] - restFrom[i]), 4));
+  }
   function itemOffset(root, def) {
-    const arm = mannequinArm(root, def.arm);
-    const g = itemBoneOf(root, def.key);
-    return arm && g ? g.origin.map((v, i) => round(v - (arm.origin[i] + def.offset[i]), 4)) : [0, 0, 0];
+    return boneOffset(root, def.key);
   }
 
   // Moves a group and everything in it (Blockbench keeps absolute coordinates on every node).
@@ -1257,22 +1274,26 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
     return Outliner.root.filter((node) => node instanceof Group && MANNEQUIN_PREFIX.test(node.name));
   }
 
+  const CODE_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+  const code12 = (n) => CODE_CHARS[(n >> 6) & 63] + CODE_CHARS[n & 63];
+  const encodeAngle12 = (deg) => ((Math.round((wrap(deg) + 180) * 4096 / 360) % 4096) + 4096) % 4096;
+  const encodeOffset12 = (u) => Math.max(0, Math.min(4095, Math.round((Number(u) || 0) * 64) + 2048));
+
   function poseMessage(root) {
     ensureRig(root);
     const bones = Object.fromEntries(mannequinBones(root));
-    const angles = toBedrockRot(root.rotation);
-    for (const bone of BONES) {
-      const g = bones[bone.key.toLowerCase()];
-      angles.push(...(g ? toBedrockRot(g.rotation) : [0, 0, 0]));
+    const turns = toBedrockRot(root.rotation);
+    const moves = [];
+    for (const key of SENT_TURNS) {
+      const g = bones[key.toLowerCase()];
+      turns.push(...(g ? toBedrockRot(g.rotation) : [0, 0, 0]));
+      const o = g ? boneOffset(root, key) : [0, 0, 0];
+      moves.push(round(-o[0], 3), round(o[1], 3), round(o[2], 3));
     }
-    const hands = ITEM_BONES.map((def) => {
-      const g = itemBoneOf(root, def.key);
-      if (!g) return [0, 0, 0, 0, 0, 0];
-      const o = itemOffset(root, def);
-      return [...toBedrockRot(g.rotation), round(-o[0], 3), round(o[1], 3), round(o[2], 3)];
-    });
-    const waist = bones.waist;
-    return JSON.stringify({ id: mannequinId(root.name), p: toWorld(root.origin), b: angles, w: waist ? toBedrockRot(waist.rotation) : [0, 0, 0], h: hands, s: root.pose_skin_slot || 0, sl: root.pose_slim ? 1 : 0, e: root.pose_equipment || {} });
+    // two characters per value keeps the command short: 12-bit turns (360/4096 steps) then moves
+    // (1/64 pixel steps, ±32 pixels)
+    const code = turns.map(encodeAngle12).concat(moves.map(encodeOffset12)).map(code12).join('');
+    return JSON.stringify({ id: mannequinId(root.name), p: toWorld(root.origin), q: code, s: root.pose_skin_slot || 0, sl: root.pose_slim ? 1 : 0 });
   }
 
   // The game camera follows the selected cam_ group, or the Blockbench viewport if none is selected.
@@ -1323,6 +1344,16 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
       if (link.inFlight >= MAX_IN_FLIGHT) return; // retry next tick with the newest state
       send(`scriptevent pose:set ${msg}`);
       lastSent.set(id, msg);
+    }
+    // equipment goes separately and only when it changes (a pose plus a full set of pack items
+    // would make one command too long); Minecraft remembers it per mannequin
+    for (const root of mannequinRoots()) {
+      const id = mannequinId(root.name);
+      const msg = JSON.stringify({ id, e: root.pose_equipment || {} });
+      if (lastSent.get(`${id}#eq`) === msg) continue;
+      if (link.inFlight >= MAX_IN_FLIGHT) return;
+      send(`scriptevent pose:eq ${msg}`);
+      lastSent.set(`${id}#eq`, msg);
     }
     for (const root of entityRoots()) {
       const id = mannequinId(root.name);
@@ -4423,16 +4454,22 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
       return { root, entityId: root.pose_entity.entity, groups, rest };
     }
     for (const name of groups.keys()) rest.set(name, [0, 0, 0]);
-    // the hand bones also move (their offset is kept as "<bone>@p")
-    const items = new Map();
-    for (const def of ITEM_BONES) if (itemBoneOf(root, def.key)) items.set(def.key.toLowerCase(), def);
-    return { root, entityId: 'minecraft:player', groups, rest, items };
+    // the rig's bones also move (their offset is kept as "<bone>@p")
+    const movable = new Map();
+    for (const key of Object.keys(RIG_REST)) if (mannequinBone(root, key)) movable.set(key, true);
+    return { root, entityId: 'minecraft:player', groups, rest, movable };
   }
 
-  // The pose a model has now: bone rotations, and hand bone offsets.
+  function carriedCubes(root) {
+    const cubes = [];
+    root.forEachChild((c) => c instanceof Cube && cubes.push(c));
+    return cubes;
+  }
+
+  // The pose a model has now: bone rotations, and bone offsets.
   function capturePose(target) {
     const pose = new Map([...target.groups].map(([k, g]) => [k, g.rotation.slice()]));
-    for (const [key, def] of target.items || []) pose.set(`${key}@p`, itemOffset(target.root, def));
+    for (const key of (target.movable || new Map()).keys()) pose.set(`${key}@p`, boneOffset(target.root, key));
     return pose;
   }
 
@@ -4477,7 +4514,8 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
       const before = base.get(key) || target.rest.get(key) || [0, 0, 0];
       const r = channelAt(channels.rotation, queries.anim_time, toBedrockRot(before), vars, queries);
       if (r) delta.set(key, [-r[0] * weight, -r[1] * weight, r[2] * weight]);
-      if (target.items && target.items.has(key) && channels.position !== undefined) {
+      if (channels.relative_to && channels.relative_to.rotation === 'entity') (delta.relative || (delta.relative = new Set())).add(key);
+      if (target.movable && target.movable.has(key) && channels.position !== undefined) {
         const at = base.get(`${key}@p`) || [0, 0, 0];
         const p = channelAt(channels.position, queries.anim_time, [-at[0], at[1], at[2]], vars, queries);
         if (p) delta.set(`${key}@p`, [-p[0] * weight, p[1] * weight, p[2] * weight]);
@@ -4489,12 +4527,32 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   // The base pose plus every layer's frame.
   function composePose(target, content, base, layers) {
     const pose = new Map([...base].map(([k, r]) => [k, r.slice()]));
+    const relative = new Set();
     for (const layer of layers) {
       const delta = animationDelta(target, content, layer.anim, layer.frame / ANIM_FPS, base);
       for (const [key, d] of delta) {
         const r = pose.get(key) || (target.rest.get(key) || [0, 0, 0]).slice();
         pose.set(key, [r[0] + d[0], r[1] + d[1], r[2] + d[2]]);
       }
+      for (const key of delta.relative || []) relative.add(key);
+    }
+    // "relative_to": { "rotation": "entity" }: the bone's turn is measured from the entity, not
+    // from what holds it (a head keeps looking ahead while the body leans), so take out the
+    // turns of the bones it hangs from
+    for (const key of relative) {
+      const group = target.groups.get(key);
+      const r = pose.get(key);
+      if (!group || !r) continue;
+      const chain = [];
+      for (let n = group.parent; n && n instanceof Group && n !== target.root; n = n.parent) chain.unshift(n.name.toLowerCase());
+      const above = new THREE.Quaternion();
+      for (const k of chain) {
+        const pr = pose.get(k) || (target.groups.get(k) ? target.groups.get(k).rotation : null);
+        if (pr) above.multiply(eulerQuaternion(pr));
+      }
+      const local = above.invert().multiply(eulerQuaternion(r));
+      const e = new THREE.Euler().setFromQuaternion(local, eulerOrder());
+      pose.set(key, [e.x / DEG, e.y / DEG, e.z / DEG]);
     }
     return pose;
   }
@@ -4510,10 +4568,12 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
       const r = pose.get(key);
       if (r) for (let i = 0; i < 3; i++) group.rotation[i] = round(wrap(r[i]), 3);
     }
-    for (const [key, def] of target.items || []) {
+    // holders first, so a moved bone's own offset is measured after its holder moved
+    for (const key of Object.keys(RIG_REST)) {
+      if (!target.movable || !target.movable.has(key)) continue;
       const want = pose.get(`${key}@p`);
       if (!want) continue;
-      const now = itemOffset(target.root, def);
+      const now = boneOffset(target.root, key);
       const d = want.map((v, i) => round(v - now[i], 4));
       if (d.some((v) => Math.abs(v) > 1e-4)) translateTree(target.groups.get(key), d);
     }
@@ -4637,7 +4697,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     const had = state.savedLayers.some((l) => l.hold);
     const has = layers.some((l) => l.hold);
     if (!had && !has) return false;
-    Undo.initEdit({ groups: [root].concat([...state.target.groups.values()]) });
+    Undo.initEdit({ groups: [root].concat([...state.target.groups.values()]), elements: carriedCubes(root) });
     applyPose(state.target, composePose(state.target, content, state.base, layers.map((l) => ({ anim: state.byId.get(l.id), frame: l.frame }))));
     root.pose_animation = layers.length ? { base: Object.fromEntries([...state.base].map(([k, r]) => [k, r.slice()])), layers } : null;
     Undo.finishEdit(has ? 'Weapon holding pose' : 'Remove weapon holding pose');
@@ -4764,7 +4824,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     }
     const groups = [...target.groups.values()];
     // the pose it has now (restored on Cancel): `current`
-    Undo.initEdit({ groups: [root].concat(groups) });
+    Undo.initEdit({ groups: [root].concat(groups), elements: carriedCubes(root) });
     let timer = null;
     const stop = () => {
       if (timer) clearInterval(timer);
@@ -4899,7 +4959,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
               <label style="display: flex; gap: 6px; align-items: center;" title="Off: animations add to the pose you've already made. On: start from the model's default pose.">
                 <input type="checkbox" v-model="fromRest" @change="changedBase()"> Reset pose (start from the default pose)
               </label>
-              <p style="opacity: 0.6; margin: 0; font-size: 0.85em;">Walk cycles move at a steady pace; attacks play once per loop. Only bone rotations are used.</p>
+              <p style="opacity: 0.6; margin: 0; font-size: 0.85em;">Walk cycles move at a steady pace; attacks play once per loop. Bones turn and move as in Minecraft (sizes aren't copied).</p>
             </div>
           </div>`,
       },
@@ -6776,7 +6836,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     return { id: idItem.slice(2), name: scene.world || '', anchor: point('A|'), player: point('P|'), locations, removed: scene.removed || [], protocol: version ? Number(version.slice(2)) : 0 };
   }
 
-  const EXPECTED_PACK_PROTOCOL = 9; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
+  const EXPECTED_PACK_PROTOCOL = 10; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
   let warnedOldPack = false;
 
   // Scene files in the scenes folders that belong to a world (their pose_world says so), as
@@ -7526,6 +7586,17 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.38.0",
+      "date": "2026-10-01",
+      "changes": [
+        "Fixed: animations now move bones as well as turn them, like in Minecraft. A block drops and shifts the waist and steps the legs apart; holds pull the arms in. This works in Blockbench and in Minecraft (waist, body, head, arms, legs and hand bones).",
+        "Fixed: animations that keep the head relative to the entity (it stays level while the body leans) now do so.",
+        "Moving a player's bone by hand (the waist, an arm, a leg) now shows in Minecraft too.",
+        "Equipment is sent to Minecraft separately and only when it changes, so a fully equipped player's pose always fits in one command.",
+        "Update the Minecraft packs (Check for Updates, then close and reopen the world): the mannequin's pose is stored in a new, more compact way."
+      ]
+    },
     {
       "version": "0.37.0",
       "date": "2026-10-01",
