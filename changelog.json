@@ -1,5 +1,12 @@
 [
   {
+    "version": "0.41.0",
+    "date": "2026-10-01",
+    "changes": [
+      "Removed the sun tilt from Time & Weather. If you applied a tilt, Pose Studio takes its lighting copies out of its pack when Blockbench starts, so the packs' own lighting applies again (reopen the world to see it)."
+    ]
+  },
+  {
     "version": "0.40.2",
     "date": "2026-10-01",
     "changes": [

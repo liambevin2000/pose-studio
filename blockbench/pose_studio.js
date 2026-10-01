@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.40.2'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.41.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -2709,13 +2709,13 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     return entries;
   }
 
-  const INDEXED_FOLDERS = /^(entity|models|render_controllers|animations|animation_controllers|attachables|lighting|textures|texts)\//;
+  const INDEXED_FOLDERS = /^(entity|models|render_controllers|animations|animation_controllers|attachables|textures|texts)\//;
 
   // A pack's files, from plain folders and from __brarchive archives. Keys are lower-case paths
   // without extension handling, e.g. "textures/entity/cow/cow.png".
   function indexPack(fs, root, label) {
     const files = new Map();
-    const archiveWanted = (rel) => /^(entity|models|render_controllers|animations|animation_controllers|lighting|texts|textures\/(entity|models|items))/.test(rel);
+    const archiveWanted = (rel) => /^(entity|models|render_controllers|animations|animation_controllers|texts|textures\/(entity|models|items))/.test(rel);
     function walk(dir, rel) {
       let names;
       try {
@@ -2734,7 +2734,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
         }
         if (stat.isDirectory()) {
           if (name === '__brarchive') walkArchives(full, '');
-          else if (!rel ? /^(entity|models|render_controllers|animations|animation_controllers|attachables|lighting|textures|texts)$/i.test(name) : true) walk(full, relPath);
+          else if (!rel ? /^(entity|models|render_controllers|animations|animation_controllers|attachables|textures|texts)$/i.test(name) : true) walk(full, relPath);
         } else if (INDEXED_FOLDERS.test(relPath.toLowerCase())) {
           files.set(relPath.toLowerCase(), { plain: true, read: () => fs.readFileSync(full) });
         }
@@ -3964,6 +3964,19 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     bedrockFsCache = null;
     sceneIndex = null;
     browserWorlds = [];
+  }
+
+  // 0.40 could write tilted copies of a world's lighting into Pose Studio's resource pack (the sun
+  // tilt, since removed). Take them away so the packs' own lighting applies again.
+  function removeSunTiltLighting() {
+    try {
+      const fs = bedrockFs();
+      const dir = `${devPackDir('resource')}\\lighting`;
+      if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
+      localStorage.removeItem('pose_studio_sun_written');
+    } catch (e) {
+      // nothing to remove, or no access
+    }
   }
 
   // Pose Studio ▸ More ▸ Install Minecraft Packs: downloads the packs into this PC's development
@@ -6718,31 +6731,12 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   }
 
   // Puts the open location's time and weather into the world.
-  let askedSunFor = '';
   function applySceneEnvironment() {
     const env = projectEnv();
     if (!env || !link.connected) return;
     if (Number.isFinite(env.time)) send(`time set ${env.time}`);
     if (env.weather) send(`weather ${env.weather}`);
     for (const fn of envListeners) fn(env);
-    // the location's sun tilt, if it isn't the one Minecraft has
-    const want = Number.isFinite(env.sun) ? env.sun : null;
-    const key = `${typeof Project !== 'undefined' && Project ? Project.uuid : ''}|${want}`;
-    if (want !== null && want !== writtenSunTilt() && askedSunFor !== key) {
-      askedSunFor = key;
-      Blockbench.showMessageBox(
-        {
-          title: 'Pose Studio',
-          message: `This location's sun path is tilted ${want}°. Apply it now? Minecraft reloads its packs to do it (the world blinks).`,
-          buttons: ['Apply', 'Not Now'],
-          confirm: 0,
-          cancel: 1,
-        },
-        (button) => {
-          if (button === 0) setSunTilt(want).catch((e) => showError('Pose Studio: sun tilt', e));
-        }
-      );
-    }
   }
 
   // Remembers the world's current time and weather in the open scene (on Save Location).
@@ -6821,14 +6815,6 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     if (!requireConnection()) return;
     const now = (await readEnvironment().catch(() => null)) || {};
     const env = Object.assign({ time: 6000, weather: 'clear' }, now, projectEnv() || {});
-    let content = null;
-    try {
-      content = await previewContent();
-    } catch (e) {
-      content = null;
-    }
-    const packTilt = content ? packSunTilt(content) : 0;
-    const shownTilt = Number.isFinite(env.sun) ? env.sun : writtenSunTilt() !== null ? writtenSunTilt() : packTilt;
     let vm = null;
     const listener = (e) => {
       if (vm && e) {
@@ -6843,7 +6829,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
       width: 440,
       buttons: ['Done'],
       component: {
-        data: () => ({ time: env.time, weather: env.weather, weathers: WEATHERS, presets: [['Sunrise', 23000], ['Morning', 1000], ['Noon', 6000], ['Sunset', 12000], ['Night', 18000]], tilt: shownTilt, packTilt, tiltNote: '', busy: false, needsTop: false }),
+        data: () => ({ time: env.time, weather: env.weather, weathers: WEATHERS, presets: [['Sunrise', 23000], ['Morning', 1000], ['Noon', 6000], ['Sunset', 12000], ['Night', 18000]] }),
         mounted() {
           vm = this;
         },
@@ -6856,51 +6842,6 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
           pick(id) {
             this.weather = id;
             setWeather(id);
-          },
-          moveTop() {
-            if (link.connected) {
-              this.tiltNote = 'Save & Quit the world in Minecraft first (Minecraft reads the pack order when a world opens), then press Put Pose Studio on Top again. This window stays open.';
-              return;
-            }
-            Blockbench.showMessageBox(
-              {
-                title: 'Pose Studio',
-                message: "This changes the world's resource pack order so Pose Studio's pack is first (highest). A backup of the old order is kept next to it (world_resource_packs.json.before_pose_studio). If the world is shared (git, ToolBox), the new order goes with it.",
-                buttons: ['Put on Top', 'Cancel'],
-                confirm: 0,
-                cancel: 1,
-              },
-              (button) => {
-                if (button !== 0) return;
-                try {
-                  const name = putPoseStudioOnTop();
-                  this.needsTop = false;
-                  this.tiltNote = `Done: Pose Studio is first in ${name}'s resource packs. Open the world again and connect; the sun tilt applies.`;
-                } catch (e) {
-                  showError('Pose Studio: pack order', e);
-                }
-              }
-            );
-          },
-          async applyTilt(useDefault) {
-            this.busy = true;
-            try {
-              const deg = useDefault ? null : Math.round(Number(this.tilt) || 0);
-              const result = await setSunTilt(deg);
-              if (useDefault) this.tilt = this.packTilt;
-              if (typeof Project !== 'undefined' && Project) {
-                const next = Object.assign({}, Project.pose_env || {});
-                if (deg === null) delete next.sun;
-                else next.sun = deg;
-                Project.pose_env = next;
-                Project.saved = false;
-              }
-              this.needsTop = !!sunOrderWarning(result.order);
-              this.tiltNote = sunOrderWarning(result.order) || (useDefault ? "Back to the packs' own sun path. Minecraft is reloading its packs." : `Sun path tilted ${deg}°. Minecraft is reloading its packs (the world blinks).`);
-            } catch (e) {
-              showError('Pose Studio: sun tilt', e);
-            }
-            this.busy = false;
           },
         },
         template: `
@@ -6918,21 +6859,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
                 <i class="material-icons" style="font-size: 16px;">{{ w.icon }}</i>{{ w.title }}
               </button>
             </div>
-            <div style="margin-top: 14px; border-top: 1px solid var(--color-border); padding-top: 10px;">
-              <div style="display: flex; align-items: center; gap: 10px;" title="Tilts the path the sun and moon take across the sky (Vibrant Visuals). The time of day still moves them along it.">
-                <b style="min-width: 70px;">Sun tilt</b>
-                <input type="range" min="-80" max="80" step="1" v-model.number="tilt" style="flex: 1;">
-                <span style="min-width: 36px; text-align: right;">{{ tilt }}°</span>
-              </div>
-              <div style="display: flex; gap: 6px; margin-top: 6px; align-items: center;">
-                <button @click="applyTilt(false)" :disabled="busy" style="min-width: 0; padding: 0 12px;">Apply</button>
-                <button @click="applyTilt(true)" :disabled="busy" style="min-width: 0; padding: 0 12px;" :title="'Back to the tilt the packs set: ' + packTilt + '°'">Pack Default ({{ packTilt }}°)</button>
-              </div>
-              <p v-if="tiltNote" style="margin: 6px 0 0;">{{ tiltNote }}</p>
-              <button v-if="needsTop" @click="moveTop()" style="min-width: 0; padding: 0 12px; margin-top: 6px;" title="For when Minecraft's screen won't reorder the packs">Put Pose Studio on Top</button>
-              <p style="opacity: 0.65; margin: 6px 0 0;">Applying reloads Minecraft's packs, so the world blinks for a moment. Needs Vibrant Visuals.</p>
-            </div>
-            <p style="opacity: 0.65; margin-top: 10px;">The day/night and weather cycles are frozen while Blockbench is connected. Save Location keeps the time, weather and sun tilt with the location.</p>
+            <p style="opacity: 0.65; margin-top: 10px;">The day/night and weather cycles are frozen while Blockbench is connected. Save Location keeps the time and weather with the location.</p>
           </div>`,
       },
       onButton() {
@@ -6942,138 +6869,6 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
         envListeners.delete(listener);
       },
     }).show();
-  }
-
-  // ---- Sun tilt -----------------------------------------------------------------------------------
-  // With Vibrant Visuals the sun and moon travel along an orbit whose tilt is a resource-pack
-  // setting (lighting files, "orbital_offset_degrees"); the time of day moves them along it. Pose
-  // Studio writes copies of the world's lighting files with the tilt you pick into its own
-  // resource pack and has Minecraft reload its packs. Its pack has to be above packs that bring
-  // their own lighting (DragonCraft's, say) in the world's resource pack list.
-  const SUN_WRITTEN_KEY = 'pose_studio_sun_written';
-
-  // The lighting files in effect: path -> { json, label } (the highest pack's copy of each).
-  function lightingFiles(content) {
-    const out = new Map();
-    for (const layer of content.layers) {
-      for (const [path, file] of layer.files) {
-        if (!/^lighting\/.+\.json$/.test(path)) continue;
-        try {
-          out.set(path, { json: parseLooseJson(file.read()), label: layer.label });
-        } catch (e) {
-          // unreadable: left alone
-        }
-      }
-    }
-    return out;
-  }
-
-  // The tilt the world's default lighting uses now (0 for Minecraft's own).
-  function packSunTilt(content) {
-    for (const [path, { json }] of lightingFiles(content)) {
-      const s = json && json['minecraft:lighting_settings'];
-      const orbital = s && s.directional_lights && s.directional_lights.orbital;
-      if (/lighting\/global\.json$/.test(path) && orbital) return Number(orbital.orbital_offset_degrees) || 0;
-    }
-    return 0;
-  }
-
-  // Packs above Pose Studio's in the world's list that bring lighting of their own (they'd win).
-  function lightingPacksAbove(content) {
-    const fs = bedrockFs();
-    let mine = '';
-    try {
-      mine = String(JSON.parse(fs.readFileSync(`${devPackDir('resource')}\\manifest.json`, 'utf8')).header.uuid).toLowerCase();
-    } catch (e) {
-      return { missing: true, above: [] };
-    }
-    // the world's list as it is now (it can be reordered in Minecraft at any time)
-    let list = content.rp || [];
-    try {
-      const world = worldChoices()[0];
-      if (world) list = worldPacks(fs, world, bedrockRoot(), 'resource');
-    } catch (e) {
-      // keep the list read with the world's content
-    }
-    const at = list.findIndex((pack) => String(pack.uuid).toLowerCase() === mine);
-    if (at < 0) return { missing: true, above: [] };
-    const hasLighting = (pack) => content.layers.some((l) => l.label === pack.name && [...l.files.keys()].some((k) => /^lighting\//.test(k)));
-    return { missing: false, above: list.slice(0, at).filter(hasLighting).map((pack) => pack.name) };
-  }
-
-  // Writes the lighting files with the tilt (null takes Pose Studio's copies away: the packs' own
-  // lighting applies again) and reloads Minecraft's packs.
-  async function setSunTilt(deg) {
-    const content = await previewContent();
-    const fs = bedrockFs();
-    const dir = `${devPackDir('resource')}\\lighting`;
-    if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
-    let written = 0;
-    if (deg !== null) {
-      for (const [path, { json }] of lightingFiles(content)) {
-        const copy = JSON.parse(JSON.stringify(json));
-        const s = copy['minecraft:lighting_settings'];
-        const lights = s && s.directional_lights;
-        if (!lights) continue;
-        if (lights.orbital) lights.orbital.orbital_offset_degrees = deg;
-        else if (lights.sun || lights.moon) {
-          // the older layout (sun and moon directly under directional_lights) has no tilt: the
-          // current layout keeps the same sun and moon in an "orbital" block
-          const { sun, moon, ...rest } = lights;
-          s.directional_lights = Object.assign({ orbital: { sun, moon, orbital_offset_degrees: deg } }, rest);
-          copy.format_version = '1.21.80';
-        } else continue;
-        const target = `${devPackDir('resource')}\\${path.split('/').join('\\')}`;
-        fs.mkdirSync(target.replace(/\\[^\\]+$/, ''), { recursive: true });
-        fs.writeFileSync(target, JSON.stringify(copy, null, 2));
-        written++;
-      }
-    }
-    try {
-      localStorage.setItem(SUN_WRITTEN_KEY, deg === null ? '' : String(deg));
-    } catch (e) {
-      // storage unavailable
-    }
-    if (link.connected) reloadMinecraftPacks();
-    return { written, order: lightingPacksAbove(content) };
-  }
-
-  function writtenSunTilt() {
-    try {
-      const v = localStorage.getItem(SUN_WRITTEN_KEY);
-      return v === null || v === '' ? null : Number(v);
-    } catch (e) {
-      return null;
-    }
-  }
-
-  // Puts Pose Studio's resource pack first (highest) in the world's list, for when Minecraft's
-  // screen won't reorder it. The world has to be closed: Minecraft reads the list when it opens.
-  function putPoseStudioOnTop() {
-    const fs = bedrockFs();
-    const world = worldChoices()[0];
-    if (!world) throw new Error("Couldn't find the world's folder (Locations > Pick Minecraft World…).");
-    const manifest = JSON.parse(fs.readFileSync(`${devPackDir('resource')}\\manifest.json`, 'utf8'));
-    const mine = String(manifest.header.uuid).toLowerCase();
-    const file = `${world.path}\\world_resource_packs.json`;
-    let list = [];
-    try {
-      list = parseLooseJson(fs.readFileSync(file, 'utf8'));
-    } catch (e) {
-      list = [];
-    }
-    if (!Array.isArray(list)) list = [];
-    if (fs.existsSync(file)) fs.writeFileSync(`${file}.before_pose_studio`, fs.readFileSync(file)); // a backup
-    const entry = list.find((x) => String(x.pack_id).toLowerCase() === mine) || { pack_id: manifest.header.uuid, version: manifest.header.version };
-    const next = [entry].concat(list.filter((x) => x !== entry));
-    fs.writeFileSync(file, JSON.stringify(next, null, 2));
-    return world.name;
-  }
-
-  function sunOrderWarning(order) {
-    if (order.missing) return "Pose Studio's resource pack isn't in this world's resource packs, so Minecraft won't use its lighting. Add it in Edit World > Resource Packs.";
-    if (order.above.length) return `In this world, ${order.above.join(', ')} ${order.above.length > 1 ? 'are' : 'is'} above Pose Studio in the resource pack list and ${order.above.length > 1 ? 'bring' : 'brings'} its own lighting, which wins. In Minecraft: Edit World > Resource packs (not Behavior packs), drag Pose Studio to #1, then reopen the world. Or Save & Quit and use Put Pose Studio on Top.`;
-    return '';
   }
 
   // ---- Locations: scenes linked to worlds ---------------------------------------------------------
@@ -7873,6 +7668,13 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   // <changelog>
   const CHANGELOG = [
     {
+      "version": "0.41.0",
+      "date": "2026-10-01",
+      "changes": [
+        "Removed the sun tilt from Time & Weather. If you applied a tilt, Pose Studio takes its lighting copies out of its pack when Blockbench starts, so the packs' own lighting applies again (reopen the world to see it)."
+      ]
+    },
+    {
       "version": "0.40.2",
       "date": "2026-10-01",
       "changes": [
@@ -8634,6 +8436,7 @@ ${PLUGIN_URL}`,
         startupTimer = null;
         showWhatsNewOnce();
         checkForUpdates(false).catch(() => {});
+        removeSunTiltLighting();
       }, 4000);
     },
 
