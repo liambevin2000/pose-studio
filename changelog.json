@@ -1,5 +1,12 @@
 [
   {
+    "version": "0.34.1",
+    "date": "2026-10-01",
+    "changes": [
+      "World names come from levelname.txt first, as in Minecraft, and from level.dat only when there's no levelname.txt."
+    ]
+  },
+  {
     "version": "0.34.0",
     "date": "2026-10-01",
     "changes": [

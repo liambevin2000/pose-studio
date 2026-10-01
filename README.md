@@ -23,7 +23,7 @@ Blockbench plugin ──websocket──► Minecraft (/connect) ──/scripteve
 ## Working as a team
 
 - **Shared scenes folder:** Pose Studio → More → **Folders…** → *Scenes folder*. Point everyone at the same shared folder (Dropbox, say). Save Location saves there, and when a world opens its locations are looked for there, subfolders included. Scenes are matched by **file name**, so it doesn't matter where each person's copy of the folder is.
-- **Shared worlds (git, ToolBox):** a world remembers its locations, so whoever opens it gets offered them, as long as the scene files are in their scenes folder. World names come from level.dat (what ToolBox sets), not the zip name.
+- **Shared worlds (git, ToolBox):** a world remembers its locations, so whoever opens it gets offered them, as long as the scene files are in their scenes folder. World names come from the world folder's levelname.txt (as in Minecraft), or level.dat when there isn't one; never the zip name.
 - **World not found?** The entity list and the world name come from the most recently played world folder. If that's wrong (worlds opened through other tools), use Locations → **Pick Minecraft World…** and pick the world folder: the one with level.dat and db in it, not the world_files zips. It's remembered for that world.
 - **Another Minecraft install** (Preview, or data kept elsewhere): set *Minecraft data folder* in **Folders…**.
 

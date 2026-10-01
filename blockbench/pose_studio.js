@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.34.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.34.1'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -2694,14 +2694,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
       }
       for (const id of names) {
         const path = `${dir}\\${id}`;
-        let name = levelDatName(fs, path);
-        if (!name) {
-          try {
-            name = String(fs.readFileSync(`${path}\\levelname.txt`, 'utf8')).trim() || id;
-          } catch (e) {
-            name = id; // no name file
-          }
-        }
+        const name = worldFolderName(fs, path) || id;
         // The open world keeps writing to its database, so its newest db file is the most recent.
         let lastActive = 0;
         try {
@@ -3572,8 +3565,16 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     return match ? match.path : path;
   }
 
-  // A world's name as Minecraft shows it: level.dat's LevelName (what tools like ToolBox set),
-  // otherwise levelname.txt.
+  // A world's name as Minecraft shows it: levelname.txt, otherwise level.dat's LevelName.
+  function worldFolderName(wfs, worldPath) {
+    try {
+      const name = String(wfs.readFileSync(`${worldPath}\\levelname.txt`, 'utf8')).trim();
+      if (name) return name;
+    } catch (e) {
+      // no levelname.txt
+    }
+    return levelDatName(wfs, worldPath);
+  }
   function levelDatName(wfs, worldPath) {
     try {
       const buf = wfs.readFileSync(`${worldPath}\\level.dat`);
@@ -3623,7 +3624,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     try {
       const wfs = bedrockFs();
       if (!wfs.existsSync(`${path}\\level.dat`)) return null;
-      return { id: fileName(path), name: levelDatName(wfs, path) || fileName(path), path, lastActive: Infinity, picked: true };
+      return { id: fileName(path), name: worldFolderName(wfs, path) || fileName(path), path, lastActive: Infinity, picked: true };
     } catch (e) {
       return null;
     }
@@ -3718,7 +3719,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     map[(connectedWorld && connectedWorld.id) || ''] = world;
     storePickedWorlds(map);
     browserWorlds = [];
-    const name = levelDatName(wfs, world) || fileName(world);
+    const name = worldFolderName(wfs, world) || fileName(world);
     if (connectedWorld && !connectedWorld.name) connectedWorld.name = name;
     Blockbench.showQuickMessage(`Pose Studio is using the world "${name}"`, 3000);
   }
@@ -6853,6 +6854,13 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.34.1",
+      "date": "2026-10-01",
+      "changes": [
+        "World names come from levelname.txt first, as in Minecraft, and from level.dat only when there's no levelname.txt."
+      ]
+    },
     {
       "version": "0.34.0",
       "date": "2026-10-01",

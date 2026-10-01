@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.34.1 (2026-10-01)
+
+- World names come from levelname.txt first, as in Minecraft, and from level.dat only when there's no levelname.txt.
+
 ## 0.34.0 (2026-10-01)
 
 - New: More > Folders… sets the scenes folder (a shared Dropbox folder, say) and the Minecraft data folder (for Minecraft Preview or other installs). Locations are looked for in the scenes folder and its subfolders.
