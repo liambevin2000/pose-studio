@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.33.4'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.33.5'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -332,6 +332,11 @@
     } catch (e) {
       console.warn('[Pose Studio] group rotation', e);
     }
+    try {
+      if (povPreview) updatePovViewport();
+    } catch (e) {
+      // the camera view went away
+    }
   };
   function startGroupSpin() {
     // every frame where Blockbench offers it, so the swing keeps up with the gizmo
@@ -563,43 +568,66 @@
   }
   let mcWindow = null; // { width, height } of Minecraft's client area, or null if not found
 
+  // The camera view is locked to the camera: its orbit controls are switched off entirely (their
+  // update would otherwise keep applying leftover zoom/orbit from the mouse and drift the view).
+  function attachPov(preview) {
+    povPreview = preview || null;
+    if (!povPreview) return;
+    if (povPreview.setNormalCamera) povPreview.setNormalCamera();
+    const controls = povPreview.controls;
+    if (controls) {
+      controls.enabled = false;
+      if (!controls.__poseUpdate) {
+        controls.__poseUpdate = controls.update;
+        controls.update = () => false;
+      }
+    }
+    povLabel = document.createElement('div');
+    povLabel.className = 'pose_studio_pov_label';
+    Object.assign(povLabel.style, {
+      position: 'absolute', top: '8px', left: '50%', transform: 'translateX(-50%)', zIndex: 5,
+      padding: '3px 10px', borderRadius: '4px', pointerEvents: 'none', whiteSpace: 'nowrap',
+      background: 'rgba(0, 0, 0, 0.6)', color: '#fff', font: '600 12px sans-serif', letterSpacing: '0.02em',
+    });
+    povPreview.node.appendChild(povLabel);
+    povNav = createPovNav(povPreview.node);
+  }
+
+  function detachPov() {
+    if (povLabel) povLabel.remove();
+    povLabel = null;
+    if (povNav) povNav.remove();
+    povNav = null;
+    if (povFov) povFov.box.remove();
+    povFov = null;
+    removePovTimeBox();
+    if (povPreview) {
+      const controls = povPreview.controls;
+      if (controls) {
+        controls.enabled = true;
+        if (controls.__poseUpdate) {
+          controls.update = controls.__poseUpdate;
+          delete controls.__poseUpdate;
+        }
+      }
+      povPreview.aspect_ratio = undefined;
+    }
+    povPreview = null;
+  }
+
   function setPovViewport(enabled) {
     const split = typeof Preview !== 'undefined' && Preview.split_screen;
     if (!split) return;
     if (enabled) {
       split.setMode('double_horizontal');
       setPlayerHidden(true);
-      povPreview = split.previews[1] || null;
-      if (povPreview) {
-        if (povPreview.setNormalCamera) povPreview.setNormalCamera();
-        if (povPreview.controls) povPreview.controls.enabled = false;
-        povLabel = document.createElement('div');
-        povLabel.className = 'pose_studio_pov_label';
-        Object.assign(povLabel.style, {
-          position: 'absolute', top: '8px', left: '50%', transform: 'translateX(-50%)', zIndex: 5,
-          padding: '3px 10px', borderRadius: '4px', pointerEvents: 'none', whiteSpace: 'nowrap',
-          background: 'rgba(0, 0, 0, 0.6)', color: '#fff', font: '600 12px sans-serif', letterSpacing: '0.02em',
-        });
-        povPreview.node.appendChild(povLabel);
-        povNav = createPovNav(povPreview.node);
-      }
+      attachPov(split.previews[1]);
       applyPovAspect();
       if (!povTimer) povTimer = setInterval(updatePovViewport, 33);
     } else {
       if (povTimer) clearInterval(povTimer);
       povTimer = null;
-      if (povLabel) povLabel.remove();
-      povLabel = null;
-      if (povNav) povNav.remove();
-      povNav = null;
-      if (povFov) povFov.box.remove();
-      povFov = null;
-      removePovTimeBox();
-      if (povPreview) {
-        if (povPreview.controls) povPreview.controls.enabled = true;
-        povPreview.aspect_ratio = undefined;
-      }
-      povPreview = null;
+      detachPov();
       split.setMode('single');
       setPlayerHidden(false);
     }
@@ -628,6 +656,13 @@
   }
 
   function updatePovViewport() {
+    // Blockbench can rebuild its split views (switching tabs, for one): take over the new one
+    const split = typeof Preview !== 'undefined' && Preview.split_screen;
+    if (povTimer && split && split.previews && split.previews[1] && split.previews[1] !== povPreview) {
+      detachPov();
+      attachPov(split.previews[1]);
+      applyPovAspect();
+    }
     if (!povPreview || !povPreview.camera || typeof Project === 'undefined' || !Project) return;
     const cam = activeCamera();
     syncPovFovSlider();
@@ -6443,6 +6478,13 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.33.5",
+      "date": "2026-10-01",
+      "changes": [
+        "Fixed: the camera view could drift away from its camera (showing the camera from behind, or the inside of the terrain). Blockbench's orbit controls kept applying leftover movement to it, and a split view rebuilt by Blockbench (after switching tabs) was no longer followed. The camera view is now locked to its camera on every frame."
+      ]
+    },
     {
       "version": "0.33.4",
       "date": "2026-10-01",
