@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.37.0 (2026-10-01)
+
+- Fixed: players now have the same bone chain as Minecraft's player model: a waist, the body in the waist, the head and arms in the body (legs on their own). Animations that lean the waist or body (a sprint leans forward) carry the head and arms with them, in Blockbench and in Minecraft.
+- Players from older scenes are rebuilt into the new chain the first time they're used. Every bone keeps facing the way it faced.
+- The waist can be turned by hand too, to lean the whole upper body.
+- Update the Minecraft packs (Check for Updates, then reopen the world): the mannequin has the new bone chain.
+
 ## 0.36.0 (2026-10-01)
 
 - New: 3D weapons and items from your packs (DragonCraft's battle axes, daggers, greatswords, longbows…) in Skin & Equipment, shown in the hand as their real models, placed the way Minecraft places them. Daggers put their second blade in the left hand.

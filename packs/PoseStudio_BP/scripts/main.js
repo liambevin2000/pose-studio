@@ -87,6 +87,10 @@ function setPose(player, data) {
   const hands = Array.isArray(data.h) ? data.h : [];
   const packed = [...packHand(hands[0]), ...packHand(hands[1])];
   for (let i = 0; i < HAND_PROPS.length; i++) entity.setProperty(HAND_PROPS[i], packed[i]);
+  // the waist (the body, head and arms hang off it): turn x, y, z in two packed ints
+  const waist = packHand(Array.isArray(data.w) ? data.w : []);
+  entity.setProperty("pose:waist0", waist[0]);
+  entity.setProperty("pose:waist1", waist[1]);
   if (data.e) applyEquipment(entity, data.e);
 }
 
@@ -336,7 +340,7 @@ function debug(player) {
 // Every name looks like `PSD[op|page|item]`; page 0 always carries
 // `M|ready|<pages>|<items>|<items per page>` or `M|busy|<percent>`.
 // What this script understands; Blockbench warns when the world runs an older one.
-const PACK_PROTOCOL = 8;
+const PACK_PROTOCOL = 9;
 const IO_OBJECTIVE = "pose_io";
 const ITEMS_PER_PAGE = 30;
 const MAX_PAGES_PER_BATCH = 16;

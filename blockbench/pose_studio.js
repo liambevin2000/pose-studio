@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.36.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.37.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -40,6 +40,10 @@
   const MANNEQUIN_PREFIX = /^(player_|mq_)/i; // Player_N (older scenes: mq_N)
   // The hand bones items attach to (the player model's rightItem / leftItem), inside the arms.
   // They can be turned and moved (a weapon's holding pose does both), and Minecraft follows.
+  // The player model's bone chain, as in Minecraft: waist > body > head and arms, legs on their own,
+  // so leaning the waist or body carries the head and arms (a sprint leans forward).
+  const RIG_PARENTS = { waist: '', body: 'waist', head: 'body', rightArm: 'body', leftArm: 'body', rightLeg: '', leftLeg: '' };
+  const RIG_KEYS = new Set(['waist', 'body', 'head', 'rightarm', 'leftarm', 'rightleg', 'leftleg', 'rightitem', 'leftitem']);
   const ITEM_BONES = [
     { key: 'rightItem', arm: 'rightArm', offset: [1, -7, 1] },
     { key: 'leftItem', arm: 'leftArm', offset: [-1, -7, 1] },
@@ -384,22 +388,70 @@
     }
   }
 
+  // A mannequin's bones, wherever they sit in its chain: lower-case name -> group.
+  function mannequinBones(root) {
+    const map = new Map();
+    const walk = (g, depth) => {
+      for (const c of g.children || []) {
+        if (!(c instanceof Group) || /^eq_/.test(c.name)) continue;
+        const key = boneKey(c.name);
+        if (RIG_KEYS.has(key) && !map.has(key)) map.set(key, c);
+        if (depth < 8) walk(c, depth + 1);
+      }
+    };
+    walk(root, 0);
+    return map;
+  }
+  function mannequinBone(root, key) {
+    return mannequinBones(root).get(String(key).toLowerCase()) || null;
+  }
   // A mannequin's arm and hand bone (older mannequins get their hand bones when needed).
   function mannequinArm(root, armKey) {
-    return root.children.find((g) => g instanceof Group && boneKey(g.name) === armKey.toLowerCase()) || null;
+    return mannequinBone(root, armKey);
   }
   function itemBoneOf(root, key) {
     const def = ITEM_BONES.find((b) => b.key.toLowerCase() === key.toLowerCase());
     const arm = def && mannequinArm(root, def.arm);
     return (arm && arm.children.find((g) => g instanceof Group && g.name.toLowerCase() === def.key.toLowerCase())) || null;
   }
-  function ensureItemBones(root) {
-    if (!root || !MANNEQUIN_PREFIX.test(root.name)) return;
+  // Gives a mannequin the player's bone chain: a waist, the body in it, the head and arms in the
+  // body, hand bones in the arms. Mannequins from older versions are rebuilt the first time they're
+  // seen; every bone keeps facing the way it faced.
+  function ensureRig(root) {
+    if (!root || !MANNEQUIN_PREFIX.test(root.name)) return false;
+    let changed = false;
+    const bones = mannequinBones(root);
+    const body = bones.get('body');
+    if (body && !bones.get('waist')) {
+      bones.set('waist', new Group({ name: 'waist', origin: [body.origin[0], body.origin[1] - 12, body.origin[2]] }).addTo(root).init());
+      changed = true;
+    }
+    // a bone's turn relative to the mannequin (its chain of parents included)
+    const turnOf = (g) => {
+      const q = new THREE.Quaternion();
+      const chain = [];
+      for (let n = g; n && n !== root && n instanceof Group; n = n.parent) chain.unshift(n);
+      for (const n of chain) q.multiply(eulerQuaternion(n.rotation));
+      return q;
+    };
+    for (const [name, parentName] of Object.entries(RIG_PARENTS)) {
+      const g = bones.get(name.toLowerCase());
+      const parent = parentName ? bones.get(parentName.toLowerCase()) : root;
+      if (!g || !parent || g.parent === parent) continue;
+      const local = turnOf(parent).invert().multiply(turnOf(g));
+      const e = new THREE.Euler().setFromQuaternion(local, eulerOrder());
+      g.rotation = [round(e.x / DEG, 3), round(e.y / DEG, 3), round(e.z / DEG, 3)].map((v) => (Math.abs(v) < 1e-3 ? 0 : v));
+      g.addTo(parent);
+      changed = true;
+    }
     for (const def of ITEM_BONES) {
       const arm = mannequinArm(root, def.arm);
       if (!arm || itemBoneOf(root, def.key)) continue;
       new Group({ name: def.key, origin: arm.origin.map((v, i) => v + def.offset[i]) }).addTo(arm).init();
+      changed = true;
     }
+    if (changed && Canvas.updateAll) Canvas.updateAll();
+    return changed;
   }
   // How far a hand bone has been moved from where it sits on the arm (Blockbench space).
   function itemOffset(root, def) {
@@ -1206,10 +1258,8 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
   }
 
   function poseMessage(root) {
-    const bones = {};
-    for (const child of root.children) {
-      if (child instanceof Group) bones[boneKey(child.name)] = child;
-    }
+    ensureRig(root);
+    const bones = Object.fromEntries(mannequinBones(root));
     const angles = toBedrockRot(root.rotation);
     for (const bone of BONES) {
       const g = bones[bone.key.toLowerCase()];
@@ -1221,7 +1271,8 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
       const o = itemOffset(root, def);
       return [...toBedrockRot(g.rotation), round(-o[0], 3), round(o[1], 3), round(o[2], 3)];
     });
-    return JSON.stringify({ id: mannequinId(root.name), p: toWorld(root.origin), b: angles, h: hands, s: root.pose_skin_slot || 0, sl: root.pose_slim ? 1 : 0, e: root.pose_equipment || {} });
+    const waist = bones.waist;
+    return JSON.stringify({ id: mannequinId(root.name), p: toWorld(root.origin), b: angles, w: waist ? toBedrockRot(waist.rotation) : [0, 0, 0], h: hands, s: root.pose_skin_slot || 0, sl: root.pose_slim ? 1 : 0, e: root.pose_equipment || {} });
   }
 
   // The game camera follows the selected cam_ group, or the Blockbench viewport if none is selected.
@@ -1449,7 +1500,7 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
         .init();
       cubes.push(cube);
     }
-    ensureItemBones(root);
+    ensureRig(root);
     Undo.finishEdit('Add Pose Studio mannequin', { outliner: true, elements: cubes });
     Canvas.updateAll();
     root.select();
@@ -1525,7 +1576,7 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
     const roots = mannequinRoots();
     if (!roots.length) lines.push('No top-level groups named Player_… found.');
     for (const root of roots) {
-      const bones = root.children.filter((c) => c instanceof Group).map((g) => `${g.name} [${g.rotation.map((v) => round(v, 1)).join(', ')}]`);
+      const bones = [...mannequinBones(root).values()].map((g) => `${g.name} [${g.rotation.map((v) => round(v, 1)).join(', ')}]`);
       lines.push('', `${root.name}: origin [${root.origin.join(', ')}], rotation [${root.rotation.map((v) => round(v, 1)).join(', ')}]`);
       lines.push(`  bones: ${bones.join('; ') || 'none'}`);
       lines.push(`  last sent: ${lastSent.get(mannequinId(root.name)) || 'nothing yet'}`);
@@ -2406,8 +2457,8 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
 
     const [rx, ry, rz] = mannequin.origin;
     const cubes = [];
-    for (const group of mannequin.children) {
-      if (!(group instanceof Group)) continue;
+    ensureRig(mannequin);
+    for (const group of mannequinBones(mannequin).values()) {
       const key = Object.keys(SKIN_PARTS).find((k) => k.toLowerCase() === boneKey(group.name));
       if (!key) continue;
       const def = SKIN_PARTS[key];
@@ -2445,8 +2496,8 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     for (const cube of oldCubes) cube.remove();
     const [rx, ry, rz] = mannequin.origin;
     const cubes = [];
-    for (const group of mannequin.children) {
-      if (!(group instanceof Group)) continue;
+    ensureRig(mannequin);
+    for (const group of mannequinBones(mannequin).values()) {
       const bone = BONES.find((b) => b.key.toLowerCase() === boneKey(group.name));
       if (!bone) continue;
       const shift = (v) => [v[0] + rx, v[1] + ry, v[2] + rz];
@@ -4578,7 +4629,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   async function setHoldingPose(root, on) {
     if (!root || ENTITY_PREFIX.test(root.name)) return false;
     const content = await previewContent();
-    ensureItemBones(root);
+    ensureRig(root);
     const state = poseState(root, content);
     const weapon = on ? heldWeapon(content, root) : null;
     const layers = state.savedLayers.filter((l) => !l.hold);
@@ -4690,6 +4741,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   // Pose Studio ▸ Animation… (a player or an entity copy selected).
   async function openAnimationFrames() {
     const root = selectedPoseRoot();
+    if (root) ensureRig(root);
     if (!root) {
       Blockbench.showQuickMessage('Select a player (Player_) or entity (ent_) first', 2000);
       return;
@@ -4701,7 +4753,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
       showError('Pose Studio: animations', e);
       return;
     }
-    ensureItemBones(root);
+    ensureRig(root);
     const { target, animations, byId, current, savedLayers, base } = poseState(root, content);
     // the held weapon's animations go first
     const weapon = heldWeapon(content, root);
@@ -5898,7 +5950,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     };
   }
 
-  const MANNEQUIN_BONE_KEYS = ['head', 'body', 'rightarm', 'leftarm', 'rightleg', 'leftleg'];
+  const MANNEQUIN_BONE_KEYS = ['waist', 'head', 'body', 'rightarm', 'leftarm', 'rightleg', 'leftleg'];
 
   // Adds an attachable's model to the mannequin (or entity): its bones snap onto the bones of the
   // same name; parts in between (armour pieces) become eq_ groups that keep their own pivots.
@@ -5940,9 +5992,9 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
       if (groups.has(key)) return groups.get(key);
       const parentBone = bone.parent && byName.get(bone.parent.toLowerCase());
       const parentGroup = parentBone && depth < 64 ? groupFor(parentBone, depth + 1) : null;
-      // bones above the body (root, waist) hang off the mannequin itself
+      // bones above the waist (root) hang off the mannequin itself
       const host = parentGroup || (anchorOf(bone) ? boneGroupOf(mannequin, anchorOf(bone)) : mannequin) || mannequin;
-      const isArmourPart = !['root', 'waist'].includes(key);
+      const isArmourPart = key !== 'root';
       const group = isArmourPart
         ? new Group({ name: `eq_${bone.name}`, origin: shift(bone.origin), rotation: bone.rotation.slice() }).addTo(host).init()
         : host;
@@ -6039,7 +6091,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     if (!ENTITY_PREFIX.test(root.name)) {
       if (key === 'rightitem' || key === 'leftitem') return itemBoneOf(root, key);
       const mannequinKey = key === 'hat' ? 'head' : key;
-      return root.children.find((g) => g instanceof Group && boneKey(g.name) === mannequinKey) || null;
+      return mannequinBone(root, mannequinKey);
     }
     let found = null;
     root.forEachChild((c) => {
@@ -6090,7 +6142,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   }
 
   async function buildEquipmentPreview(mannequin) {
-    ensureItemBones(mannequin);
+    ensureRig(mannequin);
     const old = [];
     const oldGroups = [];
     mannequin.forEachChild((c) => {
@@ -6724,7 +6776,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     return { id: idItem.slice(2), name: scene.world || '', anchor: point('A|'), player: point('P|'), locations, removed: scene.removed || [], protocol: version ? Number(version.slice(2)) : 0 };
   }
 
-  const EXPECTED_PACK_PROTOCOL = 8; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
+  const EXPECTED_PACK_PROTOCOL = 9; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
   let warnedOldPack = false;
 
   // Scene files in the scenes folders that belong to a world (their pose_world says so), as
@@ -7474,6 +7526,16 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.37.0",
+      "date": "2026-10-01",
+      "changes": [
+        "Fixed: players now have the same bone chain as Minecraft's player model: a waist, the body in the waist, the head and arms in the body (legs on their own). Animations that lean the waist or body (a sprint leans forward) carry the head and arms with them, in Blockbench and in Minecraft.",
+        "Players from older scenes are rebuilt into the new chain the first time they're used. Every bone keeps facing the way it faced.",
+        "The waist can be turned by hand too, to lean the whole upper body.",
+        "Update the Minecraft packs (Check for Updates, then reopen the world): the mannequin has the new bone chain."
+      ]
+    },
     {
       "version": "0.36.0",
       "date": "2026-10-01",

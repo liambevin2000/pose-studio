@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.37.0",
+    "date": "2026-10-01",
+    "changes": [
+      "Fixed: players now have the same bone chain as Minecraft's player model: a waist, the body in the waist, the head and arms in the body (legs on their own). Animations that lean the waist or body (a sprint leans forward) carry the head and arms with them, in Blockbench and in Minecraft.",
+      "Players from older scenes are rebuilt into the new chain the first time they're used. Every bone keeps facing the way it faced.",
+      "The waist can be turned by hand too, to lean the whole upper body.",
+      "Update the Minecraft packs (Check for Updates, then reopen the world): the mannequin has the new bone chain."
+    ]
+  },
+  {
     "version": "0.36.0",
     "date": "2026-10-01",
     "changes": [
