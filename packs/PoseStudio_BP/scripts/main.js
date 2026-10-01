@@ -95,6 +95,7 @@ function setEntity(player, data) {
     try {
       entity = dim.spawnEntity(data.t, loc);
     } catch (e) {
+      if (isUnloaded(e)) throw e; // the area isn't loaded: the update waits for it
       throw new Error("Pose Studio's entities aren't loaded yet. Reload Minecraft's packs (Pose Studio ▸ More ▸ Reload Minecraft Packs).");
     }
     entity.addTag(TAG_PREFIX + data.id);
@@ -323,7 +324,7 @@ function debug(player) {
 // Every name looks like `PSD[op|page|item]`; page 0 always carries
 // `M|ready|<pages>|<items>|<items per page>` or `M|busy|<percent>`.
 // What this script understands; Blockbench warns when the world runs an older one.
-const PACK_PROTOCOL = 5;
+const PACK_PROTOCOL = 6;
 const IO_OBJECTIVE = "pose_io";
 const ITEMS_PER_PAGE = 30;
 const MAX_PAGES_PER_BATCH = 16;
@@ -612,6 +613,8 @@ function handle(ev) {
 
   switch (ev.id) {
     case "pose:anchor": {
+      // held updates were relative to the old anchor; Blockbench sends everything again after a move
+      waiting.clear();
       // {"at":[x,y,z],"dim":"..."} puts the anchor back where a saved scene had it
       if (Array.isArray(data.at) && data.at.length === 3 && data.at.every((v) => Number.isFinite(Number(v)))) {
         const [x, y, z] = data.at.map(Number);

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.33.2 (2026-10-01)
+
+- Fixed: a location's players could turn up at a different location. When switching, updates went out before Minecraft's anchor had moved, and an update waiting for an unloaded area was later placed at whichever location was active by then. Updates now wait until the location is in place, and waiting updates are dropped when the anchor moves.
+- Fixed: entity copies in an unloaded area reported "Pose Studio's entities aren't loaded yet" instead of waiting for the area like players do.
+- Needs the updated Minecraft behavior pack (Check for Updates, then reload the world).
+
 ## 0.33.1 (2026-10-01)
 
 - Fixed: after going to a far location, its players and entities could exist in Minecraft without being drawn. Entities created while you were away are not always sent to your screen when you arrive, so Pose Studio now places them again once you are there.

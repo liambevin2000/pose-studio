@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.33.1'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.33.2'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -1134,7 +1134,12 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
       lastProjectUuid = Project.uuid;
       lastSent.clear();
       lastCamera = null;
+      // a location of this world: nothing goes out until its anchor is in place (positions are
+      // relative to it), see onProjectSelected
+      const l = Project.pose_world;
+      if (l && connectedWorld && l.id === connectedWorld.id) holdUpdates(10000);
     }
+    if (Date.now() < holdUntil) return;
 
     const seen = new Set();
     for (const root of mannequinRoots()) {
@@ -1188,6 +1193,16 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
     lastCamera = null;
   }
 
+  // While a location is being put in place (anchor, teleport), updates wait; at most `ms`.
+  let holdUntil = 0;
+  function holdUpdates(ms) {
+    holdUntil = Date.now() + ms;
+  }
+  function releaseUpdates() {
+    holdUntil = 0;
+    resync();
+  }
+
   // ---- Actions -------------------------------------------------------------------------------
   function requireConnection() {
     if (link.connected) return true;
@@ -1210,10 +1225,13 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
       if (playerHidden) setPlayerHidden(true);
       // match the open scene with the world first; an empty scene is only centred on the player
       // when the world has no scene of its own
+      // a saved location waits until its anchor is in place (an unlinked scene has nothing to wait for)
+      if (projectLink()) holdUpdates(30000);
       setTimeout(async () => {
         await freezeWorldClock().catch(() => {});
         await checkWorldScene().catch(() => {});
         await autoAnchor();
+        releaseUpdates();
       }, 1000);
     };
     if (!tickTimer) tickTimer = setInterval(tick, TICK_MS);
@@ -5668,7 +5686,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     return { id: idItem.slice(2), name: scene.world || '', anchor: point('A|'), player: point('P|'), locations, removed: scene.removed || [], protocol: version ? Number(version.slice(2)) : 0 };
   }
 
-  const EXPECTED_PACK_PROTOCOL = 5; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
+  const EXPECTED_PACK_PROTOCOL = 6; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
   let warnedOldPack = false;
 
   // Scene files in Documents\Pose Studio\Scenes that belong to a world (their pose_world says so),
@@ -5893,6 +5911,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
         applySceneEnvironment();
         await ensureTickingArea().catch(() => {});
         await offerToGoThere().catch(() => {});
+        releaseUpdates();
         await realignScene({ auto: true }).catch(() => false);
       }
       for (const fn of envListeners) fn(projectEnv());
@@ -6301,6 +6320,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
       applySceneEnvironment();
       await ensureTickingArea().catch(() => {});
       await offerToGoThere().catch(() => {});
+      releaseUpdates(); // in place: send its players now (the terrain check below can take a moment)
       const where = linked.loc && linked.loc !== 'main' ? `${linked.locName} (${worldName})` : worldName;
       Blockbench.showQuickMessage(`Location: ${where}${moved ? ', put back in place' : ''}`, 3000);
       await realignScene({ auto: true }).catch(() => false);
@@ -6377,6 +6397,15 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.33.2",
+      "date": "2026-10-01",
+      "changes": [
+        "Fixed: a location's players could turn up at a different location. When switching, updates went out before Minecraft's anchor had moved, and an update waiting for an unloaded area was later placed at whichever location was active by then. Updates now wait until the location is in place, and waiting updates are dropped when the anchor moves.",
+        "Fixed: entity copies in an unloaded area reported \"Pose Studio's entities aren't loaded yet\" instead of waiting for the area like players do.",
+        "Needs the updated Minecraft behavior pack (Check for Updates, then reload the world)."
+      ]
+    },
     {
       "version": "0.33.1",
       "date": "2026-10-01",
