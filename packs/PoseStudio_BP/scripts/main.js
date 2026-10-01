@@ -8,6 +8,15 @@ const TYPE = "pose:mannequin";
 const TAG_PREFIX = "pose_id.";
 const BONES = ["root", "head", "body", "right_arm", "left_arm", "right_leg", "left_leg"];
 const PROPS = BONES.flatMap((b) => ["x", "y", "z"].map((a) => `pose:${b}_${a}`));
+// The hand bones (rightItem, leftItem): turn x, y, z and move x, y, z, packed three ints each
+// (two 12-bit values per int: angles in 360/4096 steps, offsets in 1/64 pixel steps).
+const HAND_PROPS = ["r", "l"].flatMap((s) => [0, 1, 2].map((i) => `pose:hand_${s}${i}`));
+function packHand(v) {
+  const a = (deg) => ((Math.round(((Number(deg) || 0) + 180) * 4096 / 360) % 4096) + 4096) % 4096;
+  const p = (u) => Math.max(0, Math.min(4095, Math.round((Number(u) || 0) * 64) + 2048));
+  const h = Array.isArray(v) ? v : [];
+  return [a(h[0]) * 4096 + a(h[1]), a(h[2]) * 4096 + p(h[3]), p(h[4]) * 4096 + p(h[5])];
+}
 
 let warnedFov = false;
 const reportedErrors = new Set();
@@ -75,6 +84,9 @@ function setPose(player, data) {
   entity.setProperty("pose:skin", Math.max(0, Math.min(16, Math.round(Number(data.s) || 0))));
   entity.setProperty("pose:slim", !!data.sl);
   entity.setProperty("pose:hidden", false);
+  const hands = Array.isArray(data.h) ? data.h : [];
+  const packed = [...packHand(hands[0]), ...packHand(hands[1])];
+  for (let i = 0; i < HAND_PROPS.length; i++) entity.setProperty(HAND_PROPS[i], packed[i]);
   if (data.e) applyEquipment(entity, data.e);
 }
 
@@ -324,7 +336,7 @@ function debug(player) {
 // Every name looks like `PSD[op|page|item]`; page 0 always carries
 // `M|ready|<pages>|<items>|<items per page>` or `M|busy|<percent>`.
 // What this script understands; Blockbench warns when the world runs an older one.
-const PACK_PROTOCOL = 7;
+const PACK_PROTOCOL = 8;
 const IO_OBJECTIVE = "pose_io";
 const ITEMS_PER_PAGE = 30;
 const MAX_PAGES_PER_BATCH = 16;

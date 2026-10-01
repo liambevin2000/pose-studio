@@ -10,7 +10,9 @@
         "rightArm": { "rotation": ["query.property('pose:right_arm_x')", "query.property('pose:right_arm_y')", "query.property('pose:right_arm_z')"] },
         "leftArm":  { "rotation": ["query.property('pose:left_arm_x')", "query.property('pose:left_arm_y')", "query.property('pose:left_arm_z')"] },
         "rightLeg": { "rotation": ["query.property('pose:right_leg_x')", "query.property('pose:right_leg_y')", "query.property('pose:right_leg_z')"] },
-        "leftLeg":  { "rotation": ["query.property('pose:left_leg_x')", "query.property('pose:left_leg_y')", "query.property('pose:left_leg_z')"] }
+        "leftLeg":  { "rotation": ["query.property('pose:left_leg_x')", "query.property('pose:left_leg_y')", "query.property('pose:left_leg_z')"] },
+        "rightItem": { "rotation": ["math.floor(q.property('pose:hand_r0') / 4096) * 0.087890625 - 180","(q.property('pose:hand_r0') - math.floor(q.property('pose:hand_r0') / 4096) * 4096) * 0.087890625 - 180","math.floor(q.property('pose:hand_r1') / 4096) * 0.087890625 - 180"], "position": ["((q.property('pose:hand_r1') - math.floor(q.property('pose:hand_r1') / 4096) * 4096) - 2048) / 64","(math.floor(q.property('pose:hand_r2') / 4096) - 2048) / 64","((q.property('pose:hand_r2') - math.floor(q.property('pose:hand_r2') / 4096) * 4096) - 2048) / 64"] },
+        "leftItem": { "rotation": ["math.floor(q.property('pose:hand_l0') / 4096) * 0.087890625 - 180","(q.property('pose:hand_l0') - math.floor(q.property('pose:hand_l0') / 4096) * 4096) * 0.087890625 - 180","math.floor(q.property('pose:hand_l1') / 4096) * 0.087890625 - 180"], "position": ["((q.property('pose:hand_l1') - math.floor(q.property('pose:hand_l1') / 4096) * 4096) - 2048) / 64","(math.floor(q.property('pose:hand_l2') / 4096) - 2048) / 64","((q.property('pose:hand_l2') - math.floor(q.property('pose:hand_l2') / 4096) * 4096) - 2048) / 64"] }
       }
     }
   }

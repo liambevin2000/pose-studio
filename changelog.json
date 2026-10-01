@@ -1,5 +1,16 @@
 [
   {
+    "version": "0.36.0",
+    "date": "2026-10-01",
+    "changes": [
+      "New: 3D weapons and items from your packs (DragonCraft's battle axes, daggers, greatswords, longbows…) in Skin & Equipment, shown in the hand as their real models, placed the way Minecraft places them. Daggers put their second blade in the left hand.",
+      "New: weapon holding poses. A weapon that makes the player hold it a certain way brings that pose with it (arms and grip). Turn it on or off with the Holding pose tickbox; changing weapons swaps it, and bones you posed yourself are kept.",
+      "New: Animation… lists the held weapon's animations first (attacks, blocks, combos, marked ⚔), to stack and pick frames as usual. First-person animations are no longer listed.",
+      "New: players have rightItem / leftItem hand bones inside the arms. Turn or move them to adjust how an item is held; Minecraft follows.",
+      "Update the Minecraft packs (Check for Updates, then reopen the world): the mannequin has the new hand bones."
+    ]
+  },
+  {
     "version": "0.35.0",
     "date": "2026-10-01",
     "changes": [

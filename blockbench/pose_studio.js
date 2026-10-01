@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.35.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.36.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -38,6 +38,12 @@
     { key: 'leftLeg',  pivot: [-1.9, 12, 0], from: [-3.9, 0, -2],  to: [0.1, 12, 2],  color: 3 },
   ];
   const MANNEQUIN_PREFIX = /^(player_|mq_)/i; // Player_N (older scenes: mq_N)
+  // The hand bones items attach to (the player model's rightItem / leftItem), inside the arms.
+  // They can be turned and moved (a weapon's holding pose does both), and Minecraft follows.
+  const ITEM_BONES = [
+    { key: 'rightItem', arm: 'rightArm', offset: [1, -7, 1] },
+    { key: 'leftItem', arm: 'leftArm', offset: [-1, -7, 1] },
+  ];
 
   // ---- Small helpers -------------------------------------------------------------------------
   function round(n, digits) {
@@ -376,6 +382,30 @@
       cb(child);
       if (child instanceof Group) eachDescendant(child, cb);
     }
+  }
+
+  // A mannequin's arm and hand bone (older mannequins get their hand bones when needed).
+  function mannequinArm(root, armKey) {
+    return root.children.find((g) => g instanceof Group && boneKey(g.name) === armKey.toLowerCase()) || null;
+  }
+  function itemBoneOf(root, key) {
+    const def = ITEM_BONES.find((b) => b.key.toLowerCase() === key.toLowerCase());
+    const arm = def && mannequinArm(root, def.arm);
+    return (arm && arm.children.find((g) => g instanceof Group && g.name.toLowerCase() === def.key.toLowerCase())) || null;
+  }
+  function ensureItemBones(root) {
+    if (!root || !MANNEQUIN_PREFIX.test(root.name)) return;
+    for (const def of ITEM_BONES) {
+      const arm = mannequinArm(root, def.arm);
+      if (!arm || itemBoneOf(root, def.key)) continue;
+      new Group({ name: def.key, origin: arm.origin.map((v, i) => v + def.offset[i]) }).addTo(arm).init();
+    }
+  }
+  // How far a hand bone has been moved from where it sits on the arm (Blockbench space).
+  function itemOffset(root, def) {
+    const arm = mannequinArm(root, def.arm);
+    const g = itemBoneOf(root, def.key);
+    return arm && g ? g.origin.map((v, i) => round(v - (arm.origin[i] + def.offset[i]), 4)) : [0, 0, 0];
   }
 
   // Moves a group and everything in it (Blockbench keeps absolute coordinates on every node).
@@ -1185,7 +1215,13 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
       const g = bones[bone.key.toLowerCase()];
       angles.push(...(g ? toBedrockRot(g.rotation) : [0, 0, 0]));
     }
-    return JSON.stringify({ id: mannequinId(root.name), p: toWorld(root.origin), b: angles, s: root.pose_skin_slot || 0, sl: root.pose_slim ? 1 : 0, e: root.pose_equipment || {} });
+    const hands = ITEM_BONES.map((def) => {
+      const g = itemBoneOf(root, def.key);
+      if (!g) return [0, 0, 0, 0, 0, 0];
+      const o = itemOffset(root, def);
+      return [...toBedrockRot(g.rotation), round(-o[0], 3), round(o[1], 3), round(o[2], 3)];
+    });
+    return JSON.stringify({ id: mannequinId(root.name), p: toWorld(root.origin), b: angles, h: hands, s: root.pose_skin_slot || 0, sl: root.pose_slim ? 1 : 0, e: root.pose_equipment || {} });
   }
 
   // The game camera follows the selected cam_ group, or the Blockbench viewport if none is selected.
@@ -1413,6 +1449,7 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
         .init();
       cubes.push(cube);
     }
+    ensureItemBones(root);
     Undo.finishEdit('Add Pose Studio mannequin', { outliner: true, elements: cubes });
     Canvas.updateAll();
     root.select();
@@ -2906,7 +2943,9 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
           let icon = c['minecraft:icon'];
           if (icon && typeof icon === 'object') icon = icon.texture || (icon.textures && (icon.textures.default || Object.values(icon.textures)[0]));
           const display = c['minecraft:display_name'];
-          out.set(id, { id, slot, icon: typeof icon === 'string' ? icon : '', name: display && typeof display.value === 'string' ? display.value : '', source: pack.name });
+          const tagList = c['minecraft:tags'] && Array.isArray(c['minecraft:tags'].tags) ? c['minecraft:tags'].tags.slice() : [];
+          for (const key of Object.keys(c)) if (/^tag:/.test(key)) tagList.push(key.slice(4));
+          out.set(id, { id, slot, icon: typeof icon === 'string' ? icon : '', name: display && typeof display.value === 'string' ? display.value : '', source: pack.name, tags: tagList });
         } else if (depth < 6 && !/\.[a-z0-9]{1,5}$/i.test(name)) walk(full, depth + 1);
       }
     };
@@ -4241,7 +4280,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   const ANIM_WALK_SPEED = 6; // blocks per second fed to walk cycles (query.modified_distance_moved)
   const ANIM_DEFAULT_LENGTH = 2; // seconds to scrub through for animations without a length
   // looking at a target, first-person arms and UI renders don't make sense as poses
-  const ANIM_SKIP = /look_at|first_person|paperdoll|map_player|inventory|\.fp\b|_fp\b|attack\.positions/i;
+  const ANIM_SKIP = /look_at|first_person|paperdoll|map_player|inventory|\.fp\b|_fp\b|\.first\b|attack\.positions/i;
 
   // The animations of an entity type that turn at least one of `bones` (lower-case names), as
   // { name, id, def, length, keyframed }.
@@ -4333,7 +4372,41 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
       return { root, entityId: root.pose_entity.entity, groups, rest };
     }
     for (const name of groups.keys()) rest.set(name, [0, 0, 0]);
-    return { root, entityId: 'minecraft:player', groups, rest };
+    // the hand bones also move (their offset is kept as "<bone>@p")
+    const items = new Map();
+    for (const def of ITEM_BONES) if (itemBoneOf(root, def.key)) items.set(def.key.toLowerCase(), def);
+    return { root, entityId: 'minecraft:player', groups, rest, items };
+  }
+
+  // The pose a model has now: bone rotations, and hand bone offsets.
+  function capturePose(target) {
+    const pose = new Map([...target.groups].map(([k, g]) => [k, g.rotation.slice()]));
+    for (const [key, def] of target.items || []) pose.set(`${key}@p`, itemOffset(target.root, def));
+    return pose;
+  }
+
+  // The animation state of a model: its animations, its pose now, and the pose the remembered
+  // animations (pose_animation) were added to, worked out again from the pose now so bones turned
+  // by hand since then keep that change.
+  function poseState(root, content) {
+    const target = animationTarget(root);
+    const animations = entityAnimations(content, target.entityId, new Set(target.groups.keys()));
+    const byId = new Map(animations.map((a) => [a.id, a]));
+    const current = capturePose(target);
+    const saved = root.pose_animation && Array.isArray(root.pose_animation.layers) ? root.pose_animation : null;
+    const savedLayers = saved ? saved.layers.filter((l) => byId.has(l.id)) : [];
+    let base = current;
+    if (savedLayers.length) {
+      const savedBase = new Map(Object.entries(saved.base || {}).map(([k, r]) => [k, r.slice()]));
+      for (const [k, r] of current) if (!savedBase.has(k)) savedBase.set(k, r.slice());
+      const applied = composePose(target, content, savedBase, savedLayers.map((l) => ({ anim: byId.get(l.id), frame: l.frame })));
+      base = new Map([...current].map(([k, r]) => {
+        const a = applied.get(k) || savedBase.get(k);
+        const b = savedBase.get(k);
+        return [k, r.map((v, i) => v - (a[i] - b[i]))];
+      }));
+    }
+    return { target, animations, byId, current, savedLayers, base };
   }
 
   // How far one animation turns each bone at time t, as Blockbench rotations to add (Bedrock
@@ -4353,6 +4426,11 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
       const before = base.get(key) || target.rest.get(key) || [0, 0, 0];
       const r = channelAt(channels.rotation, queries.anim_time, toBedrockRot(before), vars, queries);
       if (r) delta.set(key, [-r[0] * weight, -r[1] * weight, r[2] * weight]);
+      if (target.items && target.items.has(key) && channels.position !== undefined) {
+        const at = base.get(`${key}@p`) || [0, 0, 0];
+        const p = channelAt(channels.position, queries.anim_time, [-at[0], at[1], at[2]], vars, queries);
+        if (p) delta.set(`${key}@p`, [-p[0] * weight, p[1] * weight, p[2] * weight]);
+      }
     }
     return delta;
   }
@@ -4380,6 +4458,13 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     for (const [key, group] of target.groups) {
       const r = pose.get(key);
       if (r) for (let i = 0; i < 3; i++) group.rotation[i] = round(wrap(r[i]), 3);
+    }
+    for (const [key, def] of target.items || []) {
+      const want = pose.get(`${key}@p`);
+      if (!want) continue;
+      const now = itemOffset(target.root, def);
+      const d = want.map((v, i) => round(v - now[i], 4));
+      if (d.some((v) => Math.abs(v) > 1e-4)) translateTree(target.groups.get(key), d);
     }
     refreshGroups([...target.groups.values()]);
   }
@@ -4446,6 +4531,162 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     };
   }
 
+  // ---- Weapons ----
+  // A pack's player model picks animations for the held item in its controllers, e.g.
+  // { "battle_axe": "q.equipped_item_any_tag('slot.weapon.mainhand', 'spark_dc:battle_axe')" },
+  // whose state plays "battle_axe.hold.third". The held weapon's animations are that state's
+  // (the holding pose) and every player animation named after it ("battle_axe.attack.third"…).
+  function heldWeapon(content, root) {
+    const id = root && root.pose_equipment && root.pose_equipment.mainhand;
+    const player = content && content.entities.get('minecraft:player');
+    if (!id || !player || ENTITY_PREFIX.test(root.name)) return null;
+    const info = content.items && content.items.get(id);
+    const tags = new Set(((info && info.tags) || []).map((t) => t.toLowerCase()));
+    const anims = player.description.animations || {};
+    const list = (args) => args.split(',').map((t) => t.trim().replace(/^'|'$/g, '').toLowerCase());
+    const matches = (expr) => {
+      const s = String(expr).replace(/\s+/g, '');
+      let m = s.match(/^(?:q|query)\.equipped_item_any_tag\('slot\.weapon\.mainhand',(.+)\)$/i);
+      if (m) return list(m[1]).some((t) => tags.has(t));
+      m = s.match(/^(?:q|query)\.is_item_name_any\('slot\.weapon\.mainhand',(.+)\)$/i);
+      if (m) return list(m[1]).includes(id.toLowerCase());
+      m = s.match(/^(?:q|query)\.get_equipped_item_name(?:\((?:'main_hand'|0)?\))?==(?:'([^']+)')$/i);
+      if (m) return m[1].toLowerCase() === id.toLowerCase().replace(/^[^:]+:/, '') || m[1].toLowerCase() === id.toLowerCase();
+      return false;
+    };
+    for (const ctrlId of Object.values(anims)) {
+      const ctrl = typeof ctrlId === 'string' && content.animationControllers.get(ctrlId);
+      if (!ctrl || !ctrl.states) continue;
+      for (const state of Object.values(ctrl.states)) {
+        for (const transition of state.transitions || []) {
+          for (const [to, expr] of Object.entries(transition || {})) {
+            if (!ctrl.states[to] || !matches(expr)) continue;
+            const holdKeys = (ctrl.states[to].animations || []).map((a) => (typeof a === 'string' ? a : Object.keys(a)[0]));
+            const hold = holdKeys.map((k) => anims[k]).filter((a) => typeof a === 'string' && !/^controller\./.test(a));
+            const prefix = `${to.toLowerCase()}.`;
+            const related = Object.entries(anims).filter(([k, a]) => k.toLowerCase().startsWith(prefix) && typeof a === 'string' && !/^controller\./.test(a)).map(([, a]) => a);
+            return { id, kind: to, name: itemName(content, id), hold, ids: new Set(hold.concat(related)) };
+          }
+        }
+      }
+    }
+    return null;
+  }
+
+  // Puts the held weapon's holding pose on (or takes it off): it's an animation layer marked
+  // "hold", so it can also be adjusted or removed in Animation….
+  async function setHoldingPose(root, on) {
+    if (!root || ENTITY_PREFIX.test(root.name)) return false;
+    const content = await previewContent();
+    ensureItemBones(root);
+    const state = poseState(root, content);
+    const weapon = on ? heldWeapon(content, root) : null;
+    const layers = state.savedLayers.filter((l) => !l.hold);
+    for (const id of (weapon && weapon.hold) || []) if (state.byId.has(id)) layers.push({ id, frame: 0, hold: true });
+    const had = state.savedLayers.some((l) => l.hold);
+    const has = layers.some((l) => l.hold);
+    if (!had && !has) return false;
+    Undo.initEdit({ groups: [root].concat([...state.target.groups.values()]) });
+    applyPose(state.target, composePose(state.target, content, state.base, layers.map((l) => ({ anim: state.byId.get(l.id), frame: l.frame }))));
+    root.pose_animation = layers.length ? { base: Object.fromEntries([...state.base].map(([k, r]) => [k, r.slice()])), layers } : null;
+    Undo.finishEdit(has ? 'Weapon holding pose' : 'Remove weapon holding pose');
+    refreshGroups([...state.target.groups.values()]);
+    lastSent.delete(mannequinId(root.name));
+    return has;
+  }
+
+  // The attachable's own third-person animations at their first frame (the "offset" that puts a
+  // weapon in the hand): bone -> { rotation, position, scale } (Bedrock convention).
+  function attachableOffsets(content, description) {
+    const out = new Map();
+    const vars = idleVariables(description);
+    for (const entry of (description.scripts && description.scripts.animate) || []) {
+      const key = typeof entry === 'string' ? entry : Object.keys(entry)[0];
+      const cond = typeof entry === 'string' ? true : Object.values(entry)[0];
+      if (cond !== true && !idleCondition(cond)) continue;
+      const animId = description.animations && description.animations[key];
+      const def = typeof animId === 'string' && !/^controller\./.test(animId) && content.animations.get(animId);
+      for (const [bone, ch] of Object.entries((def && def.bones) || {})) {
+        if (!ch) continue;
+        const k = bone.toLowerCase();
+        const cur = out.get(k) || { rotation: [0, 0, 0], position: [0, 0, 0], scale: [1, 1, 1] };
+        const r = channelAt(ch.rotation, 0, [0, 0, 0], vars, IDLE_QUERIES);
+        if (r) cur.rotation = cur.rotation.map((v, i) => v + r[i]);
+        const pos = channelAt(ch.position, 0, [0, 0, 0], vars, IDLE_QUERIES);
+        if (pos) cur.position = cur.position.map((v, i) => v + pos[i]);
+        const s = channelAt(ch.scale, 0, [1, 1, 1], vars, IDLE_QUERIES);
+        if (s) cur.scale = cur.scale.map((v, i) => v * s[i]);
+        out.set(k, cur);
+      }
+    }
+    return out;
+  }
+
+  // A 3D item (a weapon) in the hand: its model's bound bones go on the hand bone it binds to,
+  // placed the way Minecraft and Blockbench do it (the bone's pivot 24 below the hand bone's), then
+  // moved by the attachable's offset animation.
+  async function addWeaponPreview(root, content, itemId, side, cubes, textures) {
+    const attachable = findAttachable(content, itemId);
+    if (!attachable) return false;
+    const d = attachable.description;
+    const geometryId = d.geometry && (d.geometry.default || Object.values(d.geometry)[0]);
+    const geometry = geometryId && resolveGeometry(content.geometries, geometryId);
+    if (!geometry) return false;
+    const slotBone = side === 'rightArm' ? 'rightitem' : 'leftitem';
+    if (!boneGroupOf(root, slotBone)) return false;
+    const texturePath = d.textures && (d.textures.default || Object.values(d.textures)[0]);
+    const texture = await previewTexture(content, `eq_${String(texturePath).split('/').pop()}`, texturePath, geometry.texture_width, geometry.texture_height);
+    if (texture && !textures.includes(texture)) textures.push(texture);
+    const visible = attachableVisibility(content, attachable, {});
+    const offsets = attachableOffsets(content, d);
+    const raw = new Map(geometry.bones.map((b) => [String(b.name).toLowerCase(), b]));
+    const model = bedrockToBlockbench({ bones: geometry.bones, texture_width: geometry.texture_width, texture_height: geometry.texture_height });
+    const byName = new Map(model.bones.map((b) => [b.name.toLowerCase(), b]));
+    const childrenOf = (key) => model.bones.filter((b) => b.parent && b.parent.toLowerCase() === key);
+    const hiddenByScale = (key) => {
+      const o = offsets.get(key);
+      return !!o && o.scale.some((v) => Math.abs(v) < 1e-6);
+    };
+    const shows = new Map();
+    const showsSomething = (bone, depth = 0) => {
+      const key = bone.name.toLowerCase();
+      if (shows.has(key)) return shows.get(key);
+      shows.set(key, false);
+      if (hiddenByScale(key)) return false;
+      const result = (bone.cubes.length > 0 && visible(bone.name)) || (depth < 64 && childrenOf(key).some((c) => showsSomething(c, depth + 1)));
+      shows.set(key, result);
+      return result;
+    };
+    const hostOf = (bone) => {
+      const binding = String((raw.get(bone.name.toLowerCase()) || {}).binding || '');
+      const named = binding.match(/'(\w+)'/);
+      return boneGroupOf(root, named ? named[1] : slotBone) || boneGroupOf(root, slotBone);
+    };
+    const built = [];
+    const build = (bone, parentGroup, shift, depth = 0) => {
+      if (depth > 64 || !showsSomething(bone)) return;
+      const group = new Group({ name: `eq_${bone.name}`, origin: shift(bone.origin), rotation: bone.rotation.slice() }).addTo(parentGroup).init();
+      built.push({ key: bone.name.toLowerCase(), group });
+      if (visible(bone.name)) addPreviewCubes(group, bone, shift, texture, `eq_${slotBone === 'rightitem' ? 'mainhand' : 'offhand'}`, cubes);
+      for (const child of childrenOf(bone.name.toLowerCase())) build(child, group, shift, depth + 1);
+    };
+    for (const bone of model.bones) {
+      if (bone.parent && byName.has(bone.parent.toLowerCase())) continue;
+      const host = hostOf(bone);
+      if (!host) continue;
+      const shift = (v) => [v[0] + host.origin[0], v[1] + host.origin[1] - 24, v[2] + host.origin[2]];
+      build(bone, host, shift);
+    }
+    // the offset animation: turn, then move each bone (moving a bone moves what's inside it)
+    for (const { key, group } of built) {
+      const o = offsets.get(key);
+      if (!o) continue;
+      group.rotation = [group.rotation[0] - o.rotation[0], group.rotation[1] - o.rotation[1], group.rotation[2] + o.rotation[2]];
+      translateTree(group, [-o.position[0], o.position[1], o.position[2]]);
+    }
+    return built.length > 0;
+  }
+
   // Pose Studio ▸ Animation… (a player or an entity copy selected).
   async function openAnimationFrames() {
     const root = selectedPoseRoot();
@@ -4460,32 +4701,17 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
       showError('Pose Studio: animations', e);
       return;
     }
-    const target = animationTarget(root);
-    const animations = entityAnimations(content, target.entityId, new Set(target.groups.keys()));
+    ensureItemBones(root);
+    const { target, animations, byId, current, savedLayers, base } = poseState(root, content);
+    // the held weapon's animations go first
+    const weapon = heldWeapon(content, root);
+    if (weapon) animations.sort((a, b) => weapon.ids.has(b.id) - weapon.ids.has(a.id));
     if (!animations.length) {
       Blockbench.showMessageBox({ title: 'Pose Studio', message: `No animations found that move ${root.name}'s bones.` });
       return;
     }
     const groups = [...target.groups.values()];
-    const byId = new Map(animations.map((a) => [a.id, a]));
-    // the pose it has now (restored on Cancel)
-    const current = new Map([...target.groups].map(([k, g]) => [k, g.rotation.slice()]));
-    // Animations applied earlier are remembered on the model (pose_animation). The pose they were
-    // added to is worked out again from the current pose, so any bones turned by hand since then
-    // keep that change.
-    const saved = root.pose_animation && Array.isArray(root.pose_animation.layers) ? root.pose_animation : null;
-    const savedLayers = saved ? saved.layers.filter((l) => byId.has(l.id)) : [];
-    let base = current;
-    if (savedLayers.length) {
-      const savedBase = new Map(Object.entries(saved.base || {}).map(([k, r]) => [k, r.slice()]));
-      for (const [k, r] of current) if (!savedBase.has(k)) savedBase.set(k, r.slice());
-      const applied = composePose(target, content, savedBase, savedLayers.map((l) => ({ anim: byId.get(l.id), frame: l.frame })));
-      base = new Map([...current].map(([k, r]) => {
-        const a = applied.get(k) || savedBase.get(k);
-        const b = savedBase.get(k);
-        return [k, r.map((v, i) => v - (a[i] - b[i]))];
-      }));
-    }
+    // the pose it has now (restored on Cancel): `current`
     Undo.initEdit({ groups: [root].concat(groups) });
     let timer = null;
     const stop = () => {
@@ -4510,9 +4736,10 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
       cancelIndex: 1,
       component: {
         data: () => ({
-          animations: animations.map((a) => ({ name: a.name, id: a.id, frames: frameCount(a), keyframed: a.keyframed })),
+          animations: animations.map((a) => ({ name: a.name, id: a.id, frames: frameCount(a), keyframed: a.keyframed, weapon: !!(weapon && weapon.ids.has(a.id)) })),
+          weaponName: weapon ? weapon.name : '',
           search: '',
-          layers: savedLayers.map((l) => ({ uid: ++uid, id: l.id, name: byId.get(l.id).name, frames: frameCount(byId.get(l.id)), frame: Math.min(l.frame, frameCount(byId.get(l.id))) })),
+          layers: savedLayers.map((l) => ({ uid: ++uid, id: l.id, name: byId.get(l.id).name, frames: frameCount(byId.get(l.id)), frame: Math.min(l.frame, frameCount(byId.get(l.id))), hold: !!l.hold })),
           active: uid,
           playing: false,
           fromRest: false,
@@ -4592,7 +4819,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
                 <div v-for="a in shown" :key="a.id" @click="pick(a)" :title="(inStack(a) ? 'Take ' : 'Add ') + a.id + (inStack(a) ? ' off the stack' : ' to the stack')"
                      :style="{ padding: '4px 8px', cursor: 'pointer', display: 'flex', justifyContent: 'space-between', gap: '8px',
                                background: inStack(a) ? 'var(--color-selected)' : '' }">
-                  <span>{{ inStack(a) ? '✓ ' : '' }}{{ a.name }}</span>
+                  <span>{{ inStack(a) ? '✓ ' : '' }}<span v-if="a.weapon" :title="'An animation of ' + weaponName" style="color: var(--color-accent);">⚔ </span>{{ a.name }}</span>
                   <span style="opacity: 0.55; font-size: 0.85em;">{{ a.keyframed ? a.frames + ' frames' : 'loop' }}</span>
                 </div>
                 <p v-if="!shown.length" style="padding: 6px 8px; opacity: 0.7;">No animations match.</p>
@@ -4628,7 +4855,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
         if (index === 0 && vm) {
           const b = baseNow();
           root.pose_animation = vm.layers.length
-            ? { base: Object.fromEntries([...b].map(([k, r]) => [k, r.slice()])), layers: vm.layers.map((l) => ({ id: l.id, frame: l.frame })) }
+            ? { base: Object.fromEntries([...b].map(([k, r]) => [k, r.slice()])), layers: vm.layers.map((l) => (l.hold ? { id: l.id, frame: l.frame, hold: true } : { id: l.id, frame: l.frame })) }
             : null;
           finish(true);
         } else finish(false);
@@ -4651,6 +4878,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
           const r = current.get(key);
           for (let i = 0; i < 3; i++) g.rotation[i] = r[i];
         }
+        applyPose(target, current); // hand bones back where they were
         refreshGroups(groups);
         if (Undo.cancelEdit) Undo.cancelEdit();
       }
@@ -5725,37 +5953,55 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
       if (!bone.cubes.length || !visible(bone.name) || !showsSomething(bone)) continue;
       const group = groupFor(bone);
       if (!group) continue;
-      for (const c of bone.cubes) {
-        const cube = new Cube({
-          name: `eq_${slot}`,
-          from: shift(c.from),
-          to: shift(c.to),
-          origin: shift(c.origin),
-          rotation: c.rotation.slice(),
-          inflate: c.inflate,
-          mirror_uv: c.mirror_uv,
-          box_uv: c.box_uv,
-          uv_offset: c.uv_offset.slice(),
-          autouv: 0,
-        })
-          .addTo(group)
-          .init();
-        if (texture) cube.applyTexture(texture, true);
-        if (!c.box_uv) {
-          for (const key of Object.keys(cube.faces)) {
-            const face = c.faces[key];
-            if (!face || !face.enabled) {
-              cube.faces[key].texture = null;
-              continue;
-            }
-            cube.faces[key].uv = face.uv.slice();
-            cube.faces[key].rotation = face.rotation || 0;
-          }
-        }
-        cubes.push(cube);
-      }
+      addPreviewCubes(group, bone, shift, texture, `eq_${slot}`, cubes);
     }
     return true;
+  }
+
+  function addPreviewCubes(group, bone, shift, texture, name, cubes) {
+    for (const c of bone.cubes) {
+      const cube = new Cube({
+        name,
+        from: shift(c.from),
+        to: shift(c.to),
+        origin: shift(c.origin),
+        rotation: c.rotation.slice(),
+        inflate: c.inflate,
+        mirror_uv: c.mirror_uv,
+        box_uv: c.box_uv,
+        uv_offset: c.uv_offset.slice(),
+        autouv: 0,
+      })
+        .addTo(group)
+        .init();
+      if (texture) cube.applyTexture(texture, true);
+      if (!c.box_uv) {
+        for (const key of Object.keys(cube.faces)) {
+          const face = c.faces[key];
+          if (!face || !face.enabled) {
+            cube.faces[key].texture = null;
+            continue;
+          }
+          cube.faces[key].uv = face.uv.slice();
+          cube.faces[key].rotation = face.rotation || 0;
+        }
+      }
+      cubes.push(cube);
+    }
+  }
+
+  // Every 3D item in the world's packs that isn't armour (weapons, tools…): [{ id, name, iconPath }].
+  function customHandItems(content) {
+    const out = [];
+    const ids = new Set([...((content.items && content.items.keys()) || [])].concat([...((content.attachables && content.attachables.keys()) || [])]));
+    for (const id of ids) {
+      if (/^minecraft:/.test(id) || /\.player$/.test(id)) continue;
+      const info = content.items && content.items.get(id);
+      if ((info && info.slot) || (!info && armorSlotOf(content, id))) continue;
+      if (!findAttachable(content, id)) continue;
+      out.push({ id, name: itemName(content, id), iconPath: itemIconPath(content, id) });
+    }
+    return out.sort((a, b) => a.name.localeCompare(b.name));
   }
 
   // Leather armour is grey in its texture and tinted in game; tint the preview the default brown.
@@ -5791,6 +6037,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   function boneGroupOf(root, boneName) {
     const key = boneName.toLowerCase();
     if (!ENTITY_PREFIX.test(root.name)) {
+      if (key === 'rightitem' || key === 'leftitem') return itemBoneOf(root, key);
       const mannequinKey = key === 'hat' ? 'head' : key;
       return root.children.find((g) => g instanceof Group && boneKey(g.name) === mannequinKey) || null;
     }
@@ -5807,6 +6054,8 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     if (itemBone && ENTITY_PREFIX.test(root.name)) return { group: itemBone, at: itemBone.origin.slice() };
     const arm = boneGroupOf(root, side);
     if (!arm) return null;
+    const hand = itemBoneOf(root, side === 'rightArm' ? 'rightItem' : 'leftItem');
+    if (hand) return { group: hand, at: hand.origin.slice() };
     // mannequin: the player's rightItem / leftItem pivot, in Blockbench space
     const [rx, ry, rz] = root.origin;
     return { group: arm, at: [(side === 'rightArm' ? 6 : -6) + rx, 15 + ry, 1 + rz] };
@@ -5841,6 +6090,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   }
 
   async function buildEquipmentPreview(mannequin) {
+    ensureItemBones(mannequin);
     const old = [];
     const oldGroups = [];
     mannequin.forEachChild((c) => {
@@ -5897,6 +6147,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     for (const [slot, side] of [['mainhand', 'rightArm'], ['offhand', 'leftArm']]) {
       const id = shortItem(equipment[slot]);
       if (!id || !content) continue;
+      if (await addWeaponPreview(mannequin, content, equipment[slot], side, cubes, textures)) continue;
       const hand = handPoint(mannequin, side);
       if (!hand) continue;
       const group = hand.group;
@@ -6010,6 +6261,12 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
       return { key: s.key, name: s.name, source: s.source, icon: shown.iconPath ? icon(shown.iconPath) : '', pieces: ARMOR_SLOT_ORDER.map((slot) => s.pieces[slot] && s.pieces[slot].id).filter(Boolean), slots: Object.assign({}, ...Object.entries(s.pieces).map(([slot, piece]) => ({ [slot]: piece.id }))) };
     });
     const armorValue = (piece) => eq[piece.slot] || '';
+    const packItems = customHandItems(content).map((i) => ({ id: i.id, name: i.name, icon: i.iconPath ? icon(i.iconPath) : '' }));
+    const weaponNow = () => {
+      const w = isEntity ? null : heldWeapon(content, mannequin);
+      return w && w.hold.length ? w.name : '';
+    };
+    const holdNow = () => !!(mannequin.pose_animation && (mannequin.pose_animation.layers || []).some((l) => l.hold));
     return {
         data: () => ({
           pieces: ARMOR_PIECES.map((p) => ({
@@ -6028,6 +6285,9 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
           custom: '',
           canHold,
           canWear,
+          packItems,
+          weaponName: weaponNow(),
+          holdOn: holdNow(),
         }),
         methods: {
           setArmor(p) {
@@ -6050,22 +6310,41 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
             return this.pieces.every((p) => !set.slots[p.slot] || p.value === set.slots[p.slot]);
           },
           pick(id) {
-            const value = id ? `minecraft:${shortItem(id)}` : '';
-            this[this.hand] = value;
-            setEquipment(mannequin, this.hand, value);
+            const value = !id ? '' : id.includes(':') ? id : `minecraft:${id}`;
+            this.give(value);
           },
           setCustom() {
             const id = this.custom.trim();
             if (!id) return;
-            const value = id.includes(':') ? id : `minecraft:${id}`;
-            this[this.hand] = value;
-            setEquipment(mannequin, this.hand, value);
+            this.give(id.includes(':') ? id : `minecraft:${id}`);
+          },
+          // a weapon brings its holding pose (and changing weapons swaps it)
+          give(value) {
+            const hand = this.hand;
+            this[hand] = value;
+            const done = setEquipment(mannequin, hand, value);
+            if (hand !== 'mainhand' || isEntity) return;
+            Promise.resolve(done)
+              .then(() => setHoldingPose(mannequin, true))
+              .catch((e) => console.warn('[Pose Studio] holding pose', e))
+              .then(() => {
+                this.weaponName = weaponNow();
+                this.holdOn = holdNow();
+              });
+          },
+          toggleHold(on) {
+            setHoldingPose(mannequin, on)
+              .catch((e) => console.warn('[Pose Studio] holding pose', e))
+              .then(() => {
+                this.holdOn = holdNow();
+              });
           },
           picked(id) {
-            return shortItem(this.hand === 'mainhand' ? this.mainhand : this.offhand) === id;
+            const now = this.hand === 'mainhand' ? this.mainhand : this.offhand;
+            return id.includes(':') ? now === id : shortItem(now) === id;
           },
           label(id) {
-            const known = this.items.find((i) => i.id === shortItem(id));
+            const known = this.items.find((i) => i.id === shortItem(id)) || this.packItems.find((i) => i.id === id);
             return id ? (known ? known.name : id) : 'nothing';
           },
         },
@@ -6113,12 +6392,27 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
                 <div v-else style="height: 32px; font-size: 0.7em; overflow: hidden;">{{ i.name }}</div>
               </div>
             </div>
+            <div v-if="packItems.length" style="margin-bottom: 8px;">
+              <div style="opacity: 0.8; margin-bottom: 4px;">3D items from your packs:</div>
+              <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(44px, 1fr)); gap: 4px; max-height: 150px; overflow-y: auto;">
+                <div v-for="i in packItems" :key="i.id" @click="pick(i.id)" :title="i.name + ' (' + i.id + ')'"
+                     :style="{ border: '1px solid var(--color-border)', borderRadius: '4px', padding: '4px', cursor: 'pointer', textAlign: 'center',
+                               background: picked(i.id) ? 'var(--color-selected)' : '' }">
+                  <img v-if="i.icon" :src="i.icon" style="width: 32px; height: 32px; image-rendering: pixelated;">
+                  <div v-else style="height: 32px; font-size: 0.7em; overflow: hidden;">{{ i.name }}</div>
+                </div>
+              </div>
+            </div>
+            <label v-if="weaponName" style="display: flex; gap: 6px; align-items: center; margin-bottom: 8px;"
+                   title="The pose the weapon puts the player in. It's a layer in Animation… too, where its attacks and other animations are listed first.">
+              <input type="checkbox" :checked="holdOn" @change="toggleHold($event.target.checked)"> Holding pose for {{ weaponName }}
+            </label>
             <div style="display: flex; gap: 6px; align-items: center;">
               <span>Any item id:</span>
               <input type="text" v-model="custom" placeholder="e.g. minecraft:torch or mypack:magic_staff" class="dark_bordered" style="flex: 1;" @keydown.enter="setCustom()">
               <button @click="setCustom()">Give</button>
             </div>
-            <p style="opacity: 0.7; margin-top: 8px;">Minecraft shows the real items. The Blockbench preview shows armour (3D armour from your packs snaps onto the matching bones) and a flat icon for held items.</p>
+            <p style="opacity: 0.7; margin-top: 8px;">Minecraft shows the real items. The Blockbench preview shows armour and 3D items from your packs on the matching bones, and a flat icon for other held items.</p>
           </div>`,
     };
   }
@@ -6430,7 +6724,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     return { id: idItem.slice(2), name: scene.world || '', anchor: point('A|'), player: point('P|'), locations, removed: scene.removed || [], protocol: version ? Number(version.slice(2)) : 0 };
   }
 
-  const EXPECTED_PACK_PROTOCOL = 7; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
+  const EXPECTED_PACK_PROTOCOL = 8; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
   let warnedOldPack = false;
 
   // Scene files in the scenes folders that belong to a world (their pose_world says so), as
@@ -7180,6 +7474,17 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.36.0",
+      "date": "2026-10-01",
+      "changes": [
+        "New: 3D weapons and items from your packs (DragonCraft's battle axes, daggers, greatswords, longbows…) in Skin & Equipment, shown in the hand as their real models, placed the way Minecraft places them. Daggers put their second blade in the left hand.",
+        "New: weapon holding poses. A weapon that makes the player hold it a certain way brings that pose with it (arms and grip). Turn it on or off with the Holding pose tickbox; changing weapons swaps it, and bones you posed yourself are kept.",
+        "New: Animation… lists the held weapon's animations first (attacks, blocks, combos, marked ⚔), to stack and pick frames as usual. First-person animations are no longer listed.",
+        "New: players have rightItem / leftItem hand bones inside the arms. Turn or move them to adjust how an item is held; Minecraft follows.",
+        "Update the Minecraft packs (Check for Updates, then reopen the world): the mannequin has the new hand bones."
+      ]
+    },
     {
       "version": "0.35.0",
       "date": "2026-10-01",

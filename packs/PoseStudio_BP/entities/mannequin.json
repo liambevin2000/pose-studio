@@ -150,6 +150,42 @@
           "type": "bool",
           "default": false,
           "client_sync": true
+        },
+        "pose:hand_r0": {
+          "type": "int",
+          "range": [0, 16777215],
+          "default": 8390656,
+          "client_sync": true
+        },
+        "pose:hand_r1": {
+          "type": "int",
+          "range": [0, 16777215],
+          "default": 8390656,
+          "client_sync": true
+        },
+        "pose:hand_r2": {
+          "type": "int",
+          "range": [0, 16777215],
+          "default": 8390656,
+          "client_sync": true
+        },
+        "pose:hand_l0": {
+          "type": "int",
+          "range": [0, 16777215],
+          "default": 8390656,
+          "client_sync": true
+        },
+        "pose:hand_l1": {
+          "type": "int",
+          "range": [0, 16777215],
+          "default": 8390656,
+          "client_sync": true
+        },
+        "pose:hand_l2": {
+          "type": "int",
+          "range": [0, 16777215],
+          "default": 8390656,
+          "client_sync": true
         }
       }
     },
