@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.33.3 (2026-10-01)
+
+- Fixed: going to a far location and keeping locations loaded never actually worked in game. The teleport and ticking-area commands named the dimension "minecraft:overworld", which Bedrock's execute command rejects (it wants "overworld"), and the failure was silent.
+- Teleporting to a location is now done by the behavior pack's script (works across dimensions) and checked: if Minecraft did not take you there, Pose Studio says so instead of claiming it did.
+- A ticking area that Minecraft refuses (a world allows 10) is reported.
+- Needs the updated Minecraft behavior pack (Check for Updates, then reload the world).
+
 ## 0.33.2 (2026-10-01)
 
 - Fixed: a location's players could turn up at a different location. When switching, updates went out before Minecraft's anchor had moved, and an update waiting for an unloaded area was later placed at whichever location was active by then. Updates now wait until the location is in place, and waiting updates are dropped when the anchor moves.

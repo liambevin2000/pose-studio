@@ -324,7 +324,7 @@ function debug(player) {
 // Every name looks like `PSD[op|page|item]`; page 0 always carries
 // `M|ready|<pages>|<items>|<items per page>` or `M|busy|<percent>`.
 // What this script understands; Blockbench warns when the world runs an older one.
-const PACK_PROTOCOL = 6;
+const PACK_PROTOCOL = 7;
 const IO_OBJECTIVE = "pose_io";
 const ITEMS_PER_PAGE = 30;
 const MAX_PAGES_PER_BATCH = 16;
@@ -644,6 +644,14 @@ function handle(ev) {
       return clearCamera(player);
     case "pose:debug":
       return debug(player);
+    case "pose:goto": {
+      // takes the player to a location (any dimension), so Minecraft loads and draws it
+      if (!player || !Array.isArray(data.at)) return;
+      const [x, y, z] = data.at.map(Number);
+      const dim = data.dim ? world.getDimension(String(data.dim)) : player.dimension;
+      player.teleport({ x, y, z }, { dimension: dim, keepVelocity: false });
+      return;
+    }
     case "pose:hideplayer":
       return setPlayerHidden(player, !!data.hide);
     case "pose:page":

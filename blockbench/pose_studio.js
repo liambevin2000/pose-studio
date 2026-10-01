@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.33.2'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.33.3'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -5686,7 +5686,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     return { id: idItem.slice(2), name: scene.world || '', anchor: point('A|'), player: point('P|'), locations, removed: scene.removed || [], protocol: version ? Number(version.slice(2)) : 0 };
   }
 
-  const EXPECTED_PACK_PROTOCOL = 6; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
+  const EXPECTED_PACK_PROTOCOL = 7; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
   let warnedOldPack = false;
 
   // Scene files in Documents\Pose Studio\Scenes that belong to a world (their pose_world says so),
@@ -5820,6 +5820,19 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   // the area around the player (the simulation distance). A ticking area keeps each location's
   // chunks ticking wherever the player is (Minecraft allows 10 per world).
   const tickingAreas = new Map(); // location id -> "x y z" the area was made for (this session)
+
+  // Commands name dimensions without the "minecraft:" (`execute in overworld`); scripts use the full id.
+  function commandDimension(dim) {
+    const d = String(dim || '').replace(/^minecraft:/, '');
+    return { the_nether: 'nether' }[d] || d;
+  }
+  // Runs a command in a dimension; resolves to the reply, or null when Minecraft refused it.
+  async function commandIn(dim, cmd) {
+    const d = commandDimension(dim);
+    const body = await link.command(d ? `execute in ${d} run ${cmd}` : cmd).catch(() => null);
+    return body && (body.statusCode === undefined || body.statusCode >= 0) ? body : null;
+  }
+  let warnedTickingArea = false;
   async function ensureTickingArea() {
     const l = projectLink();
     if (!link.connected || !l || !l.anchor || !connectedWorld || l.id !== connectedWorld.id) return;
@@ -5827,10 +5840,13 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     const at = `${Math.floor(a.x)} ${Math.floor(a.y)} ${Math.floor(a.z)}`;
     const name = `pose_${String(l.loc || 'main').replace(/[^a-z0-9_]/gi, '_')}`;
     if (tickingAreas.get(name) === at) return;
-    const run = (cmd) => link.command(a.dim ? `execute in ${a.dim} run ${cmd}` : cmd).catch(() => null);
-    await run(`tickingarea remove ${name}`); // it may be from an older position
-    const body = await run(`tickingarea add circle ${at} 4 ${name} true`);
+    await commandIn(a.dim, `tickingarea remove ${name}`); // it may be from an older position
+    const body = await commandIn(a.dim, `tickingarea add circle ${at} 4 ${name} true`);
     tickingAreas.set(name, at);
+    if (!body && !warnedTickingArea) {
+      warnedTickingArea = true;
+      Blockbench.showQuickMessage("Pose Studio: Minecraft wouldn't add a ticking area for this location (a world allows 10). Its players appear once you're there.", 6000);
+    }
     // the chunks load over the next ticks; send everything again then
     setTimeout(resync, 1500);
     return body;
@@ -5848,13 +5864,30 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
 
   // Teleports the player to a location (a little above its centre, in its dimension).
   async function goToLocation(anchor) {
-    if (!link.connected || !anchor) return;
-    const cmd = `tp @s ${anchor.x} ${Number(anchor.y) + 1} ${anchor.z}`;
-    await link.command(anchor.dim ? `execute in ${anchor.dim} run ${cmd}` : cmd).catch(logFailure);
+    if (!link.connected || !anchor) return false;
+    const at = [Number(anchor.x), Number(anchor.y) + 1, Number(anchor.z)];
+    await link.command(`scriptevent pose:goto ${JSON.stringify({ at, dim: anchor.dim || undefined })}`).catch(logFailure);
+    await sleep(400);
+    let after = await readWorldScene().catch(() => null);
+    const arrived = (w) => w && w.player && distanceTo(w.player, { x: at[0], y: at[1], z: at[2] }) < 4;
+    if (!arrived(after)) {
+      // an older behavior pack: the command (dimension named the command way)
+      const body = await commandIn(anchor.dim, `tp @s ${at.join(' ')}`);
+      await sleep(400);
+      after = await readWorldScene().catch(() => null);
+      if (!arrived(after)) {
+        Blockbench.showMessageBox({
+          title: 'Pose Studio',
+          message: `Minecraft didn't take you to this location (${at.map((v) => Math.round(v)).join(' ')}${anchor.dim ? ', ' + commandDimension(anchor.dim) : ''}).${body ? '' : ' The teleport command was refused.'}\n\nUpdate the Minecraft packs (Check for Updates, then reload the world), or go there yourself; the location appears when you arrive.`,
+        });
+        return false;
+      }
+    }
     // Once the area has loaded around you, the location's entities are made again: ones created
     // while you were away (kept by the ticking area) aren't always sent to your screen.
     setTimeout(refreshLocationEntities, 2000);
     setTimeout(resync, 5000);
+    return true;
   }
 
   // Locations ▸ Refresh in Minecraft: removes the open location's players and entities in the
@@ -5879,7 +5912,8 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     // Minecraft only draws the world (terrain and entities) around the player, so the player goes
     // with you. You're hidden and the camera is Pose Studio's anyway.
     if (followLocations) {
-      await goToLocation(linked.anchor);
+      const went = await goToLocation(linked.anchor);
+      if (!went) return false;
       Blockbench.showQuickMessage(`Pose Studio: took you to ${name} (${sameDim ? `${Math.round(away)} blocks` : 'another dimension'}) so Minecraft loads it`, 3500);
       await sleep(2000); // let the area load before anything reads it
       return true;
@@ -6397,6 +6431,16 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.33.3",
+      "date": "2026-10-01",
+      "changes": [
+        "Fixed: going to a far location and keeping locations loaded never actually worked in game. The teleport and ticking-area commands named the dimension \"minecraft:overworld\", which Bedrock's execute command rejects (it wants \"overworld\"), and the failure was silent.",
+        "Teleporting to a location is now done by the behavior pack's script (works across dimensions) and checked: if Minecraft did not take you there, Pose Studio says so instead of claiming it did.",
+        "A ticking area that Minecraft refuses (a world allows 10) is reported.",
+        "Needs the updated Minecraft behavior pack (Check for Updates, then reload the world)."
+      ]
+    },
     {
       "version": "0.33.2",
       "date": "2026-10-01",
