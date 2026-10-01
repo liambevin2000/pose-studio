@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.40.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.40.1'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -6843,7 +6843,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
       width: 440,
       buttons: ['Done'],
       component: {
-        data: () => ({ time: env.time, weather: env.weather, weathers: WEATHERS, presets: [['Sunrise', 23000], ['Morning', 1000], ['Noon', 6000], ['Sunset', 12000], ['Night', 18000]], tilt: shownTilt, packTilt, tiltNote: '', busy: false }),
+        data: () => ({ time: env.time, weather: env.weather, weathers: WEATHERS, presets: [['Sunrise', 23000], ['Morning', 1000], ['Noon', 6000], ['Sunset', 12000], ['Night', 18000]], tilt: shownTilt, packTilt, tiltNote: '', busy: false, needsTop: false }),
         mounted() {
           vm = this;
         },
@@ -6856,6 +6856,31 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
           pick(id) {
             this.weather = id;
             setWeather(id);
+          },
+          moveTop() {
+            if (link.connected) {
+              this.tiltNote = 'Save & Quit the world in Minecraft first (Minecraft reads the pack order when a world opens), then press Put Pose Studio on Top again. This window stays open.';
+              return;
+            }
+            Blockbench.showMessageBox(
+              {
+                title: 'Pose Studio',
+                message: "This changes the world's resource pack order so Pose Studio's pack is first (highest). A backup of the old order is kept next to it (world_resource_packs.json.before_pose_studio). If the world is shared (git, ToolBox), the new order goes with it.",
+                buttons: ['Put on Top', 'Cancel'],
+                confirm: 0,
+                cancel: 1,
+              },
+              (button) => {
+                if (button !== 0) return;
+                try {
+                  const name = putPoseStudioOnTop();
+                  this.needsTop = false;
+                  this.tiltNote = `Done: Pose Studio is first in ${name}'s resource packs. Open the world again and connect; the sun tilt applies.`;
+                } catch (e) {
+                  showError('Pose Studio: pack order', e);
+                }
+              }
+            );
           },
           async applyTilt(useDefault) {
             this.busy = true;
@@ -6870,6 +6895,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
                 Project.pose_env = next;
                 Project.saved = false;
               }
+              this.needsTop = !!sunOrderWarning(result.order);
               this.tiltNote = sunOrderWarning(result.order) || (useDefault ? "Back to the packs' own sun path. Minecraft is reloading its packs." : `Sun path tilted ${deg}°. Minecraft is reloading its packs (the world blinks).`);
             } catch (e) {
               showError('Pose Studio: sun tilt', e);
@@ -6903,6 +6929,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
                 <button @click="applyTilt(true)" :disabled="busy" style="min-width: 0; padding: 0 12px;" :title="'The packs\' own tilt: ' + packTilt + '°'">Pack Default ({{ packTilt }}°)</button>
               </div>
               <p v-if="tiltNote" style="margin: 6px 0 0;">{{ tiltNote }}</p>
+              <button v-if="needsTop" @click="moveTop()" style="min-width: 0; padding: 0 12px; margin-top: 6px;" title="For when Minecraft's screen won't reorder the packs">Put Pose Studio on Top</button>
               <p style="opacity: 0.65; margin: 6px 0 0;">Applying reloads Minecraft's packs, so the world blinks for a moment. Needs Vibrant Visuals.</p>
             </div>
             <p style="opacity: 0.65; margin-top: 10px;">The day/night and weather cycles are frozen while Blockbench is connected. Save Location keeps the time, weather and sun tilt with the location.</p>
@@ -7020,9 +7047,32 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     }
   }
 
+  // Puts Pose Studio's resource pack first (highest) in the world's list, for when Minecraft's
+  // screen won't reorder it. The world has to be closed: Minecraft reads the list when it opens.
+  function putPoseStudioOnTop() {
+    const fs = bedrockFs();
+    const world = worldChoices()[0];
+    if (!world) throw new Error("Couldn't find the world's folder (Locations > Pick Minecraft World…).");
+    const manifest = JSON.parse(fs.readFileSync(`${devPackDir('resource')}\\manifest.json`, 'utf8'));
+    const mine = String(manifest.header.uuid).toLowerCase();
+    const file = `${world.path}\\world_resource_packs.json`;
+    let list = [];
+    try {
+      list = parseLooseJson(fs.readFileSync(file, 'utf8'));
+    } catch (e) {
+      list = [];
+    }
+    if (!Array.isArray(list)) list = [];
+    if (fs.existsSync(file)) fs.writeFileSync(`${file}.before_pose_studio`, fs.readFileSync(file)); // a backup
+    const entry = list.find((x) => String(x.pack_id).toLowerCase() === mine) || { pack_id: manifest.header.uuid, version: manifest.header.version };
+    const next = [entry].concat(list.filter((x) => x !== entry));
+    fs.writeFileSync(file, JSON.stringify(next, null, 2));
+    return world.name;
+  }
+
   function sunOrderWarning(order) {
     if (order.missing) return "Pose Studio's resource pack isn't in this world's resource packs, so Minecraft won't use its lighting. Add it in Edit World > Resource Packs.";
-    if (order.above.length) return `In this world, ${order.above.join(', ')} ${order.above.length > 1 ? 'are' : 'is'} above Pose Studio in the resource pack list and ${order.above.length > 1 ? 'bring' : 'brings'} its own lighting, which wins. In Minecraft: Edit World > Resource Packs, move Pose Studio to the top, then reopen the world.`;
+    if (order.above.length) return `In this world, ${order.above.join(', ')} ${order.above.length > 1 ? 'are' : 'is'} above Pose Studio in the resource pack list and ${order.above.length > 1 ? 'bring' : 'brings'} its own lighting, which wins. In Minecraft: Edit World > Resource packs (not Behavior packs), drag Pose Studio to #1, then reopen the world. Or Save & Quit and use Put Pose Studio on Top.`;
     return '';
   }
 
@@ -7822,6 +7872,14 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.40.1",
+      "date": "2026-10-01",
+      "changes": [
+        "New: Put Pose Studio on Top (Time & Weather, when the pack order stops the sun tilt). With the world closed, it moves Pose Studio's resource pack to first in the world's list, keeping a backup of the old order.",
+        "The pack-order note now points at the Resource packs tab (not Behavior packs)."
+      ]
+    },
     {
       "version": "0.40.0",
       "date": "2026-10-01",

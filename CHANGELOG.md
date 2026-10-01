@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.40.1 (2026-10-01)
+
+- New: Put Pose Studio on Top (Time & Weather, when the pack order stops the sun tilt). With the world closed, it moves Pose Studio's resource pack to first in the world's list, keeping a backup of the old order.
+- The pack-order note now points at the Resource packs tab (not Behavior packs).
+
 ## 0.40.0 (2026-10-01)
 
 - New: Sun tilt in Camera > Time & Weather. Tilts the path the sun and moon take across the sky (Vibrant Visuals), so together with the time of day the sun can be put anywhere in the sky. Apply writes the world's lighting with that tilt into Pose Studio's pack and Minecraft reloads its packs (the world blinks). Pack Default goes back to the packs' own tilt.
