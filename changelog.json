@@ -1,5 +1,12 @@
 [
   {
+    "version": "0.34.2",
+    "date": "2026-10-01",
+    "changes": [
+      "When Minecraft drops the connection straight away (\"Could not connect to server\", usually because Require Encrypted Websockets is on), Blockbench now says so and how to fix it, instead of blaming the behavior pack."
+    ]
+  },
+  {
     "version": "0.34.1",
     "date": "2026-10-01",
     "changes": [

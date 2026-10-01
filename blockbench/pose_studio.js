@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.34.1'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.34.2'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -215,14 +215,26 @@
 
       if (this.socket) this.socket.destroy(); // one game client at a time
       this.socket = socket;
+      this.heard = false;
+      const connectedAt = Date.now();
       const parse = createFrameParser(socket, (text) => this.receive(text));
       socket.on('data', parse);
       if (leftover && leftover.length) parse(leftover);
       socket.on('close', () => {
         if (this.socket !== socket) return;
         this.socket = null;
+        // dropped straight away, before answering anything: Minecraft wants an encrypted connection
+        const dropped = !this.heard && Date.now() - connectedAt < 15000;
         this.failPending('Minecraft disconnected');
-        Blockbench.showQuickMessage('Pose Studio: Minecraft disconnected', 2000);
+        if (dropped) {
+          Blockbench.showMessageBox({
+            title: 'Pose Studio',
+            message:
+              'Minecraft closed the connection straight away ("Could not connect to server" in its chat).\n\n' +
+              'In Minecraft: Settings > General > turn Require Encrypted Websockets OFF, then run /connect again.\n\n' +
+              'Still failing? Check that cheats are on in this world.',
+          });
+        } else Blockbench.showQuickMessage('Pose Studio: Minecraft disconnected', 2000);
       });
       Blockbench.showQuickMessage('Pose Studio: Minecraft connected', 2000);
       if (this.onConnect) this.onConnect();
@@ -235,6 +247,7 @@
       } catch (e) {
         return;
       }
+      this.heard = true;
       const id = data && data.header && data.header.requestId;
       const entry = id && this.pending.get(id);
       if (!entry) return;
@@ -6733,6 +6746,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
       world = null;
     }
     if (!world) {
+      if (!link.connected) return; // the connection dropped: said already
       Blockbench.showQuickMessage("Pose Studio couldn't read this world's locations: the Pose Studio behavior pack may be missing or out of date (File > Plugins > Pose Studio > Settings > Check for Updates, then reload the world).", 8000);
       return;
     }
@@ -6854,6 +6868,13 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.34.2",
+      "date": "2026-10-01",
+      "changes": [
+        "When Minecraft drops the connection straight away (\"Could not connect to server\", usually because Require Encrypted Websockets is on), Blockbench now says so and how to fix it, instead of blaming the behavior pack."
+      ]
+    },
     {
       "version": "0.34.1",
       "date": "2026-10-01",

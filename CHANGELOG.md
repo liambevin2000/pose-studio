@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.34.2 (2026-10-01)
+
+- When Minecraft drops the connection straight away ("Could not connect to server", usually because Require Encrypted Websockets is on), Blockbench now says so and how to fix it, instead of blaming the behavior pack.
+
 ## 0.34.1 (2026-10-01)
 
 - World names come from levelname.txt first, as in Minecraft, and from level.dat only when there's no levelname.txt.
