@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.40.0 (2026-10-01)
+
+- New: Sun tilt in Camera > Time & Weather. Tilts the path the sun and moon take across the sky (Vibrant Visuals), so together with the time of day the sun can be put anywhere in the sky. Apply writes the world's lighting with that tilt into Pose Studio's pack and Minecraft reloads its packs (the world blinks). Pack Default goes back to the packs' own tilt.
+- Each location keeps its sun tilt; opening a location with a different tilt offers to apply it.
+- Pose Studio's resource pack has to be above packs with their own lighting (DragonCraft's) in the world's resource pack list; Time & Weather says when it isn't.
+- Fixed: after switching worlds, Skin & Equipment could list the previous world's armour and items.
+
 ## 0.39.0 (2026-10-01)
 
 - Fixed: cloaks (and other armour parts a pack animates from the wearer) can be posed. Turn the eq_cloak group forward or back in Blockbench and Minecraft follows: the mannequin passes the angle to the armour the way a player does (DragonCraft's cloak_angle).
