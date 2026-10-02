@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.46.0 (2026-10-02)
+
+- Removed first-person shots (Camera > First-Person Shot…). Any invisible seat a first-person shot left in a world is removed when the world opens. Update the Minecraft packs (Check for Updates, then reopen the world).
+
 ## 0.45.1 (2026-10-02)
 
 - Fixed: first-person shots with a low camera jolted back and forth: standing with your eyes at the camera put your legs in the ground, and Minecraft kept pushing you out. You now sit on an invisible seat (no collision, no gravity) placed so your eyes are exactly at the camera, whatever the terrain. Getting off puts you straight back on; the seat goes when the shot ends.

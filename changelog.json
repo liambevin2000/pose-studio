@@ -1,5 +1,12 @@
 [
   {
+    "version": "0.46.0",
+    "date": "2026-10-02",
+    "changes": [
+      "Removed first-person shots (Camera > First-Person Shot…). Any invisible seat a first-person shot left in a world is removed when the world opens. Update the Minecraft packs (Check for Updates, then reopen the world)."
+    ]
+  },
+  {
     "version": "0.45.1",
     "date": "2026-10-02",
     "changes": [

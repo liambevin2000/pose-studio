@@ -325,36 +325,6 @@
       },
       "minecraft:fire_immune": {},
       "minecraft:persistent": {}
-    },
-    "component_groups": {
-      "pose:seat": {
-        "minecraft:rideable": {
-          "seat_count": 1,
-          "family_types": [
-            "player"
-          ],
-          "pull_in_entities": false,
-          "seats": [
-            {
-              "position": [
-                0,
-                0,
-                0
-              ],
-              "lock_rider_rotation": 0
-            }
-          ]
-        }
-      }
-    },
-    "events": {
-      "pose:make_seat": {
-        "add": {
-          "component_groups": [
-            "pose:seat"
-          ]
-        }
-      }
     }
   }
 }

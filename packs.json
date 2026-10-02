@@ -1,11 +1,11 @@
 {
-  "version": "0.45.1",
-  "revision": "ea0868b7c603",
+  "version": "0.46.0",
+  "revision": "b5246c0e1c24",
   "files": [
     {
       "path": "PoseStudio_BP/entities/mannequin.json",
-      "size": 7489,
-      "sha1": "1181cdeb6d2c904d31e3116b39698836ff56d11f"
+      "size": 6906,
+      "sha1": "e05c8b0cde8535feb44d903b13f3ecd4096d251d"
     },
     {
       "path": "PoseStudio_BP/manifest.json",
@@ -14,8 +14,8 @@
     },
     {
       "path": "PoseStudio_BP/scripts/main.js",
-      "size": 40120,
-      "sha1": "ab0289e12221e146f980d4fdb7feb1a4f80f47a7"
+      "size": 33400,
+      "sha1": "9edbbc83df49f75fb3ab27add3f5a6ca5d03206d"
     },
     {
       "path": "PoseStudio_RP/animations/mannequin.animation.json",
