@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.51.0 (2026-10-02)
+
+- New in Entity Shot Options: ID mask pass. Each player and mob is one flat colour of its own on a transparent background, so selecting one in Photoshop is a single click. Its colour stays the same from shot to shot (files end in _ids).
+- New in Entity Shot Options: Depth pass. Distance from the camera in grey: white is nearest, black is furthest, stretched over the players and mobs in the shot so the full range is used. Use it for depth of field or fog in post (files end in _depth).
+- Like the normal pass, both are drawn by Blockbench from the shot's camera, follow Minecraft's exact outline, and are saved per player and mob too when Each player and mob separately is on.
+
 ## 0.50.1 (2026-10-02)
 
 - Remove particles now also removes slow particles like smoke, which drift too little between frames to drop out. With it on, the cut-outs, sky shots and normal pass keep only what is within a few pixels of the players and mobs as Blockbench draws them. Smoke right in front of them still shows.

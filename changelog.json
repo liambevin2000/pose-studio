@@ -1,5 +1,14 @@
 [
   {
+    "version": "0.51.0",
+    "date": "2026-10-02",
+    "changes": [
+      "New in Entity Shot Options: ID mask pass. Each player and mob is one flat colour of its own on a transparent background, so selecting one in Photoshop is a single click. Its colour stays the same from shot to shot (files end in _ids).",
+      "New in Entity Shot Options: Depth pass. Distance from the camera in grey: white is nearest, black is furthest, stretched over the players and mobs in the shot so the full range is used. Use it for depth of field or fog in post (files end in _depth).",
+      "Like the normal pass, both are drawn by Blockbench from the shot's camera, follow Minecraft's exact outline, and are saved per player and mob too when Each player and mob separately is on."
+    ]
+  },
+  {
     "version": "0.50.1",
     "date": "2026-10-02",
     "changes": [
