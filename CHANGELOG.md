@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.49.1 (2026-10-02)
+
+- Fixed: on players whose bones had been moved (a lowered waist, a leg pulled forward), Blockbench put the armour, and the skin when it was changed, where those bones rest instead of where they are. Minecraft puts them on the moved bones, so posed players looked different in Blockbench, the camera view and the normal pass. Armour and skins are now built on the bones where they are.
+- Scenes saved before this are fixed when they're opened: players with moved bones get their armour built again, once.
+
 ## 0.49.0 (2026-10-02)
 
 - Changed: the normal pass now follows Minecraft's exact outline of the players and mobs, taken from the cut-out. Anything Blockbench drew outside it is dropped. Anything Minecraft shows that Blockbench didn't draw (an item placed a little differently, a flail mid-swing) is filled with the colour of the nearest face. Its soft edges match the cut-out's.

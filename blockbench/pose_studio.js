@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.49.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.49.1'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -491,6 +491,14 @@
     const from = holder ? holder.origin : root.origin;
     const restFrom = holderKey ? RIG_REST[holderKey] : [0, 0, 0];
     return g.origin.map((v, i) => round(v - from[i] - (RIG_REST[k][i] - restFrom[i]), 4));
+  }
+  // How far a player's bone is from its resting place, counting the moves of the bones it hangs
+  // from (a moved waist carries the body). Cubes built for that bone (skin, armour) go there too.
+  function restDelta(root, key) {
+    const k = String(key).toLowerCase() === 'hat' ? 'head' : String(key).toLowerCase();
+    const g = root && !ENTITY_PREFIX.test(root.name) ? mannequinBone(root, k) : null;
+    if (!g || !RIG_REST[k]) return [0, 0, 0];
+    return g.origin.map((v, i) => v - root.origin[i] - RIG_REST[k][i]);
   }
   function itemOffset(root, def) {
     return boneOffset(root, def.key);
@@ -3392,12 +3400,14 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     Undo.initEdit({ outliner: true, elements: oldCubes });
     for (const cube of oldCubes) cube.remove();
 
-    const [rx, ry, rz] = mannequin.origin;
     const cubes = [];
     ensureRig(mannequin);
     for (const group of mannequinBones(mannequin).values()) {
       const key = Object.keys(SKIN_PARTS).find((k) => k.toLowerCase() === boneKey(group.name));
       if (!key) continue;
+      // where the bone is now (it may have been moved)
+      const moved = restDelta(mannequin, boneKey(group.name));
+      const [rx, ry, rz] = mannequin.origin.map((v, i) => v + moved[i]);
       const def = SKIN_PARTS[key];
       const parts = Array.isArray(def) ? def : def[slim ? 'slim' : 'classic'];
       parts.forEach((p, i) => {
@@ -3431,13 +3441,13 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     mannequin.forEachChild((c) => c instanceof Cube && oldCubes.push(c));
     Undo.initEdit({ outliner: true, elements: oldCubes });
     for (const cube of oldCubes) cube.remove();
-    const [rx, ry, rz] = mannequin.origin;
     const cubes = [];
     ensureRig(mannequin);
     for (const group of mannequinBones(mannequin).values()) {
       const bone = BONES.find((b) => b.key.toLowerCase() === boneKey(group.name));
       if (!bone) continue;
-      const shift = (v) => [v[0] + rx, v[1] + ry, v[2] + rz];
+      const moved = restDelta(mannequin, boneKey(group.name));
+      const shift = (v) => [v[0] + mannequin.origin[0] + moved[0], v[1] + mannequin.origin[1] + moved[1], v[2] + mannequin.origin[2] + moved[2]];
       cubes.push(new Cube({ name: bone.key, from: shift(bone.from), to: shift(bone.to), color: bone.color }).addTo(group).init());
     }
     mannequin.pose_skin_slot = 0;
@@ -7341,6 +7351,10 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
       shows.set(key, own || below);
       return own || below;
     };
+    const movedShift = (bone) => {
+      const moved = restDelta(mannequin, anchorOf(bone) || 'root');
+      return (v) => shift(v).map((x, i) => x + moved[i]);
+    };
     const groups = new Map();
     const groupFor = (bone, depth = 0) => {
       const key = bone.name.toLowerCase();
@@ -7352,7 +7366,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
       const host = parentGroup || (anchorOf(bone) ? boneGroupOf(mannequin, anchorOf(bone)) : mannequin) || mannequin;
       const isArmourPart = key !== 'root';
       const group = isArmourPart
-        ? new Group({ name: `eq_${bone.name}`, origin: shift(bone.origin), rotation: bone.rotation.slice() }).addTo(host).init()
+        ? new Group({ name: `eq_${bone.name}`, origin: movedShift(bone)(bone.origin), rotation: bone.rotation.slice() }).addTo(host).init()
         : host;
       groups.set(key, group);
       return group;
@@ -7361,7 +7375,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
       if (!bone.cubes.length || !visible(bone.name) || !showsSomething(bone)) continue;
       const group = groupFor(bone);
       if (!group) continue;
-      addPreviewCubes(group, bone, shift, texture, `eq_${slot}`, cubes);
+      addPreviewCubes(group, bone, movedShift(bone), texture, `eq_${slot}`, cubes);
     }
     // the armour's own animations (a cloak's angle), on its parts only (not the player's bones)
     const ownerVars = ownerVariables(mannequin);
@@ -7478,7 +7492,8 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     const hand = itemBoneOf(root, side === 'rightArm' ? 'rightItem' : 'leftItem');
     if (hand) return { group: hand, at: hand.origin.slice() };
     // mannequin: the player's rightItem / leftItem pivot, in Blockbench space
-    const [rx, ry, rz] = root.origin;
+    const moved = restDelta(root, side);
+    const [rx, ry, rz] = root.origin.map((v, i) => v + moved[i]);
     return { group: arm, at: [(side === 'rightArm' ? 6 : -6) + rx, 15 + ry, 1 + rz] };
   }
 
@@ -7544,12 +7559,14 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
       for (const bone of model.bones) {
         const group = boneGroupOf(mannequin, bone.name);
         if (!group) continue;
+        const moved = restDelta(mannequin, bone.name);
+        const at = (v) => shift(v).map((x, i) => x + moved[i]);
         for (const c of bone.cubes) {
           const cube = new Cube({
             name: `eq_${piece.piece}`,
-            from: shift(c.from),
-            to: shift(c.to),
-            origin: shift(c.origin),
+            from: at(c.from),
+            to: at(c.to),
+            origin: at(c.origin),
             rotation: c.rotation.slice(),
             inflate: c.inflate,
             mirror_uv: c.mirror_uv,
@@ -8395,7 +8412,23 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   }
 
   // Switching to (or opening) a location of this world puts it in place.
+  // Armour built before 0.49.1 sat where moved bones rest, not where they are: built again once.
+  const EQUIPMENT_LAYOUT = 2;
+  function refreshOldEquipment() {
+    for (const root of mannequinRoots()) {
+      if (root.pose_eq_layout === EQUIPMENT_LAYOUT) continue;
+      root.pose_eq_layout = EQUIPMENT_LAYOUT;
+      const moved = Object.keys(RIG_REST).some((k) => restDelta(root, k).some((v) => Math.abs(v) > 1e-3));
+      if (moved && root.pose_equipment && Object.values(root.pose_equipment).some(Boolean)) refreshEquipmentPreview(root);
+    }
+  }
+
   function onProjectSelected() {
+    try {
+      refreshOldEquipment();
+    } catch (e) {
+      console.warn('[Pose Studio] equipment refresh', e);
+    }
     if (!link.connected || !connectedWorld) return;
     setTimeout(async () => {
       await restoreSceneAnchor().catch(() => {});
@@ -8896,6 +8929,14 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.49.1",
+      "date": "2026-10-02",
+      "changes": [
+        "Fixed: on players whose bones had been moved (a lowered waist, a leg pulled forward), Blockbench put the armour, and the skin when it was changed, where those bones rest instead of where they are. Minecraft puts them on the moved bones, so posed players looked different in Blockbench, the camera view and the normal pass. Armour and skins are now built on the bones where they are.",
+        "Scenes saved before this are fixed when they're opened: players with moved bones get their armour built again, once."
+      ]
+    },
     {
       "version": "0.49.0",
       "date": "2026-10-02",
@@ -9614,7 +9655,7 @@ ${PLUGIN_URL}`,
 
   // for the plugin's own tests only (they set this flag); nothing happens otherwise
   if (typeof globalThis !== 'undefined' && globalThis.__POSE_STUDIO_TEST) {
-    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage };
+    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, restDelta, buildEquipmentPreview };
   }
 
   Plugin.register('pose_studio', {
@@ -9636,6 +9677,7 @@ ${PLUGIN_URL}`,
         new Property(Group, 'object', 'pose_equipment'),
         new Property(Group, 'object', 'pose_animation'),
         new Property(Group, 'object', 'pose_vars'),
+        new Property(Group, 'number', 'pose_eq_layout'),
         new Property(Group, 'object', 'pose_mount'),
         new Property(Group, 'object', 'pose_driver'),
         new Property(Group, 'number', 'pose_skin_slot', { default: 0 }),
