@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.46.1 (2026-10-02)
+
+- Fixed: Drop to Ground (and Ride, Animation…, Variant…, Equipment…) said to select a player or mob when you'd clicked a mob in the viewport. Newer Blockbench keeps the selected groups as a list, and when a cube is clicked that list is empty; Pose Studio now goes from the clicked cube to the mob or player it belongs to.
+
 ## 0.46.0 (2026-10-02)
 
 - Removed first-person shots (Camera > First-Person Shot…). Any invisible seat a first-person shot left in a world is removed when the world opens. Update the Minecraft packs (Check for Updates, then reopen the world).

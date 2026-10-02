@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.46.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.46.1'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -78,6 +78,20 @@
   function bufferClass() {
     return typeof Buffer !== 'undefined' ? Buffer : nodeRequire('buffer').Buffer;
   }
+  // What's selected: a group (Blockbench keeps a list of selected groups; older versions one group)
+  // or, when a cube was clicked in the viewport, that cube. Callers walk up to the model it's in.
+  function selectedNode() {
+    if (typeof Group === 'undefined') return null;
+    const first = Group.first_selected;
+    if (first) return first;
+    const groups = Group.selected;
+    if (Array.isArray(groups)) {
+      if (groups.length) return groups[0];
+    } else if (groups) return groups;
+    const elements = typeof Outliner !== 'undefined' && Outliner.selected;
+    return elements && elements.length ? elements[0] : null;
+  }
+
   function boneKey(name) {
     return String(name).replace(/[\d_.]+$/, '').toLowerCase();
   }
@@ -336,7 +350,7 @@
 
   // The cam_ group that is selected, or that contains the selected element.
   function selectedCamera() {
-    let node = Group.first_selected !== undefined ? Group.first_selected : Group.selected;
+    let node = selectedNode();
     if (!node && Outliner.selected && Outliner.selected.length) node = Outliner.selected[0];
     while (node && node !== 'root') {
       if (node instanceof Group && node.parent === 'root' && CAMERA_PREFIX.test(node.name)) return node;
@@ -2590,7 +2604,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   }
 
   function selectedMannequin() {
-    let node = Group.first_selected !== undefined ? Group.first_selected : Group.selected;
+    let node = selectedNode();
     if (!node && Outliner.selected && Outliner.selected.length) node = Outliner.selected[0];
     while (node && node !== 'root') {
       if (node instanceof Group && node.parent === 'root' && MANNEQUIN_PREFIX.test(node.name)) return node;
@@ -6941,7 +6955,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
 
   // The mannequin or entity group that is selected (or contains the selection).
   function selectedPoseRoot() {
-    let node = Group.first_selected !== undefined ? Group.first_selected : Group.selected;
+    let node = selectedNode();
     if (!node && Outliner.selected && Outliner.selected.length) node = Outliner.selected[0];
     while (node && node !== 'root') {
       if (node instanceof Group && node.parent === 'root' && (MANNEQUIN_PREFIX.test(node.name) || (ENTITY_PREFIX.test(node.name) && node.pose_entity))) return node;
@@ -8353,6 +8367,13 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.46.1",
+      "date": "2026-10-02",
+      "changes": [
+        "Fixed: Drop to Ground (and Ride, Animation…, Variant…, Equipment…) said to select a player or mob when you'd clicked a mob in the viewport. Newer Blockbench keeps the selected groups as a list, and when a cube is clicked that list is empty; Pose Studio now goes from the clicked cube to the mob or player it belongs to."
+      ]
+    },
     {
       "version": "0.46.0",
       "date": "2026-10-02",

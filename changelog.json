@@ -1,5 +1,12 @@
 [
   {
+    "version": "0.46.1",
+    "date": "2026-10-02",
+    "changes": [
+      "Fixed: Drop to Ground (and Ride, Animation…, Variant…, Equipment…) said to select a player or mob when you'd clicked a mob in the viewport. Newer Blockbench keeps the selected groups as a list, and when a cube is clicked that list is empty; Pose Studio now goes from the clicked cube to the mob or player it belongs to."
+    ]
+  },
+  {
     "version": "0.46.0",
     "date": "2026-10-02",
     "changes": [
