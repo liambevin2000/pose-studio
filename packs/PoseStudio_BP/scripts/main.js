@@ -396,24 +396,35 @@ function restoreCleared() {
 function clearBox(player, dim, min, max) {
   restoreCleared(); // anything still out from an earlier shot goes back first
   const record = { dim: dim.id, pieces: [] };
+  const stamp = Date.now().toString(36);
+  // saved first, all of it, then cleared; if any of it can't be saved (not loaded yet), nothing is cleared
+  try {
+    for (let x = min.x; x < max.x; x += PIECE) {
+      for (let y = min.y; y < max.y; y += PIECE) {
+        for (let z = min.z; z < max.z; z += PIECE) {
+          const from = { x, y, z };
+          const to = { x: Math.min(max.x, x + PIECE) - 1, y: Math.min(max.y, y + PIECE) - 1, z: Math.min(max.z, z + PIECE) - 1 };
+          const id = `pose:cleared_${stamp}_${record.pieces.length}`;
+          world.structureManager.createFromWorld(id, dim, from, to, { includeBlocks: true, includeEntities: false, saveMode: StructureSaveMode.World });
+          record.pieces.push({ id, at: from, to });
+        }
+      }
+    }
+  } catch (e) {
+    for (const piece of record.pieces) {
+      try {
+        world.structureManager.delete(piece.id);
+      } catch {
+        // already gone
+      }
+    }
+    throw e;
+  }
   try {
     record.drops = world.gameRules.doTileDrops;
     world.gameRules.doTileDrops = false; // a torch losing its wall drops nothing
   } catch {
     // older versions
-  }
-  const stamp = Date.now().toString(36);
-  // saved first, all of it, then cleared
-  for (let x = min.x; x < max.x; x += PIECE) {
-    for (let y = min.y; y < max.y; y += PIECE) {
-      for (let z = min.z; z < max.z; z += PIECE) {
-        const from = { x, y, z };
-        const to = { x: Math.min(max.x, x + PIECE) - 1, y: Math.min(max.y, y + PIECE) - 1, z: Math.min(max.z, z + PIECE) - 1 };
-        const id = `pose:cleared_${stamp}_${record.pieces.length}`;
-        world.structureManager.createFromWorld(id, dim, from, to, { includeBlocks: true, includeEntities: false, saveMode: StructureSaveMode.World });
-        record.pieces.push({ id, at: from, to });
-      }
-    }
   }
   world.setDynamicProperty(CLEARED_PROPERTY, JSON.stringify(record));
   shotActive = true;
@@ -426,12 +437,29 @@ function clearBox(player, dim, min, max) {
   if (heldPlayers.length) holdRun = system.runInterval(holdPlayers, 1);
 }
 
+// The box's chunks are kept loaded (a ticking area) while a shot uses them: the camera can be far
+// from where the player stands.
+const SHOT_AREA = "pose_shot";
+function removeShotArea() {
+  for (const dimension of ["overworld", "nether", "the_end"]) {
+    try {
+      world.getDimension(dimension).runCommand(`tickingarea remove ${SHOT_AREA}`);
+    } catch {
+      // none there
+    }
+  }
+}
+
+// With "op" (Blockbench waits for the answer): ready once the blocks are out and the box is up,
+// retried for up to 15 seconds while the chunks load.
 function setBackdrop(player, data) {
   if (data.off) {
     removeBackdropBoxes();
     restoreCleared();
+    removeShotArea();
     return;
   }
+  if (data.op) beginResult(data.op);
   const anchor = requireAnchor(player);
   if (!finite(data.p) || !finite(data.h)) throw new Error("backdrop needs p:[x,y,z] and h:[x,y,z]");
   const dim = world.getDimension(anchor.dim);
@@ -440,20 +468,47 @@ function setBackdrop(player, data) {
   // the blocks: whole blocks covering the box
   const min = { x: Math.floor(centre.x - half[0]), y: Math.floor(centre.y - half[1]), z: Math.floor(centre.z - half[2]) };
   const max = { x: Math.ceil(centre.x + half[0]), y: Math.ceil(centre.y + half[1]), z: Math.ceil(centre.z + half[2]) };
-  if (data.clear && world.getDynamicProperty(CLEARED_PROPERTY) === undefined) clearBox(player, dim, min, max);
   // the walls: just inside the cleared blocks, so the blocks beyond are hidden without flicker
-  const mid = { x: (min.x + max.x) / 2, y: (min.y + max.y) / 2, z: (min.z + max.z) / 2 };
-  let box = dim.getEntities({ tags: [BACKDROP_TAG] })[0];
-  if (!box) {
-    box = dim.spawnEntity(BACKDROP_TYPE, mid);
-    box.addTag(BACKDROP_TAG);
-  } else {
-    box.teleport(mid, { dimension: dim });
+  const place = () => {
+    const mid = { x: (min.x + max.x) / 2, y: (min.y + max.y) / 2, z: (min.z + max.z) / 2 };
+    let box = dim.getEntities({ tags: [BACKDROP_TAG] })[0];
+    if (!box) {
+      box = dim.spawnEntity(BACKDROP_TYPE, mid);
+      box.addTag(BACKDROP_TAG);
+    } else {
+      box.teleport(mid, { dimension: dim });
+    }
+    box.setProperty("pose:hx", Math.round(((max.x - min.x) / 2 - 0.05) * 100));
+    box.setProperty("pose:hy", Math.round(((max.y - min.y) / 2 - 0.05) * 100));
+    box.setProperty("pose:hz", Math.round(((max.z - min.z) / 2 - 0.05) * 100));
+    box.setProperty("pose:c", data.c ? 1 : 0);
+  };
+  const clearing = data.clear && world.getDynamicProperty(CLEARED_PROPERTY) === undefined;
+  if (clearing) {
+    try {
+      dim.runCommand(`tickingarea add ${min.x} ${min.y} ${min.z} ${max.x - 1} ${max.y - 1} ${max.z - 1} ${SHOT_AREA} true`);
+    } catch {
+      // there already, or the world has its 10; the chunks may be loaded anyway
+    }
   }
-  box.setProperty("pose:hx", Math.round(((max.x - min.x) / 2 - 0.05) * 100));
-  box.setProperty("pose:hy", Math.round(((max.y - min.y) / 2 - 0.05) * 100));
-  box.setProperty("pose:hz", Math.round(((max.z - min.z) / 2 - 0.05) * 100));
-  box.setProperty("pose:c", data.c ? 1 : 0);
+  let tries = 0;
+  const attempt = () => {
+    try {
+      if (clearing) clearBox(player, dim, min, max);
+      place();
+      if (data.op) finishResult(["ok"]);
+      return true;
+    } catch (e) {
+      if (isUnloaded(e) && ++tries < 60) return false;
+      if (!data.op) throw e;
+      failResult(isUnloaded(e) ? "The area around the camera and the entities wouldn't load. Stand closer to the scene and try again." : e);
+      return true;
+    }
+  };
+  if (attempt()) return;
+  const run = system.runInterval(() => {
+    if (attempt()) system.clearRun(run);
+  }, 5);
 }
 
 
@@ -516,7 +571,7 @@ function debug(player) {
 // Every name looks like `PSD[op|page|item]`; page 0 always carries
 // `M|ready|<pages>|<items>|<items per page>` or `M|busy|<percent>`.
 // What this script understands; Blockbench warns when the world runs an older one.
-const PACK_PROTOCOL = 15;
+const PACK_PROTOCOL = 16;
 const IO_OBJECTIVE = "pose_io";
 const ITEMS_PER_PAGE = 30;
 const MAX_PAGES_PER_BATCH = 16;
@@ -535,7 +590,7 @@ function beginResult(op) {
 
 function failResult(error) {
   result.busy = false;
-  result.error = String(error).replace(/[^w .:'"-]/g, " ").slice(0, 80);
+  result.error = String(error).replace(/[^\w .:'"-]/g, " ").slice(0, 120);
 }
 
 function finishResult(items) {
@@ -951,7 +1006,7 @@ system.afterEvents.scriptEventReceive.subscribe(
         waitForChunk(ev, e);
         return;
       }
-      if (ev.id === "pose:scan" || ev.id === "pose:grabcam" || ev.id === "pose:scene") failResult(e);
+      if (ev.id === "pose:scan" || ev.id === "pose:grabcam" || ev.id === "pose:scene" || ev.id === "pose:backdrop") failResult(e);
       const msg = `${ev.id} failed: ${e}`;
       console.warn(`[Pose Studio] ${msg}`);
       if (!reportedErrors.has(msg) && ev.sourceEntity?.typeId === "minecraft:player") {

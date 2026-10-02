@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.47.2 (2026-10-02)
+
+- Fixed: Capture Entities Only failed with "UnloadedChunksError" when part of the area around the camera and the entities wasn't loaded (a camera away from where you stand). Minecraft now keeps that area loaded with a ticking area while the shot is taken, and waits up to 15 seconds for it before clearing. Blockbench waits for it too, so the coloured shots are only taken once the blocks are out.
+- If the area can't be loaded, nothing is cleared and the shot stops with a message, instead of taking shots without the cut-out.
+- Fixed: a failed clear could leave block drops switched off. Drops are now only switched off once every block has been saved.
+- Fixed: error messages from Minecraft reached Blockbench with most of their letters missing.
+- Update the Minecraft packs (Check for Updates, then reopen the world).
+
 ## 0.47.1 (2026-10-02)
 
 - Fixed: Capture Entities Only left the world near the entities in the shot (the ground, nearby trees, torches). For the two cut-out shots, the blocks in a box around the entities and the camera are now saved, cleared, and walled in with the flat colour. Straight after, every block is put back exactly as it was. The normal shot, which the colours come from, is still taken first with nothing touched, so the light on them is the scene's.

@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.47.1'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.47.2'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -2330,8 +2330,9 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
       await link.command('hud @s hide all');
       await sleep(250);
       shots.a = await grab();
-      await link.command(`scriptevent pose:backdrop ${JSON.stringify(Object.assign({ c: 0, clear: 1 }, plan))}`);
-      await sleep(1500);
+      // Minecraft answers once the blocks are out and the box is up (it may wait for chunks to load)
+      await runGameQuery('pose:backdrop', Object.assign({ c: 0, clear: 1 }, plan), 'Clearing around the scene');
+      await sleep(1000);
       shots.m = await grab();
       await link.command(`scriptevent pose:backdrop ${JSON.stringify(Object.assign({ c: 1 }, plan))}`);
       await sleep(900);
@@ -7908,7 +7909,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     return { id: idItem.slice(2), name: scene.world || '', anchor: point('A|'), player: point('P|'), locations, removed: scene.removed || [], protocol: version ? Number(version.slice(2)) : 0 };
   }
 
-  const EXPECTED_PACK_PROTOCOL = 15; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
+  const EXPECTED_PACK_PROTOCOL = 16; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
   let warnedOldPack = false;
 
   // Scene files in the scenes folders that belong to a world (their pose_world says so), as
@@ -8658,6 +8659,17 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.47.2",
+      "date": "2026-10-02",
+      "changes": [
+        "Fixed: Capture Entities Only failed with \"UnloadedChunksError\" when part of the area around the camera and the entities wasn't loaded (a camera away from where you stand). Minecraft now keeps that area loaded with a ticking area while the shot is taken, and waits up to 15 seconds for it before clearing. Blockbench waits for it too, so the coloured shots are only taken once the blocks are out.",
+        "If the area can't be loaded, nothing is cleared and the shot stops with a message, instead of taking shots without the cut-out.",
+        "Fixed: a failed clear could leave block drops switched off. Drops are now only switched off once every block has been saved.",
+        "Fixed: error messages from Minecraft reached Blockbench with most of their letters missing.",
+        "Update the Minecraft packs (Check for Updates, then reopen the world)."
+      ]
+    },
     {
       "version": "0.47.1",
       "date": "2026-10-02",
