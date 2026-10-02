@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.42.1'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.43.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -1177,6 +1177,7 @@ while ($true) {
     { id: 'window', name: 'Match Minecraft Window' },
     '_',
     { id: '16:9', name: '16:9 Widescreen', ratio: 16 / 9 },
+    { id: '16:9-left', name: '16:9 Left Half (Blockbench on the right)', ratio: 16 / 9, place: 'left' },
     { id: '21:9', name: '21:9 Ultrawide', ratio: 21 / 9 },
     { id: '3:2', name: '3:2', ratio: 3 / 2 },
     { id: '4:3', name: '4:3', ratio: 4 / 3 },
@@ -1198,7 +1199,9 @@ while ($true) {
             name: p.name,
             id: `pose_studio_aspect_${p.id.replace(':', '_')}`,
             icon: aspectMode === p.id ? 'radio_button_checked' : 'radio_button_unchecked',
-            description: p.ratio ? 'Resizes the Minecraft window to this shape and frames the camera view to match.' : undefined,
+            description: p.place === 'left'
+              ? 'Puts Minecraft at 16:9 in the left half of its screen and Blockbench in the right half, side by side.'
+              : p.ratio ? 'Resizes the Minecraft window to this shape and frames the camera view to match.' : undefined,
             click: () => setAspectMode(p.id),
           }
     );
@@ -1255,26 +1258,40 @@ $info.Size = [System.Runtime.InteropServices.Marshal]::SizeOf($info)
 [PoseStudioResize]::GetMonitorInfo([PoseStudioResize]::MonitorFromWindow($h, 2), [ref]$info) | Out-Null
 $workW = $info.Work.R - $info.Work.L
 $workH = $info.Work.B - $info.Work.T
-$availW = $workW - $borderW
+$areaW = $workW
+if ($Place -eq 'left') { $areaW = [int][Math]::Floor($workW / 2) }
+$availW = $areaW - $borderW
 $availH = $workH - $borderH
 if ($availW / $availH -gt $Ratio) { $ch = $availH; $cw = [int][Math]::Round($ch * $Ratio) } else { $cw = $availW; $ch = [int][Math]::Round($cw / $Ratio) }
 $ww = $cw + $borderW
 $wh = $ch + $borderH
-$x = $info.Work.L + [int](($workW - $ww) / 2)
+$x = $info.Work.L + [int](($areaW - $ww) / 2)
 $y = $info.Work.T + [int](($workH - $wh) / 2)
+if ($Place -eq 'left') { $x = $info.Work.L; $y = $info.Work.T }
 [PoseStudioResize]::SetWindowPos($h, [IntPtr]::Zero, $x, $y, $ww, $wh, 0x0014) | Out-Null
+if ($Place -eq 'left') {
+  # Blockbench takes the right half of the same screen
+  $bb = Get-Process | Where-Object { $_.ProcessName -like $HelperName -and $_.MainWindowHandle -ne 0 -and ($HelperTitle -eq '' -or $_.MainWindowTitle -like $HelperTitle) } | Select-Object -First 1
+  if ($bb) {
+    $b = $bb.MainWindowHandle
+    if ([PoseStudioResize]::IsIconic($b) -or [PoseStudioResize]::IsZoomed($b)) { [PoseStudioResize]::ShowWindow($b, 9) | Out-Null; Start-Sleep -Milliseconds 250 }
+    [PoseStudioResize]::SetWindowPos($b, [IntPtr]::Zero, $info.Work.L + $areaW, $info.Work.T, $workW - $areaW, $workH, 0x0014) | Out-Null
+  }
+}
 Start-Sleep -Milliseconds 300
 [PoseStudioResize]::GetClientRect($h, [ref]$cr) | Out-Null
 Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
 `;
 
-  // `target` lets tests point this at a harmless window instead of Minecraft.
+  // `target` lets tests point this at harmless windows instead of Minecraft (and Blockbench, which
+  // the left-half layout moves to the right half).
   function resizeMinecraftWindow(preset, target = { name: 'Minecraft.Windows*', title: '' }) {
     const childProcess = nodeRequire('child_process', 'resize the Minecraft window');
     if (!childProcess) return Promise.resolve(null);
     const quote = (v) => `'${String(v).replace(/'/g, "''")}'`;
     const script =
-      `$Ratio = ${preset.ratio}\n$NamePattern = ${quote(target.name)}\n$TitlePattern = ${quote(target.title)}\n` + RESIZE_PS1;
+      `$Ratio = ${preset.ratio}\n$Place = ${quote(preset.place || '')}\n$HelperName = ${quote(target.helperName || 'Blockbench*')}\n$HelperTitle = ${quote(target.helperTitle || '')}\n` +
+      `$NamePattern = ${quote(target.name)}\n$TitlePattern = ${quote(target.title)}\n` + RESIZE_PS1;
     const encoded = bufferClass().from(script, 'utf16le').toString('base64');
     return new Promise((resolve) => {
       childProcess.execFile(
@@ -1288,7 +1305,7 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
             return resolve(null);
           }
           const size = { width: Number(m[1]), height: Number(m[2]) };
-          Blockbench.showQuickMessage(`Pose Studio: Minecraft resized to ${size.width}×${size.height} (${preset.id})`, 2500);
+          Blockbench.showQuickMessage(`Pose Studio: Minecraft resized to ${size.width}×${size.height} (${preset.place === 'left' ? '16:9, left half of the screen' : preset.id})`, 2500);
           resolve(size);
         }
       );
@@ -2379,9 +2396,11 @@ Write-Output $Out
       if (link.connected) return;
       Blockbench.showMessageBox({
         title: 'Pose Studio',
-        message: `Minecraft reloaded its packs, and the link dropped while it did.
+        message: `The link to Minecraft dropped while it reloaded its packs.
 
-Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
+If Minecraft is back in the world, run /connect 127.0.0.1:${PORT} again.
+
+If it showed an error screen instead (a codeword like "Bat"), the reload didn't finish: worlds with large packs sometimes can't reload in place. Open the world again from Minecraft's menu (that loads every pack fresh, just like a reload), then run /connect 127.0.0.1:${PORT}.`,
       });
     }, 10000);
   }
@@ -5907,7 +5926,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
         title: 'Pose Studio: entities prepared',
         message:
           `Pose Studio prepared all ${state.list.length} entities in this world for Minecraft (${count} looks, counting variants and babies). Minecraft needs to reload its packs once to load them. ` +
-          "After that, adding any of these entities is instant.\n\nYou'll only be asked again when this world's packs change. Reload now?",
+          "After that, adding any of these entities is instant.\n\nYou'll only be asked again when this world's packs change. Reload now? (Or leave the world and open it again, which does the same and is more reliable in worlds with large packs.)",
         buttons: ['Reload now', 'Later'],
         confirm: 0,
         cancel: 1,
@@ -7973,6 +7992,14 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   // <changelog>
   const CHANGELOG = [
     {
+      "version": "0.43.0",
+      "date": "2026-10-02",
+      "changes": [
+        "New: Camera > Aspect Ratio > 16:9 Left Half. Puts Minecraft at 16:9 in the top-left half of its screen and Blockbench in the right half, side by side.",
+        "When Minecraft errors out while reloading its packs (a codeword like \"Bat\" in worlds with large packs), Pose Studio now explains what to do: open the world again from Minecraft's menu, which loads every pack fresh, then /connect."
+      ]
+    },
+    {
       "version": "0.42.1",
       "date": "2026-10-02",
       "changes": [
@@ -8550,7 +8577,7 @@ ${PLUGIN_URL}`,
 
   // for the plugin's own tests only (they set this flag); nothing happens otherwise
   if (typeof globalThis !== 'undefined' && globalThis.__POSE_STUDIO_TEST) {
-    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices };
+    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset };
   }
 
   Plugin.register('pose_studio', {

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.43.0 (2026-10-02)
+
+- New: Camera > Aspect Ratio > 16:9 Left Half. Puts Minecraft at 16:9 in the top-left half of its screen and Blockbench in the right half, side by side.
+- When Minecraft errors out while reloading its packs (a codeword like "Bat" in worlds with large packs), Pose Studio now explains what to do: open the world again from Minecraft's menu, which loads every pack fresh, then /connect.
+
 ## 0.42.1 (2026-10-02)
 
 - Fixed: some pack mobs showed a different model in Minecraft than in Blockbench (DragonCraft's companions came in as a larva in Blockbench and an adult dragon in game). Looks picked by text values, like a companion's growth stage, are now understood: every stage is prepared for Minecraft, Variant… has a Stage choice (larva, young, adult), and a new companion comes in as its adult.
