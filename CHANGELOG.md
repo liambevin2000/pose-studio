@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.44.3 (2026-10-02)
+
+- Fixed: animations on mobs were added on top of the idle pose the mob was set in when it was added, so mobs with a strong idle pose (DragonCraft's dragons: folded wings, curled neck and tail) came out scrambled. Like in Minecraft, animations now play on the model's own pose; anything you posed by hand stays on top. Taking every animation off brings back the idle pose.
+
 ## 0.44.2 (2026-10-02)
 
 - Fixed: big mobs (DragonCraft's dragons have 28 and 37 bones) animated differently in Minecraft. A copy in Minecraft can pose 19 bones, and they were picked by name, so the dragons' bodies and wing parts weren't among them. Now the 19 are the bones the mob's own animations use most, and left/right pairs stay together (no lopsided wings).

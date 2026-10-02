@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.44.2'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.44.3'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -5040,8 +5040,36 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     return delta;
   }
 
+  // A mob copy's bones as its model file has them (Blockbench rotations), before the idle pose the
+  // copy was set in when it was added. Minecraft plays an animation on the model file's pose, not on
+  // top of idle: a dragon's fly animation replaces its folded-wing idle, it isn't added to it.
+  const bindCache = new Map();
+  function bindRotations(content, info) {
+    const geometryId = info && info.key ? info.key.split('|')[1] : null;
+    if (!content || !geometryId) return null;
+    const cacheKey = `${geometryId}`;
+    if (bindCache.has(cacheKey) && bindCache.get(cacheKey).content === content) return bindCache.get(cacheKey).map;
+    const geometry = resolveGeometry(content.geometries, geometryId);
+    if (!geometry) return null;
+    const map = new Map(geometry.bones.map((b) => [String(b.name).toLowerCase(), b.rotation ? [-b.rotation[0], -b.rotation[1], b.rotation[2]] : [0, 0, 0]]));
+    bindCache.set(cacheKey, { content, map });
+    return map;
+  }
+
   // The base pose plus every layer's frame.
   function composePose(target, content, base, layers) {
+    // a mob with animations on: its bones start from the model's own pose (the idle pose it was
+    // added in comes off), keeping whatever was posed by hand on top
+    if (layers.length && target.entityId !== 'minecraft:player' && target.root && target.root.pose_entity) {
+      const bind = bindRotations(content, target.root.pose_entity);
+      if (bind) {
+        base = new Map([...base].map(([k, r]) => {
+          const rest = target.rest.get(k);
+          const b = bind.get(k);
+          return [k, rest && b && !k.endsWith('@p') ? r.map((v, i) => v - rest[i] + b[i]) : r.slice()];
+        }));
+      }
+    }
     const pose = new Map([...base].map(([k, r]) => [k, r.slice()]));
     const relative = new Set();
     for (const layer of layers) {
@@ -8294,6 +8322,13 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // <changelog>
   const CHANGELOG = [
     {
+      "version": "0.44.3",
+      "date": "2026-10-02",
+      "changes": [
+        "Fixed: animations on mobs were added on top of the idle pose the mob was set in when it was added, so mobs with a strong idle pose (DragonCraft's dragons: folded wings, curled neck and tail) came out scrambled. Like in Minecraft, animations now play on the model's own pose; anything you posed by hand stays on top. Taking every animation off brings back the idle pose."
+      ]
+    },
+    {
       "version": "0.44.2",
       "date": "2026-10-02",
       "changes": [
@@ -8904,7 +8939,7 @@ ${PLUGIN_URL}`,
 
   // for the plugin's own tests only (they set this flag); nothing happens otherwise
   if (typeof globalThis !== 'undefined' && globalThis.__POSE_STUDIO_TEST) {
-    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage };
+    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations };
   }
 
   Plugin.register('pose_studio', {
