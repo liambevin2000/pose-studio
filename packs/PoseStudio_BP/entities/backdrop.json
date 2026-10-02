@@ -7,8 +7,9 @@
       "is_summonable": true,
       "properties": {
         "pose:c": { "type": "int", "range": [0, 1], "default": 0, "client_sync": true },
-        "pose:r": { "type": "int", "range": [1, 100000], "default": 1000, "client_sync": true },
-        "pose:fy": { "type": "int", "range": [-100000, 100000], "default": -100000, "client_sync": true }
+        "pose:hx": { "type": "int", "range": [1, 100000], "default": 1000, "client_sync": true },
+        "pose:hy": { "type": "int", "range": [1, 100000], "default": 1000, "client_sync": true },
+        "pose:hz": { "type": "int", "range": [1, 100000], "default": 1000, "client_sync": true }
       }
     },
     "components": {

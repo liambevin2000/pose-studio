@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.47.1 (2026-10-02)
+
+- Fixed: Capture Entities Only left the world near the entities in the shot (the ground, nearby trees, torches). For the two cut-out shots, the blocks in a box around the entities and the camera are now saved, cleared, and walled in with the flat colour. Straight after, every block is put back exactly as it was. The normal shot, which the colours come from, is still taken first with nothing touched, so the light on them is the scene's.
+- While the blocks are out, block drops are off (a torch losing its wall drops nothing), and players standing in the box are held where they are. If the world closes mid-shot, the blocks go back when it opens again.
+- Fixed: packs with their own HUD (like DragonCraft's hotbar) showed in shots, because /hud doesn't reach them. Capture Screenshot and Capture Entities Only now press F1 (hide interface) for each shot, and press it again after.
+- Removed the Hide the ground option, which isn't needed now. Update the Minecraft packs (Check for Updates, then reopen the world).
+
 ## 0.47.0 (2026-10-02)
 
 - New: Capture Entities Only (in the Pose Studio menu, under Capture Screenshot). It saves the players and mobs on their own, without the world: a transparent PNG, and/or in front of the sky. It needs no developer build of Minecraft, and nothing in the scene is moved, so the light on them is exactly the scene's light. No HUD, no hand.

@@ -2,7 +2,7 @@
 // The Blockbench plugin runs commands through the /connect websocket as the player,
 // e.g. `/scriptevent pose:set {"id":"mq_1","p":[x,y,z],"b":[...21 angles]}`.
 // Positions arrive as block offsets from the anchor; angles are already in Bedrock convention.
-import { world, system } from "@minecraft/server";
+import { world, system, BlockVolume, StructureSaveMode } from "@minecraft/server";
 
 const TYPE = "pose:mannequin";
 const TAG_PREFIX = "pose_id.";
@@ -322,14 +322,33 @@ function setPlayerHidden(player, hide) {
   }
 }
 
-// `pose:backdrop {"c":0|1,"p":[x,y,z],"r":blocks,"fy":blocks}` — Entity Shots: a box of one flat,
-// unlit colour around the camera (p, from the anchor), r blocks each way, with a floor fy blocks
-// above the camera (none without fy). It hides the world behind the scene for a moment so
-// Blockbench can tell the scene from the background; nothing in the scene moves. {"off":1} removes it.
+// `pose:backdrop {"c":0|1,"p":[x,y,z],"h":[hx,hy,hz]}` — Entity Shots: for a moment, the blocks in
+// the box (centre p from the anchor, h blocks each way) are saved and cleared, and a box of one
+// flat, unlit colour (c: magenta or green) goes just inside its walls, so only Pose Studio's players
+// and mobs are left in front of it. Blockbench takes its two shots, then `{"off":1}` puts every block
+// back exactly as it was and removes the box. Nothing Pose Studio placed moves; players standing in
+// the box are held where they are. The saved blocks are kept in the world until they're back, so a
+// world closed mid-shot gets them back when it opens again.
 const BACKDROP_TYPE = "pose:backdrop";
 const BACKDROP_TAG = "pose_backdrop";
+const CLEARED_PROPERTY = "pose:cleared";
+const PIECE = 32; // 32×32×32 = the most one fill can change
+let heldPlayers = []; // [{ player, at, rotation }] while the box is cleared
+let shotActive = false; // blocks are out for a shot right now
+let holdRun; // the every-tick hold, only while blocks are out
 
-function removeBackdrops() {
+function holdPlayers() {
+  for (const held of heldPlayers) {
+    try {
+      const l = held.player.location;
+      if (Math.hypot(l.x - held.at.x, l.y - held.at.y, l.z - held.at.z) > 0.01) held.player.teleport(held.at, { rotation: held.rotation, keepVelocity: false });
+    } catch {
+      // left the game
+    }
+  }
+}
+
+function removeBackdropBoxes() {
   for (const dimension of ["overworld", "nether", "the_end"]) {
     try {
       for (const e of world.getDimension(dimension).getEntities({ tags: [BACKDROP_TAG] })) e.remove();
@@ -339,25 +358,104 @@ function removeBackdrops() {
   }
 }
 
+function restoreCleared() {
+  heldPlayers = [];
+  shotActive = false;
+  if (holdRun !== undefined) system.clearRun(holdRun);
+  holdRun = undefined;
+  const raw = world.getDynamicProperty(CLEARED_PROPERTY);
+  if (typeof raw !== "string") return;
+  let record;
+  try {
+    record = JSON.parse(raw);
+  } catch {
+    world.setDynamicProperty(CLEARED_PROPERTY, undefined);
+    return;
+  }
+  const dim = world.getDimension(record.dim);
+  const left = [];
+  for (const piece of record.pieces || []) {
+    try {
+      world.structureManager.place(piece.id, dim, piece.at, { includeEntities: false });
+      world.structureManager.delete(piece.id);
+    } catch (e) {
+      console.warn(`[Pose Studio] couldn't put back blocks at ${fmt(piece.at)} yet: ${e}`);
+      left.push(piece);
+    }
+  }
+  if (record.drops !== undefined) {
+    try {
+      world.gameRules.doTileDrops = record.drops;
+    } catch {
+      // older versions
+    }
+  }
+  world.setDynamicProperty(CLEARED_PROPERTY, left.length ? JSON.stringify(Object.assign(record, { pieces: left })) : undefined);
+}
+
+function clearBox(player, dim, min, max) {
+  restoreCleared(); // anything still out from an earlier shot goes back first
+  const record = { dim: dim.id, pieces: [] };
+  try {
+    record.drops = world.gameRules.doTileDrops;
+    world.gameRules.doTileDrops = false; // a torch losing its wall drops nothing
+  } catch {
+    // older versions
+  }
+  const stamp = Date.now().toString(36);
+  // saved first, all of it, then cleared
+  for (let x = min.x; x < max.x; x += PIECE) {
+    for (let y = min.y; y < max.y; y += PIECE) {
+      for (let z = min.z; z < max.z; z += PIECE) {
+        const from = { x, y, z };
+        const to = { x: Math.min(max.x, x + PIECE) - 1, y: Math.min(max.y, y + PIECE) - 1, z: Math.min(max.z, z + PIECE) - 1 };
+        const id = `pose:cleared_${stamp}_${record.pieces.length}`;
+        world.structureManager.createFromWorld(id, dim, from, to, { includeBlocks: true, includeEntities: false, saveMode: StructureSaveMode.World });
+        record.pieces.push({ id, at: from, to });
+      }
+    }
+  }
+  world.setDynamicProperty(CLEARED_PROPERTY, JSON.stringify(record));
+  shotActive = true;
+  for (const piece of record.pieces) dim.fillBlocks(new BlockVolume(piece.at, piece.to), "minecraft:air");
+  // players in the box would fall: held where they are until the blocks are back
+  heldPlayers = world.getAllPlayers()
+    .filter((p) => p.dimension.id === dim.id)
+    .filter((p) => ["x", "y", "z"].every((k) => p.location[k] >= min[k] - 2 && p.location[k] <= max[k] + 2))
+    .map((p) => ({ player: p, at: Object.assign({}, p.location), rotation: p.getRotation() }));
+  if (heldPlayers.length) holdRun = system.runInterval(holdPlayers, 1);
+}
+
 function setBackdrop(player, data) {
-  if (data.off) return removeBackdrops();
+  if (data.off) {
+    removeBackdropBoxes();
+    restoreCleared();
+    return;
+  }
   const anchor = requireAnchor(player);
-  if (!finite(data.p)) throw new Error("backdrop needs p:[x,y,z]");
+  if (!finite(data.p) || !finite(data.h)) throw new Error("backdrop needs p:[x,y,z] and h:[x,y,z]");
   const dim = world.getDimension(anchor.dim);
-  const at = toWorld(anchor, data.p.map(Number));
+  const centre = toWorld(anchor, data.p.map(Number));
+  const half = data.h.map((v) => Math.max(1, Math.min(64, Number(v))));
+  // the blocks: whole blocks covering the box
+  const min = { x: Math.floor(centre.x - half[0]), y: Math.floor(centre.y - half[1]), z: Math.floor(centre.z - half[2]) };
+  const max = { x: Math.ceil(centre.x + half[0]), y: Math.ceil(centre.y + half[1]), z: Math.ceil(centre.z + half[2]) };
+  if (data.clear && world.getDynamicProperty(CLEARED_PROPERTY) === undefined) clearBox(player, dim, min, max);
+  // the walls: just inside the cleared blocks, so the blocks beyond are hidden without flicker
+  const mid = { x: (min.x + max.x) / 2, y: (min.y + max.y) / 2, z: (min.z + max.z) / 2 };
   let box = dim.getEntities({ tags: [BACKDROP_TAG] })[0];
   if (!box) {
-    box = dim.spawnEntity(BACKDROP_TYPE, at);
+    box = dim.spawnEntity(BACKDROP_TYPE, mid);
     box.addTag(BACKDROP_TAG);
   } else {
-    box.teleport(at, { dimension: dim });
+    box.teleport(mid, { dimension: dim });
   }
-  const r = Math.max(0.01, Math.min(1000, Number(data.r) || 10));
-  box.setProperty("pose:r", Math.round(r * 100));
+  box.setProperty("pose:hx", Math.round(((max.x - min.x) / 2 - 0.05) * 100));
+  box.setProperty("pose:hy", Math.round(((max.y - min.y) / 2 - 0.05) * 100));
+  box.setProperty("pose:hz", Math.round(((max.z - min.z) / 2 - 0.05) * 100));
   box.setProperty("pose:c", data.c ? 1 : 0);
-  const fy = Number(data.fy);
-  box.setProperty("pose:fy", Number.isFinite(fy) ? Math.max(-99999, Math.min(100000, Math.round(fy * 100))) : -100000);
 }
+
 
 // `/scriptevent pose:debug` — prints what each mannequin has actually received.
 function debug(player) {
@@ -782,7 +880,11 @@ function removeLeftoverHolders() {
 }
 system.runTimeout(removeLeftoverHolders, 20);
 // an Entity Shot backdrop left behind (the world closed mid-shot)
-system.runTimeout(removeBackdrops, 20);
+system.runTimeout(removeBackdropBoxes, 20);
+// blocks still out (the world closed mid-shot, or their chunks weren't loaded yet) go back as soon as they can
+system.runInterval(() => {
+  if (!shotActive && world.getDynamicProperty(CLEARED_PROPERTY) !== undefined) restoreCleared();
+}, 40);
 // invisible seats left by first-person shots (0.45, since removed)
 system.runTimeout(() => {
   for (const dimension of ["overworld", "nether", "the_end"]) {

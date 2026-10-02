@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.47.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.47.1'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -2029,6 +2029,7 @@ public static class PoseStudioWin {
   [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
   [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out RECT r);
   [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr h, ref POINT p);
+  [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
   [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
 }
@@ -2040,6 +2041,10 @@ $hwnd = $proc.MainWindowHandle
 if ([PoseStudioWin]::IsIconic($hwnd)) { [PoseStudioWin]::ShowWindow($hwnd, 9) | Out-Null }
 [PoseStudioWin]::SetForegroundWindow($hwnd) | Out-Null
 Start-Sleep -Milliseconds 600
+# F1 hides Minecraft's whole interface (packs' own HUDs too, which /hud doesn't reach); again after
+function Press-F1 { [PoseStudioWin]::keybd_event(0x70, 0x3B, 0, [UIntPtr]::Zero); Start-Sleep -Milliseconds 30; [PoseStudioWin]::keybd_event(0x70, 0x3B, 2, [UIntPtr]::Zero) }
+Press-F1
+Start-Sleep -Milliseconds 350
 $rect = New-Object PoseStudioWin+RECT
 [PoseStudioWin]::GetClientRect($hwnd, [ref]$rect) | Out-Null
 $pt = New-Object PoseStudioWin+POINT
@@ -2049,6 +2054,7 @@ $height = $rect.B - $rect.T
 $bmp = New-Object System.Drawing.Bitmap $width, $height
 $gfx = [System.Drawing.Graphics]::FromImage($bmp)
 $gfx.CopyFromScreen($pt.X, $pt.Y, 0, 0, $bmp.Size)
+Press-F1
 $bmp.Save($Out, [System.Drawing.Imaging.ImageFormat]::Png)
 $gfx.Dispose(); $bmp.Dispose()
 Write-Output $Out
@@ -2084,13 +2090,14 @@ Write-Output $Out
   // ---- Entity shots --------------------------------------------------------------------------
   // Pose Studio ▸ Capture Entities Only: the players and mobs on their own, cut out of the world
   // without moving anything (so they keep exactly the scene's light). Shots are taken from the game
-  // camera: the normal one, then two with a box of flat colour (magenta, then green) around the
-  // camera hiding the world behind the scene. Only the background changes between those two, by a
-  // known amount, so how much each pixel changed says how much of the background shows through it.
-  // The colour comes from the normal shot. "On the sky" puts them in front of a shot of the sky
+  // camera: the normal one, then two with the world around the scene (and the camera) cleared for a
+  // moment and a box of flat colour (magenta, then green) where it was. Only the background changes
+  // between those two, by a known amount, so how much each pixel changed says how much of the
+  // background shows through it. The blocks go back exactly as they were straight after. The colour
+  // comes from the normal shot, taken before anything was cleared. "On the sky" puts them in front of a shot of the sky
   // taken from straight above the camera, looking the same way.
   const ENTITY_SHOT_KEY = 'pose_studio_entity_shot';
-  const ENTITY_SHOT_DEFAULTS = { floor: true, transparent: true, sky: true, full: false };
+  const ENTITY_SHOT_DEFAULTS = { transparent: true, sky: true, full: false };
   const SKY_RISE = 256; // blocks the camera goes up for the sky shot
   let shooting = false; // the camera isn't synced while an entity shot is being taken
 
@@ -2114,15 +2121,14 @@ Write-Output $Out
         transparent: { label: 'Save the entities on their own (transparent PNG, no sky)', type: 'checkbox', value: o.transparent },
         sky: { label: 'Save the entities on the sky', type: 'checkbox', value: o.sky },
         full: { label: 'Also save the normal shot', type: 'checkbox', value: o.full },
-        floor: { label: 'Hide the ground they stand on', type: 'checkbox', value: o.floor },
         info: {
           type: 'info',
           text: 'Capture Entities Only shoots from the game camera (Sync Game Camera on) and keeps everything where it is, so the light on the players and mobs is the light of the scene. ' +
-            "Hiding the ground covers it just below the lowest foot; turn it off for shots from below or of things in the air. Anything of the world between the camera and the entities (grass at their feet, say) stays in the shot.",
+            'For the cut-out, the blocks around them and the camera are cleared for about two seconds and then put back exactly as they were. The HUD is hidden with F1 for each shot.',
         },
       },
       onConfirm(form) {
-        const next = { floor: !!form.floor, transparent: !!form.transparent, sky: !!form.sky, full: !!form.full };
+        const next = { transparent: !!form.transparent, sky: !!form.sky, full: !!form.full };
         try {
           localStorage.setItem(ENTITY_SHOT_KEY, JSON.stringify(next));
         } catch (e) {
@@ -2267,21 +2273,26 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     return canvas.toDataURL('image/png').split(',')[1];
   }
 
-  // Where the backdrop goes: centred on the game camera, past the farthest entity; the floor just
-  // under the lowest foot (when the camera is above it). Offsets in blocks from the anchor.
-  function backdropPlan(camera, roots, floor) {
-    let far = 0;
-    let low = Infinity;
+  // The box that's cleared and walled off: around every entity (2 blocks spare, for armour and
+  // what they hold) and the camera. Centre and half sizes, in blocks from the anchor.
+  const MAX_BACKDROP_HALF = 64;
+  function backdropPlan(camera, roots) {
+    const min = camera.map((v) => v - 1);
+    const max = camera.map((v) => v + 1);
     for (const root of roots) {
       for (const v of modelSpacePoints(root)) {
         const w = toWorld(v.toArray());
-        far = Math.max(far, Math.hypot(w[0] - camera[0], w[1] - camera[1], w[2] - camera[2]));
-        low = Math.min(low, w[1]);
+        for (let i = 0; i < 3; i++) {
+          min[i] = Math.min(min[i], w[i] - 2);
+          max[i] = Math.max(max[i], w[i] + 2);
+        }
       }
     }
-    const plan = { p: camera.map((v) => round(v, 3)), r: round(Math.max(6, far + 4), 2) };
-    if (floor && Number.isFinite(low) && camera[1] > low + 0.05) plan.fy = round(low + 0.02 - camera[1], 3);
-    return plan;
+    const half = max.map((v, i) => round((v - min[i]) / 2, 2));
+    if (half.some((h) => h > MAX_BACKDROP_HALF)) {
+      throw new Error(`The camera and the entities are too far apart for an entity shot (at most ${MAX_BACKDROP_HALF * 2} blocks across). Move the camera closer.`);
+    }
+    return { p: min.map((v, i) => round((v + max[i]) / 2, 3)), h: half };
   }
 
   async function captureEntities() {
@@ -2303,7 +2314,13 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
       return;
     }
     const cam = JSON.parse(camText);
-    const plan = backdropPlan(cam.p, roots, options.floor);
+    let plan;
+    try {
+      plan = backdropPlan(cam.p, roots);
+    } catch (e) {
+      Blockbench.showMessageBox({ title: 'Capture Entities Only', message: e.message });
+      return;
+    }
     const why = 'run PowerShell to screenshot the Minecraft window';
     const grab = () => runPowerShell(GRAB_PS1, '', why);
     const shots = {};
@@ -2313,8 +2330,8 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
       await link.command('hud @s hide all');
       await sleep(250);
       shots.a = await grab();
-      await link.command(`scriptevent pose:backdrop ${JSON.stringify(Object.assign({ c: 0 }, plan))}`);
-      await sleep(1200);
+      await link.command(`scriptevent pose:backdrop ${JSON.stringify(Object.assign({ c: 0, clear: 1 }, plan))}`);
+      await sleep(1500);
       shots.m = await grab();
       await link.command(`scriptevent pose:backdrop ${JSON.stringify(Object.assign({ c: 1 }, plan))}`);
       await sleep(900);
@@ -8641,6 +8658,16 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.47.1",
+      "date": "2026-10-02",
+      "changes": [
+        "Fixed: Capture Entities Only left the world near the entities in the shot (the ground, nearby trees, torches). For the two cut-out shots, the blocks in a box around the entities and the camera are now saved, cleared, and walled in with the flat colour. Straight after, every block is put back exactly as it was. The normal shot, which the colours come from, is still taken first with nothing touched, so the light on them is the scene's.",
+        "While the blocks are out, block drops are off (a torch losing its wall drops nothing), and players standing in the box are held where they are. If the world closes mid-shot, the blocks go back when it opens again.",
+        "Fixed: packs with their own HUD (like DragonCraft's hotbar) showed in shots, because /hud doesn't reach them. Capture Screenshot and Capture Entities Only now press F1 (hide interface) for each shot, and press it again after.",
+        "Removed the Hide the ground option, which isn't needed now. Update the Minecraft packs (Check for Updates, then reopen the world)."
+      ]
+    },
     {
       "version": "0.47.0",
       "date": "2026-10-02",

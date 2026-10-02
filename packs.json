@@ -1,11 +1,11 @@
 {
-  "version": "0.47.0",
-  "revision": "9bbb89860a5d",
+  "version": "0.47.1",
+  "revision": "15d634a7524d",
   "files": [
     {
       "path": "PoseStudio_BP/entities/backdrop.json",
-      "size": 1110,
-      "sha1": "72903d9ea40dc8fd3c7b286abe2bd54c754f15eb"
+      "size": 1200,
+      "sha1": "9bb3bff7a0a8ce66f550bb1cfb869cbce4a8f29c"
     },
     {
       "path": "PoseStudio_BP/entities/mannequin.json",
@@ -19,13 +19,13 @@
     },
     {
       "path": "PoseStudio_BP/scripts/main.js",
-      "size": 35110,
-      "sha1": "11b7695d6ff6f4a88b42da59354fe9ef9addea87"
+      "size": 39728,
+      "sha1": "8e9a7c8ce13b87862905ce1c706884a3fb204b1a"
     },
     {
       "path": "PoseStudio_RP/animations/backdrop.animation.json",
-      "size": 403,
-      "sha1": "3f02ee51c1f5de0d38d4d4d7ef9636910cbf3792"
+      "size": 341,
+      "sha1": "4ba08056320d5341326e6f7abdcf7a4fc5dc813e"
     },
     {
       "path": "PoseStudio_RP/animations/mannequin.animation.json",
@@ -49,8 +49,8 @@
     },
     {
       "path": "PoseStudio_RP/models/entity/backdrop.geo.json",
-      "size": 12419,
-      "sha1": "91f20f69bdbc7a3b24c427e1539216ec5f4c08d1"
+      "size": 10588,
+      "sha1": "6b1b9dcf7578e83e1f2cb1b02b444e8ea30d812c"
     },
     {
       "path": "PoseStudio_RP/models/entity/mannequin.geo.json",
@@ -59,8 +59,8 @@
     },
     {
       "path": "PoseStudio_RP/render_controllers/backdrop.render_controllers.json",
-      "size": 622,
-      "sha1": "a41bdd309a27e79e1458504e6ef0963ecb2400da"
+      "size": 472,
+      "sha1": "5e123dbbbbdd2057343e0f3f51ae4b3d1d4a3a17"
     },
     {
       "path": "PoseStudio_RP/render_controllers/mannequin.render_controllers.json",

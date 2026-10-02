@@ -76,7 +76,7 @@ Everything is in the **Pose Studio** menu, next to Tools:
 | **Camera ▸ Look Through Camera / Follow Viewport** | Moves the working view to the active camera / makes the game camera follow the viewport instead of a camera. |
 | **Import World…** | Brings the terrain around you into Blockbench as a `world_scan` mesh. The data comes back in large checked batches, several times faster than before. |
 | **Capture Screenshot** | Hides the HUD and saves the Minecraft window to `Pictures/Pose Studio`. |
-| **Capture Entities Only** | Saves the players and mobs on their own from the game camera: a transparent PNG and/or on the sky. Nothing moves, so the light is the scene's. Needs Sync Game Camera. **Entity Shot Options…** picks what is saved and whether the ground under them is hidden. |
+| **Capture Entities Only** | Saves the players and mobs on their own from the game camera: a transparent PNG and/or on the sky. The normal shot is taken first, with nothing moved, so the light is the scene's. For the cut-out, the blocks around them are cleared for about two seconds and then put back exactly. Needs Sync Game Camera. **Entity Shot Options…** picks what is saved. |
 | **More ▸** | Recenter Scene on Me, Skin Library… (manage skins with nothing selected), Reload Minecraft Packs, Remove Mannequins from World. Check for Updates, Debug Info and Held Items on Entities are on the plugin page (File → Plugins → Pose Studio → Settings). |
 
 The **active camera** is the last `cam_N` group you selected. It stays active while you select and pose other things, until you pick another camera or choose **More ▸ Follow Viewport**.
