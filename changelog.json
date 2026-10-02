@@ -1,5 +1,12 @@
 [
   {
+    "version": "0.44.4",
+    "date": "2026-10-02",
+    "changes": [
+      "Fixed: after Minecraft updated, Skin & Equipment, Add Entity… and other windows could fail with \"ENOENT … resource_packs\": Pose Studio kept looking in the old version's install folder. It now notices the folder is gone and finds Minecraft again."
+    ]
+  },
+  {
     "version": "0.44.3",
     "date": "2026-10-02",
     "changes": [

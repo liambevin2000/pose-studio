@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.44.4 (2026-10-02)
+
+- Fixed: after Minecraft updated, Skin & Equipment, Add Entity… and other windows could fail with "ENOENT … resource_packs": Pose Studio kept looking in the old version's install folder. It now notices the folder is gone and finds Minecraft again.
+
 ## 0.44.3 (2026-10-02)
 
 - Fixed: animations on mobs were added on top of the idle pose the mob was set in when it was added, so mobs with a strong idle pose (DragonCraft's dragons: folded wings, curled neck and tail) came out scrambled. Like in Minecraft, animations now play on the model's own pose; anything you posed by hand stays on top. Taking every animation off brings back the idle pose.

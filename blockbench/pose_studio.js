@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.44.3'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.44.4'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -4515,12 +4515,22 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   }
 
   // The Minecraft install's data folder (vanilla packs), found once via PowerShell.
+  // Minecraft installs into a folder named after its version, so an update moves it: a remembered
+  // folder is only used while it's still there; otherwise Minecraft is found again.
   let installDataCache = null;
+  function installStillThere(dir) {
+    try {
+      return installFs(dir).existsSync(`${dir}\\resource_packs`);
+    } catch (e) {
+      return false;
+    }
+  }
   function findInstallData() {
-    if (installDataCache) return Promise.resolve(installDataCache);
+    if (installDataCache && installStillThere(installDataCache)) return Promise.resolve(installDataCache);
+    installDataCache = null;
     try {
       const saved = localStorage.getItem('pose_studio_install_data');
-      if (saved) return Promise.resolve((installDataCache = saved));
+      if (saved && installStillThere(saved)) return Promise.resolve((installDataCache = saved));
     } catch (e) {
       // storage unavailable
     }
@@ -4542,12 +4552,13 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     });
   }
 
-  let installFsCache = null;
+  const installFsCache = new Map(); // install folder -> file access (a new version is a new folder)
   function installFs(installData) {
-    if (installFsCache) return installFsCache;
+    if (installFsCache.has(installData)) return installFsCache.get(installData);
     const fs = requireNativeModule('fs', { scope: installData, message: "Pose Studio reads Minecraft's built-in models and textures." });
     if (!fs) throw new Error('Access to the Minecraft install was denied.');
-    return (installFsCache = fs);
+    installFsCache.set(installData, fs);
+    return fs;
   }
 
   // One fs-like object over both roots (the scanner only reads).
@@ -4564,12 +4575,12 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   let contentCache = null; // { worldPath, content, list }
   async function loadWorldContent(world, force) {
     const installData = await findInstallData();
-    if (!force && contentCache && contentCache.worldPath === (world && world.path)) return contentCache;
+    if (!force && contentCache && contentCache.worldPath === (world && world.path) && contentCache.installData === installData) return contentCache;
     const fs = combinedFs(installData);
     const content = loadContent(fs, { installData, bedrockRoot: bedrockRoot(), world });
     const list = entityList(content).filter((e) => findTexture(content, e.texturePath));
     content.world = world ? world.name : '';
-    contentCache = { worldPath: world && world.path, world, content, list };
+    contentCache = { worldPath: world && world.path, world, content, list, installData };
     return contentCache;
   }
 
@@ -8321,6 +8332,13 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.44.4",
+      "date": "2026-10-02",
+      "changes": [
+        "Fixed: after Minecraft updated, Skin & Equipment, Add Entity… and other windows could fail with \"ENOENT … resource_packs\": Pose Studio kept looking in the old version's install folder. It now notices the folder is gone and finds Minecraft again."
+      ]
+    },
     {
       "version": "0.44.3",
       "date": "2026-10-02",
