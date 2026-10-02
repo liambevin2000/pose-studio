@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.42.0 (2026-10-02)
+
+- New: Drop to Ground (Pose Studio menu). Stands the selected players and mobs on the imported terrain under their feet (the highest ground they cover; with no terrain under them, the anchor's floor). The lowest point of a posed model is what lands, so a raised foot stays raised.
+- New: mob bones move as well as turn, like players: in Animation… (pack animations that shift bones) and by hand, in Blockbench and in Minecraft. Mobs with up to 9 posable bones move on every bone; bigger models move their main bones (body, legs, arms, head, wings, tails) as room allows. Open Add Entity… once and reload Minecraft's packs when asked, so the copies pick this up.
+- New: framing grid (rule of thirds) in the camera view: the grid button under the camera view's move buttons. The lines cover the camera's picture, and it remembers whether it was on.
+
 ## 0.41.0 (2026-10-01)
 
 - Removed the sun tilt from Time & Weather. If you applied a tilt, Pose Studio takes its lighting copies out of its pack when Blockbench starts, so the packs' own lighting applies again (reopen the world to see it).

@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.41.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.42.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -710,6 +710,8 @@
     povLabel = null;
     if (povNav) povNav.remove();
     povNav = null;
+    if (povGrid) povGrid.remove();
+    povGrid = null;
     if (povFov) povFov.box.remove();
     povFov = null;
     removePovTimeBox();
@@ -813,6 +815,7 @@
     }
     if (!povPreview || !povPreview.camera || typeof Project === 'undefined' || !Project) return;
     checkPovProjection();
+    placePovGrid();
     const cam = activeCamera();
     syncPovFovSlider();
     if (povLabel) {
@@ -869,10 +872,77 @@
       button.addEventListener('pointerdown', (e) => startNavDrag(b.mode, e, button));
       bar.appendChild(button);
     }
+    // the rule-of-thirds grid
+    const gridButton = document.createElement('div');
+    gridButton.title = 'Framing grid (thirds)';
+    Object.assign(gridButton.style, {
+      width: '28px', height: '28px', display: 'flex', alignItems: 'center', justifyContent: 'center', marginTop: '4px',
+      color: '#fff', borderRadius: '4px', cursor: 'pointer', userSelect: 'none', borderTop: '1px solid rgba(255, 255, 255, 0.2)',
+    });
+    gridButton.innerHTML = '<i class="material-icons" style="font-size: 20px; pointer-events: none;">grid_on</i>';
+    const showState = () => (gridButton.style.background = gridOn() ? 'rgba(255, 255, 255, 0.28)' : '');
+    gridButton.addEventListener('click', () => {
+      setGridOn(!gridOn());
+      showState();
+      placePovGrid();
+    });
+    showState();
+    bar.appendChild(gridButton);
     node.appendChild(bar);
+    povGrid = createPovGrid(node);
     createPovFovSlider(node);
     createPovTimeBox(node);
     return bar;
+  }
+
+  // ---- Framing grid ----------------------------------------------------------------------------
+  // Lines at the thirds of the camera view's picture (the camera's frame, not the letterboxing).
+  let povGrid = null;
+  let gridState = null; // remembered between sessions when storage allows
+  function gridOn() {
+    if (gridState === null) {
+      try {
+        gridState = localStorage.getItem('pose_studio_grid') === '1';
+      } catch (e) {
+        gridState = false;
+      }
+    }
+    return gridState;
+  }
+  function setGridOn(on) {
+    gridState = !!on;
+    try {
+      localStorage.setItem('pose_studio_grid', on ? '1' : '0');
+    } catch (e) {
+      // storage unavailable: on for this session only
+    }
+  }
+  function createPovGrid(node) {
+    const grid = document.createElement('div');
+    grid.className = 'pose_studio_pov_grid';
+    Object.assign(grid.style, { position: 'absolute', zIndex: 5, pointerEvents: 'none', display: 'none' });
+    const line = (style) => {
+      const l = document.createElement('div');
+      Object.assign(l.style, { position: 'absolute', background: 'rgba(255, 255, 255, 0.55)', boxShadow: '0 0 1px rgba(0, 0, 0, 0.8)' }, style);
+      grid.appendChild(l);
+    };
+    for (const at of ['33.333%', '66.667%']) {
+      line({ left: at, top: '0', bottom: '0', width: '1px' });
+      line({ top: at, left: '0', right: '0', height: '1px' });
+    }
+    node.appendChild(grid);
+    return grid;
+  }
+  function placePovGrid() {
+    if (!povGrid || !povPreview) return;
+    const canvas = povPreview.canvas;
+    if (!gridOn() || !canvas) {
+      povGrid.style.display = 'none';
+      return;
+    }
+    const at = { left: `${canvas.offsetLeft}px`, top: `${canvas.offsetTop}px`, width: `${canvas.offsetWidth}px`, height: `${canvas.offsetHeight}px` };
+    for (const [k, v] of Object.entries(at)) if (povGrid.style[k] !== v) povGrid.style[k] = v;
+    if (povGrid.style.display !== 'block') povGrid.style.display = 'block';
   }
 
   // FOV slider along the camera view's bottom-left corner, for the active camera.
@@ -1494,6 +1564,94 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
     const cam = toLocal(preview.camera.position);
     const yaw = Math.atan2(-(cam.x - point.x), -(cam.z - point.z)) / DEG;
     return { origin: [Math.round(point.x), Math.round(point.y), Math.round(point.z)], yaw: round(yaw, 1) };
+  }
+
+  // Pose Studio ▸ Drop to Ground: the selected players and mobs stand on the imported terrain under
+  // them (the highest ground under their feet), or on the anchor's floor with no terrain imported.
+  function modelSpacePoints(root) {
+    // every corner of the model's own cubes (not equipment), posed, in Blockbench model space
+    const points = [];
+    const turn = (v, origin, rotation) => {
+      if (!rotation || !rotation.some((r) => r)) return v;
+      return v.clone().sub(new THREE.Vector3(...origin)).applyQuaternion(eulerQuaternion(rotation)).add(new THREE.Vector3(...origin));
+    };
+    root.forEachChild((c) => {
+      if (!(c instanceof Cube) || /^eq_/.test(c.name) || !c.from || !c.to) return;
+      const inflate = c.inflate || 0;
+      for (let i = 0; i < 8; i++) {
+        let v = new THREE.Vector3(
+          i & 1 ? c.to[0] + inflate : c.from[0] - inflate,
+          i & 2 ? c.to[1] + inflate : c.from[1] - inflate,
+          i & 4 ? c.to[2] + inflate : c.from[2] - inflate
+        );
+        v = turn(v, c.origin || [0, 0, 0], c.rotation);
+        for (let g = c.parent; g instanceof Group; g = g.parent) {
+          v = turn(v, g.origin, g.rotation);
+          if (g === root) break;
+        }
+        points.push(v);
+      }
+    });
+    return points;
+  }
+
+  // The imported terrain's upward faces: [{ y, minX, maxX, minZ, maxZ }] (Blockbench model space).
+  function scanFloors() {
+    const floors = [];
+    for (const el of (typeof Project !== 'undefined' && Project && Project.elements) || []) {
+      if (el.name !== WORLD_GROUP || !el.vertices || !el.faces) continue;
+      const at = el.origin || [0, 0, 0];
+      for (const face of Object.values(el.faces)) {
+        const vs = (face.vertices || []).map((k) => el.vertices[k]).filter(Boolean).map((v) => [v[0] + at[0], v[1] + at[1], v[2] + at[2]]);
+        if (vs.length < 3 || vs.some((v) => Math.abs(v[1] - vs[0][1]) > 1e-3)) continue;
+        // facing up: the face's winding, seen from above, is anticlockwise
+        const n = new THREE.Vector3(...vs[1]).sub(new THREE.Vector3(...vs[0])).cross(new THREE.Vector3(...vs[2]).sub(new THREE.Vector3(...vs[0])));
+        if (n.y <= 0) continue;
+        floors.push({ y: vs[0][1], minX: Math.min(...vs.map((v) => v[0])), maxX: Math.max(...vs.map((v) => v[0])), minZ: Math.min(...vs.map((v) => v[2])), maxZ: Math.max(...vs.map((v) => v[2])) });
+      }
+    }
+    return floors;
+  }
+
+  function dropToGround() {
+    const posable = (g) => MANNEQUIN_PREFIX.test(g.name) || ENTITY_PREFIX.test(g.name);
+    const roots = (selectedPoseRoots().filter(posable).length ? selectedPoseRoots().filter(posable) : [selectedPoseRoot()].filter((g) => g && posable(g)));
+    if (!roots.length) {
+      Blockbench.showQuickMessage('Select players (Player_) or mobs (ent_) first', 2000);
+      return;
+    }
+    const floors = scanFloors();
+    const cubes = [];
+    for (const root of roots) root.forEachChild((c) => c instanceof Cube && cubes.push(c));
+    Undo.initEdit({ outliner: true, elements: cubes, groups: roots });
+    let moved = 0;
+    let onAnchor = 0;
+    for (const root of roots) {
+      const points = modelSpacePoints(root);
+      if (!points.length) continue;
+      const box = new THREE.Box3().setFromPoints(points);
+      // the feet: the model's lowest few pixels, in plan
+      const feet = points.filter((v) => v.y <= box.min.y + 2);
+      const fx = [Math.min(...feet.map((v) => v.x)), Math.max(...feet.map((v) => v.x))];
+      const fz = [Math.min(...feet.map((v) => v.z)), Math.max(...feet.map((v) => v.z))];
+      let ground = -Infinity;
+      for (const f of floors) {
+        if (f.y > box.max.y) continue; // a roof over its head isn't ground
+        if (f.maxX < fx[0] || f.minX > fx[1] || f.maxZ < fz[0] || f.minZ > fz[1]) continue;
+        ground = Math.max(ground, f.y);
+      }
+      if (!Number.isFinite(ground)) {
+        ground = 0; // no terrain under it: the anchor block's top
+        onAnchor++;
+      }
+      const dy = round(ground - box.min.y, 4);
+      if (Math.abs(dy) < 1e-3) continue;
+      translateTree(root, [0, dy, 0]);
+      moved++;
+    }
+    Undo.finishEdit('Drop to ground', { outliner: true, elements: cubes, groups: roots });
+    Canvas.updateAll();
+    Blockbench.showQuickMessage(moved ? `Dropped ${moved} to the ground${onAnchor ? ` (${onAnchor} with no terrain under them: onto the anchor's floor)` : ''}` : 'Already on the ground', 2500);
   }
 
   // The anchor (the world block Blockbench's origin sits on) is set automatically: whenever the
@@ -4466,13 +4624,22 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     const rest = new Map();
     if (ENTITY_PREFIX.test(root.name) && root.pose_entity) {
       for (const [name, r] of Object.entries(root.pose_entity.rest || {})) rest.set(name.toLowerCase(), r.slice());
-      return { root, entityId: root.pose_entity.entity, groups, rest };
+      // bones with room to move in Minecraft move here too (held from the outside in)
+      const movable = new Map();
+      for (const bone of movingBones(root.pose_entity.bones || [])) if (groups.has(bone.toLowerCase())) movable.set(bone.toLowerCase(), true);
+      const depth = (key) => {
+        let n = 0;
+        for (let g = groups.get(key); g && g !== root && g instanceof Group; g = g.parent) n++;
+        return n;
+      };
+      const moveOrder = [...movable.keys()].sort((a, b) => depth(a) - depth(b));
+      return { root, entityId: root.pose_entity.entity, groups, rest, movable, moveOrder, offsetOf: (key) => entityOffset(root, key) };
     }
     for (const name of groups.keys()) rest.set(name, [0, 0, 0]);
     // the rig's bones also move (their offset is kept as "<bone>@p")
     const movable = new Map();
     for (const key of Object.keys(RIG_REST)) if (mannequinBone(root, key)) movable.set(key, true);
-    return { root, entityId: 'minecraft:player', groups, rest, movable };
+    return { root, entityId: 'minecraft:player', groups, rest, movable, moveOrder: Object.keys(RIG_REST), offsetOf: (key) => boneOffset(root, key) };
   }
 
   function carriedCubes(root) {
@@ -4484,7 +4651,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   // The pose a model has now: bone rotations, and bone offsets.
   function capturePose(target) {
     const pose = new Map([...target.groups].map(([k, g]) => [k, g.rotation.slice()]));
-    for (const key of (target.movable || new Map()).keys()) pose.set(`${key}@p`, boneOffset(target.root, key));
+    for (const key of (target.movable || new Map()).keys()) pose.set(`${key}@p`, target.offsetOf(key));
     return pose;
   }
 
@@ -4584,11 +4751,11 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
       if (r) for (let i = 0; i < 3; i++) group.rotation[i] = round(wrap(r[i]), 3);
     }
     // holders first, so a moved bone's own offset is measured after its holder moved
-    for (const key of Object.keys(RIG_REST)) {
+    for (const key of target.moveOrder || []) {
       if (!target.movable || !target.movable.has(key)) continue;
       const want = pose.get(`${key}@p`);
       if (!want) continue;
-      const now = boneOffset(target.root, key);
+      const now = target.offsetOf(key);
       const d = want.map((v, i) => round(v - now[i], 4));
       if (d.some((v) => Math.abs(v) > 1e-4)) translateTree(target.groups.get(key), d);
     }
@@ -5116,6 +5283,47 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   }
 
   // Which bones can be posed in game (first 20): named limbs first, then bones with cubes.
+  // Which of a copy's posable bones can also move: as many as fit in the 60 values after the turns
+  // (all of them up to 9 bones; none at 19).
+  // The bones that matter most get them (body, legs, arms, head, wings, tails before hat layers
+  // and item points, which ride along with their holders anyway); they keep the model's order.
+  function movingBones(bones) {
+    const room = Math.max(0, Math.min(bones.length, Math.floor((PACKED_PROPS * 2 - 3 - bones.length * 3) / 3)));
+    const score = (name) =>
+      (/item/i.test(name) ? -2 : 0) + (/^hat$|layer|jacket|sleeve|pants/i.test(name) ? -1 : 0) +
+      (/body|waist|torso|leg|arm|head|neck|wing|tail|hip|chest|spine|jaw/i.test(name) ? 2 : 0);
+    const keep = new Set(bones.map((name, i) => ({ name, i, s: score(name) })).sort((a, b) => b.s - a.s || a.i - b.i).slice(0, room).map((x) => x.name));
+    return bones.filter((name) => keep.has(name));
+  }
+
+  // Where every bone of an entity copy sits at rest, relative to the copy's origin (lower-case name).
+  function entityPivots(root) {
+    const out = {};
+    eachDescendant(root, (node) => {
+      if (node instanceof Group && !/^eq_/.test(node.name) && !out[node.name.toLowerCase()]) out[node.name.toLowerCase()] = node.origin.map((v, i) => round(v - root.origin[i], 4));
+    });
+    return out;
+  }
+
+  // How far an entity copy's bone has been moved from where it sits on what holds it.
+  function entityOffset(root, key) {
+    const info = root.pose_entity || {};
+    if (!info.pivots) info.pivots = entityPivots(root); // copies made before bones could move: at rest
+    const k = String(key).toLowerCase();
+    let g = null;
+    eachDescendant(root, (node) => {
+      if (!g && node instanceof Group && node.name.toLowerCase() === k) g = node;
+    });
+    const rest = info.pivots[k];
+    if (!g || !rest) return [0, 0, 0];
+    let holder = g.parent;
+    while (holder instanceof Group && holder !== root && !info.pivots[holder.name.toLowerCase()]) holder = holder.parent;
+    const held = holder instanceof Group && holder !== root;
+    const from = held ? holder.origin : root.origin;
+    const restFrom = held ? info.pivots[holder.name.toLowerCase()] : [0, 0, 0];
+    return g.origin.map((v, i) => round(v - from[i] - (rest[i] - restFrom[i]), 4));
+  }
+
   function posableBones(model) {
     const score = (b) =>
       (/head|neck|body|torso|arm|leg|wing|tail|jaw|hand|foot|spine|chest|hip/i.test(b.name) ? 2 : 0) + (b.cubes.length ? 1 : 0);
@@ -5232,6 +5440,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     const root = new Group({ name, origin: at.slice(), rotation: [0, yaw, 0] }).init();
     const { cubes, rest } = buildEntityBones(root, model, texture, at);
     root.pose_entity = entityInfo(entry, model, rest);
+    root.pose_entity.pivots = entityPivots(root);
     Undo.finishEdit('Add entity', { outliner: true, elements: cubes, textures: texture ? [texture] : [] });
     Canvas.updateAll();
     root.select();
@@ -5279,6 +5488,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
       root.pose_animation = Object.assign({}, root.pose_animation, { base });
     }
     root.pose_entity = entityInfo(entry, model, rest);
+    root.pose_entity.pivots = entityPivots(root);
     Undo.finishEdit('Change entity variant', { outliner: true, elements: cubes, groups: [root], textures: texture ? [texture] : [] });
     if (root.pose_equipment && Object.values(root.pose_equipment).some(Boolean)) refreshEquipmentPreview(root);
     Canvas.updateAll();
@@ -5315,6 +5525,12 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     return h.toString(16).padStart(8, '0');
   }
 
+  function offsetExpr(index) {
+    const prop = `q.property('pose:p${Math.floor(index / 2)}')`;
+    const value = index % 2 === 0 ? `math.floor(${prop} / 4096)` : `(${prop} - math.floor(${prop} / 4096) * 4096)`;
+    return `(${value} - 2048) / 64`;
+  }
+
   function angleExpr(index) {
     const prop = `q.property('pose:p${Math.floor(index / 2)}')`;
     const value = index % 2 === 0 ? `math.floor(${prop} / 4096)` : `(${prop} - math.floor(${prop} / 4096) * 4096)`;
@@ -5333,7 +5549,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
       const model = geometry ? bedrockToBlockbench(geometry) : null;
       return { key: entryKey(entry), entry, geometry, bones: model ? posableBones(model) : [] };
     });
-    const hash = hashString('v12|' + JSON.stringify(models.map((m) => [m.key, m.entry.material, m.bones, m.geometry && m.geometry.bones.length])));
+    const hash = hashString('v13|' + JSON.stringify(models.map((m) => [m.key, m.entry.material, m.bones, m.geometry && m.geometry.bones.length])));
     const registry = proxyRegistry();
     if (registry.hash === hash) return 0;
 
@@ -5418,6 +5634,11 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
           const a = (k + 1) * 3;
           bones[bone] = { rotation: [angleExpr(a), angleExpr(a + 1), angleExpr(a + 2)] };
         });
+        // then the moves of the bones that have room for them
+        movingBones(m.bones).forEach((bone, k) => {
+          const o = 3 + m.bones.length * 3 + k * 3;
+          bones[bone].position = [offsetExpr(o), offsetExpr(o + 1), offsetExpr(o + 2)];
+        });
         animations.animations[`animation.pose_studio.proxy.${g}`] = { loop: true, bones };
         slot = { g, indices: [] };
         shared.set(geoKey, slot);
@@ -5484,13 +5705,13 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     return models.length;
   }
 
-  // Two 12-bit angles per int: high = even index, low = odd index.
-  function packAngles(angles) {
+  // Two 12-bit values per int (high = even index, low = odd index): the turns, then the moves.
+  function packAngles(angles, moves = []) {
+    const enc = (deg) => ((Math.round((wrap(deg) + 180) / ANGLE_STEP) % 4096) + 4096) % 4096;
+    const encMove = (u) => Math.max(0, Math.min(4095, Math.round((Number(u) || 0) * 64) + 2048));
+    const values = angles.map(enc).concat(moves.map(encMove));
     const q = [];
-    for (let i = 0; i < PACKED_PROPS; i++) {
-      const enc = (deg) => ((Math.round((wrap(deg) + 180) / ANGLE_STEP) % 4096) + 4096) % 4096;
-      q.push(enc(angles[i * 2] || 0) * 4096 + enc(angles[i * 2 + 1] || 0));
-    }
+    for (let i = 0; i < PACKED_PROPS; i++) q.push((values[i * 2] ?? 2048) * 4096 + (values[i * 2 + 1] ?? 2048));
     return q;
   }
 
@@ -5586,10 +5807,16 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
       const rest = toBedrockRot((info.rest && info.rest[bone]) || [0, 0, 0]);
       angles.push(wrap(now[0] - rest[0]), wrap(now[1] - rest[1]), wrap(now[2] - rest[2]));
     }
+    // the moves of the bones that can move (Bedrock: X the other way)
+    const moves = [];
+    for (const bone of movingBones(model.bones)) {
+      const o = entityOffset(root, bone);
+      moves.push(round(-o[0], 3), round(o[1], 3), round(o[2], 3));
+    }
     // only worn armour goes to the copy; held items are sent separately (see handMessage)
     const armour = {};
     for (const slot of ['head', 'chest', 'legs', 'feet']) if ((root.pose_equipment || {})[slot]) armour[slot] = root.pose_equipment[slot];
-    return JSON.stringify({ id: mannequinId(root.name), t: PROXY_TYPE, m: model.index, p: toWorld(root.origin), y: 0, q: packAngles(angles).map((n) => n.toString(36)).join(','), e: armour });
+    return JSON.stringify({ id: mannequinId(root.name), t: PROXY_TYPE, m: model.index, p: toWorld(root.origin), y: 0, q: packAngles(angles, moves).map((n) => n.toString(36)).join(','), e: armour });
   }
 
   // Prepares pose:proxy for the browser's world and offers the one reload it needs.
@@ -7668,6 +7895,15 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   // <changelog>
   const CHANGELOG = [
     {
+      "version": "0.42.0",
+      "date": "2026-10-02",
+      "changes": [
+        "New: Drop to Ground (Pose Studio menu). Stands the selected players and mobs on the imported terrain under their feet (the highest ground they cover; with no terrain under them, the anchor's floor). The lowest point of a posed model is what lands, so a raised foot stays raised.",
+        "New: mob bones move as well as turn, like players: in Animation… (pack animations that shift bones) and by hand, in Blockbench and in Minecraft. Mobs with up to 9 posable bones move on every bone; bigger models move their main bones (body, legs, arms, head, wings, tails) as room allows. Open Add Entity… once and reload Minecraft's packs when asked, so the copies pick this up.",
+        "New: framing grid (rule of thirds) in the camera view: the grid button under the camera view's move buttons. The lines cover the camera's picture, and it remembers whether it was on."
+      ]
+    },
+    {
       "version": "0.41.0",
       "date": "2026-10-01",
       "changes": [
@@ -8302,6 +8538,10 @@ ${PLUGIN_URL}`,
           description: 'Other looks of the selected entity: biome and colour variants, and its baby version.',
           condition: () => selectionIs('entity'),
         }),
+        drop: new Action('pose_studio_drop', {
+          name: 'Drop to Ground', icon: 'vertical_align_bottom', click: dropToGround,
+          description: 'Stands the selected players and mobs on the imported terrain under their feet.',
+        }),
         animation: new Action('pose_studio_animation', {
           name: 'Animation…', icon: 'animation', click: openAnimationFrames,
           description: 'Pose the selected player or entity with frames of its animations (walk, attack, sit...), stacked on the pose it has.',
@@ -8420,6 +8660,7 @@ ${PLUGIN_URL}`,
         a.equipment,
         a.variant,
         a.animation,
+        a.drop,
         { name: 'Add Camera', id: 'pose_studio_add_camera', icon: 'videocam', children: [a.grabcam, a.savecam] },
         {
           name: 'Camera', id: 'pose_studio_camera_menu', icon: 'photo_camera_front',
