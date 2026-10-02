@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.49.1'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.49.2'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -1441,6 +1441,11 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
     // Switching tabs shouldn't delete the other project's mannequins from the world.
     if (Project.uuid !== lastProjectUuid) {
       lastProjectUuid = Project.uuid;
+      try {
+        refreshOldEquipment();
+      } catch (e) {
+        console.warn('[Pose Studio] equipment refresh', e);
+      }
       lastSent.clear();
       lastCamera = null;
       // a location of this world: nothing goes out until its anchor is in place (positions are
@@ -8423,6 +8428,16 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     }
   }
 
+  function refreshOnLoad() {
+    setTimeout(() => {
+      try {
+        if (typeof Project !== 'undefined' && Project) refreshOldEquipment();
+      } catch (e) {
+        console.warn('[Pose Studio] equipment refresh', e);
+      }
+    }, 500);
+  }
+
   function onProjectSelected() {
     try {
       refreshOldEquipment();
@@ -8929,6 +8944,13 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.49.2",
+      "date": "2026-10-02",
+      "changes": [
+        "Fixed: scenes saved before 0.49.1 kept their misplaced armour until it was taken off and put back. Players with moved bones now get their armour rebuilt when the scene opens or Blockbench starts, connected to Minecraft or not."
+      ]
+    },
     {
       "version": "0.49.1",
       "date": "2026-10-02",
@@ -9686,6 +9708,7 @@ ${PLUGIN_URL}`,
       pickTimer = setInterval(disableWorldPicking, 1000);
       startGroupSpin();
       if (Blockbench.on) Blockbench.on('select_project', onProjectSelected);
+      if (Blockbench.on) Blockbench.on('load_project', refreshOnLoad);
 
       const a = {
         link: (linkToggle = new Toggle('pose_studio_link', {
@@ -9897,12 +9920,18 @@ ${PLUGIN_URL}`,
         showWhatsNewOnce();
         checkForUpdates(false).catch(() => {});
         removeSunTiltLighting();
+        try {
+          if (typeof Project !== 'undefined' && Project) refreshOldEquipment();
+        } catch (e) {
+          console.warn('[Pose Studio] equipment refresh', e);
+        }
       }, 4000);
     },
 
     onunload() {
       stopGroupSpin();
       if (Blockbench.removeListener) Blockbench.removeListener('select_project', onProjectSelected);
+      if (Blockbench.removeListener) Blockbench.removeListener('load_project', refreshOnLoad);
       if (startupTimer) clearTimeout(startupTimer);
       startupTimer = null;
       if (tickTimer) clearInterval(tickTimer);

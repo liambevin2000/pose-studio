@@ -1,5 +1,12 @@
 [
   {
+    "version": "0.49.2",
+    "date": "2026-10-02",
+    "changes": [
+      "Fixed: scenes saved before 0.49.1 kept their misplaced armour until it was taken off and put back. Players with moved bones now get their armour rebuilt when the scene opens or Blockbench starts, connected to Minecraft or not."
+    ]
+  },
+  {
     "version": "0.49.1",
     "date": "2026-10-02",
     "changes": [

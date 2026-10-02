@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.49.2 (2026-10-02)
+
+- Fixed: scenes saved before 0.49.1 kept their misplaced armour until it was taken off and put back. Players with moved bones now get their armour rebuilt when the scene opens or Blockbench starts, connected to Minecraft or not.
+
 ## 0.49.1 (2026-10-02)
 
 - Fixed: on players whose bones had been moved (a lowered waist, a leg pulled forward), Blockbench put the armour, and the skin when it was changed, where those bones rest instead of where they are. Minecraft puts them on the moved bones, so posed players looked different in Blockbench, the camera view and the normal pass. Armour and skins are now built on the bones where they are.
