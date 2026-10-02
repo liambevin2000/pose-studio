@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.48.0 (2026-10-02)
+
+- Entity Shot Options has three new options. Each player and mob separately: as well as the group shots, each one is saved on its own (files named after it); the others go out of sight for its shots and come back after. Normal pass: each face coloured by the way it faces (camera space, x red, y green, z blue) on a transparent background, drawn by Blockbench from the shot's camera at the game window's size. Remove particles: each shot is taken three times, 0.4 seconds apart, and only what stays still is kept, so snow, rain and other moving particles drop out (it takes a little longer).
+- The explanation text in Entity Shot Options is gone.
+- Update the Minecraft packs (Check for Updates, then reopen the world).
+
 ## 0.47.2 (2026-10-02)
 
 - Fixed: Capture Entities Only failed with "UnloadedChunksError" when part of the area around the camera and the entities wasn't loaded (a camera away from where you stand). Minecraft now keeps that area loaded with a ticking area while the shot is taken, and waits up to 15 seconds for it before clearing. Blockbench waits for it too, so the coloured shots are only taken once the blocks are out.

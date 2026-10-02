@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.47.2'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.48.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -2097,8 +2097,9 @@ Write-Output $Out
   // comes from the normal shot, taken before anything was cleared. "On the sky" puts them in front of a shot of the sky
   // taken from straight above the camera, looking the same way.
   const ENTITY_SHOT_KEY = 'pose_studio_entity_shot';
-  const ENTITY_SHOT_DEFAULTS = { transparent: true, sky: true, full: false };
+  const ENTITY_SHOT_DEFAULTS = { transparent: true, sky: true, full: false, separate: false, normals: false, particles: false };
   const SKY_RISE = 256; // blocks the camera goes up for the sky shot
+  const STILL_FRAMES = 3; // frames per shot when removing particles (what doesn't move is kept)
   let shooting = false; // the camera isn't synced while an entity shot is being taken
 
   function entityShotOptions() {
@@ -2118,17 +2119,16 @@ Write-Output $Out
       title: 'Entity Shot Options',
       width: 500,
       form: {
-        transparent: { label: 'Save the entities on their own (transparent PNG, no sky)', type: 'checkbox', value: o.transparent },
-        sky: { label: 'Save the entities on the sky', type: 'checkbox', value: o.sky },
-        full: { label: 'Also save the normal shot', type: 'checkbox', value: o.full },
-        info: {
-          type: 'info',
-          text: 'Capture Entities Only shoots from the game camera (Sync Game Camera on) and keeps everything where it is, so the light on the players and mobs is the light of the scene. ' +
-            'For the cut-out, the blocks around them and the camera are cleared for about two seconds and then put back exactly as they were. The HUD is hidden with F1 for each shot.',
-        },
+        transparent: { label: 'Entities on their own (transparent, no sky)', type: 'checkbox', value: o.transparent },
+        sky: { label: 'Entities on the sky', type: 'checkbox', value: o.sky },
+        full: { label: 'The normal shot', type: 'checkbox', value: o.full },
+        normals: { label: 'Normal pass (each face coloured by its direction)', type: 'checkbox', value: o.normals },
+        separate: { label: 'Each player and mob separately too', type: 'checkbox', value: o.separate },
+        particles: { label: 'Remove particles', type: 'checkbox', value: o.particles },
       },
       onConfirm(form) {
-        const next = { transparent: !!form.transparent, sky: !!form.sky, full: !!form.full };
+        const next = {};
+        for (const key of Object.keys(ENTITY_SHOT_DEFAULTS)) next[key] = !!form[key];
         try {
           localStorage.setItem(ENTITY_SHOT_KEY, JSON.stringify(next));
         } catch (e) {
@@ -2136,6 +2136,116 @@ Write-Output $Out
         }
       },
     }).show();
+  }
+
+  // Per pixel and channel, the middle value of several frames of the same shot: particles move
+  // between frames, the scene doesn't, so they drop out.
+  function medianFrames(frames) {
+    if (frames.length === 1) return frames[0];
+    const out = new Uint8ClampedArray(frames[0].length);
+    const n = frames.length;
+    const values = new Array(n);
+    for (let k = 0; k < out.length; k++) {
+      for (let f = 0; f < n; f++) values[f] = frames[f][k];
+      if (n === 3) {
+        const a = values[0], b = values[1], c = values[2];
+        out[k] = Math.max(Math.min(a, b), Math.min(Math.max(a, b), c));
+      } else {
+        values.sort((x, y) => x - y);
+        out[k] = values[n >> 1];
+      }
+    }
+    return out;
+  }
+
+  // The normal pass, drawn by Blockbench from the shot's camera at the game window's size: only
+  // these players and mobs, each face coloured by the way it faces (camera space, x→red, y→green,
+  // z→blue), the rest transparent. Pixels a texture leaves see-through (an empty hat layer) stay
+  // see-through, as in Minecraft.
+  function renderNormalPass(roots, width, height) {
+    const preview = viewportPreview();
+    const renderer = preview && preview.renderer;
+    const scene = (typeof Canvas !== 'undefined' && Canvas.scene) || (typeof window !== 'undefined' && window.scene) || null;
+    if (!renderer || !scene) throw new Error('No Blockbench viewport to draw the normal pass with.');
+    // the camera: the active camera, as the camera view (and the game) has it
+    const cam = activeCamera();
+    const camera = new THREE.PerspectiveCamera(30, width / height, 1, 4096);
+    const space = modelSpace();
+    if (cam) {
+      const pos = new THREE.Vector3().fromArray(cam.origin);
+      const target = pos.clone().add(cameraForward(cam).multiplyScalar(32));
+      if (space) {
+        space.localToWorld(pos);
+        space.localToWorld(target);
+      }
+      camera.position.copy(pos);
+      camera.lookAt(target);
+      camera.fov = cam.pose_fov || mainViewportFov();
+    } else {
+      const view = preview.camera;
+      camera.position.copy(view.position);
+      camera.quaternion.copy(view.quaternion);
+      camera.fov = view.fov || 30;
+    }
+    camera.updateProjectionMatrix();
+    camera.updateMatrixWorld(true);
+
+    const keep = new Set();
+    for (const root of roots) root.forEachChild((c) => c.mesh && keep.add(c.mesh));
+    const materials = new Map(); // texture (or none) -> material
+    const normalMaterial = (original) => {
+      const map = original && ((original.uniforms && original.uniforms.map && original.uniforms.map.value) || original.map) || null;
+      if (!materials.has(map)) {
+        materials.set(map, new THREE.ShaderMaterial({
+          uniforms: { map: { value: map }, useMap: { value: map ? 1 : 0 } },
+          vertexShader: 'varying vec3 vN; varying vec2 vUv; void main() { vN = normalize(normalMatrix * normal); vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+          fragmentShader: 'uniform sampler2D map; uniform float useMap; varying vec3 vN; varying vec2 vUv; void main() { if (useMap > 0.5 && texture2D(map, vUv).a < 0.5) discard; gl_FragColor = vec4(normalize(vN) * 0.5 + 0.5, 1.0); }',
+          side: THREE.DoubleSide,
+        }));
+      }
+      return materials.get(map);
+    };
+    const hidden = [];
+    const swapped = [];
+    scene.traverse((o) => {
+      if (keep.has(o)) {
+        swapped.push([o, o.material]);
+        o.material = Array.isArray(o.material) ? o.material.map(normalMaterial) : normalMaterial(o.material);
+      } else if ((o.isMesh || o.isLine || o.isPoints || o.isSprite) && o.visible) {
+        hidden.push(o);
+        o.visible = false;
+      }
+    });
+    const target = new THREE.WebGLRenderTarget(width, height);
+    const clearColor = new THREE.Color();
+    if (renderer.getClearColor) renderer.getClearColor(clearColor);
+    const clearAlpha = renderer.getClearAlpha ? renderer.getClearAlpha() : 1;
+    const background = scene.background;
+    const fog = scene.fog;
+    const pixels = new Uint8Array(width * height * 4);
+    try {
+      scene.background = null;
+      scene.fog = null;
+      renderer.setRenderTarget(target);
+      renderer.setClearColor(0x000000, 0);
+      renderer.clear(true, true, true);
+      renderer.render(scene, camera);
+      renderer.readRenderTargetPixels(target, 0, 0, width, height, pixels);
+    } finally {
+      renderer.setRenderTarget(null);
+      renderer.setClearColor(clearColor, clearAlpha);
+      scene.background = background;
+      scene.fog = fog;
+      for (const o of hidden) o.visible = true;
+      for (const [o, material] of swapped) o.material = material;
+      for (const material of materials.values()) material.dispose();
+      target.dispose();
+    }
+    // WebGL reads bottom row first
+    const out = new Uint8ClampedArray(width * height * 4);
+    const row = width * 4;
+    for (let y = 0; y < height; y++) out.set(pixels.subarray((height - 1 - y) * row, (height - y) * row), y * row);
+    return out;
   }
 
   // a, m, g, s: RGBA pixels of the normal shot, the magenta and green backdrop shots and the sky
@@ -2214,12 +2324,21 @@ Write-Output $Out
   }
 
   // The Minecraft window as PNG (base64), without saving it anywhere.
+  // The Minecraft window as PNGs (base64, one line per frame; $Frames frames $Gap ms apart),
+  // without saving them anywhere.
   const GRAB_PS1 = CAPTURE_PS1
     .replace(/^[\s\S]*?Add-Type -AssemblyName/, 'Add-Type -AssemblyName')
-    .replace(/\$bmp\.Save\(\$Out[\s\S]*$/, () => String.raw`$ms = New-Object System.IO.MemoryStream
-$bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
-$gfx.Dispose(); $bmp.Dispose()
-[Console]::Out.Write([Convert]::ToBase64String($ms.ToArray()))
+    .replace(/\$bmp = New-Object[\s\S]*$/, () => String.raw`for ($i = 0; $i -lt $Frames; $i++) {
+  if ($i -gt 0) { Start-Sleep -Milliseconds $Gap }
+  $bmp = New-Object System.Drawing.Bitmap $width, $height
+  $gfx = [System.Drawing.Graphics]::FromImage($bmp)
+  $gfx.CopyFromScreen($pt.X, $pt.Y, 0, 0, $bmp.Size)
+  $ms = New-Object System.IO.MemoryStream
+  $bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
+  $gfx.Dispose(); $bmp.Dispose()
+  [Console]::Out.WriteLine([Convert]::ToBase64String($ms.ToArray()))
+}
+Press-F1
 `);
   // Saves "name|base64" lines (stdin) in Pictures\Pose Studio; prints the paths.
   const SAVE_PS1 = String.raw`$dir = Join-Path ([Environment]::GetFolderPath('MyPictures')) 'Pose Studio'
@@ -2309,7 +2428,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     }
     if (shooting) return;
     const options = entityShotOptions();
-    if (!options.transparent && !options.sky && !options.full) {
+    if (!options.transparent && !options.sky && !options.full && !options.normals) {
       entityShotOptionsDialog();
       return;
     }
@@ -2322,48 +2441,96 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
       return;
     }
     const why = 'run PowerShell to screenshot the Minecraft window';
-    const grab = () => runPowerShell(GRAB_PS1, '', why);
-    const shots = {};
+    const frames = options.particles ? STILL_FRAMES : 1;
+    const grab = async () => (await runPowerShell(`$Frames = ${frames}; $Gap = 400` + '\n' + GRAB_PS1, '', why)).split(/\r?\n/).filter(Boolean);
+    const needMatte = options.transparent || options.sky;
+    // the shots: everyone together, then (separately) each one with the others away
+    const takes = [{ suffix: '', roots, ids: [] }];
+    if (options.separate && roots.length > 1) {
+      const used = new Set();
+      for (const root of roots) {
+        let name = root.name.replace(/[^a-z0-9_-]+/gi, '_');
+        while (used.has(name)) name += '_';
+        used.add(name);
+        const others = roots.filter((r) => r !== root).map((r) => mannequinId(r.name));
+        takes.push({ suffix: `_${name}`, roots: [root], ids: others });
+      }
+    }
+    const hideOthers = async (take) => {
+      await link.command(`scriptevent pose:shothide ${JSON.stringify({ ids: take.ids })}`);
+      await sleep(take.ids.length ? 700 : 400);
+    };
+    let sky = null;
     shooting = true;
     Blockbench.showQuickMessage('Taking the entity shots… keep Minecraft in view', 6000);
     try {
       await link.command('hud @s hide all');
       await sleep(250);
-      shots.a = await grab();
-      // Minecraft answers once the blocks are out and the box is up (it may wait for chunks to load)
-      await runGameQuery('pose:backdrop', Object.assign({ c: 0, clear: 1 }, plan), 'Clearing around the scene');
-      await sleep(1000);
-      shots.m = await grab();
-      await link.command(`scriptevent pose:backdrop ${JSON.stringify(Object.assign({ c: 1 }, plan))}`);
-      await sleep(900);
-      shots.g = await grab();
-      await link.command('scriptevent pose:backdrop {"off":1}');
-      if (options.sky) {
-        const up = (v) => [v[0], round(v[1] + SKY_RISE, 3), v[2]];
-        await link.command(`scriptevent pose:cam ${JSON.stringify(Object.assign({}, cam, { p: up(cam.p), t: up(cam.t) }))}`);
-        await sleep(1500);
-        shots.s = await grab();
+      // the normal shots, in the scene's own light (nothing cleared yet)
+      for (const take of takes) {
+        if (take.ids.length) await hideOthers(take);
+        take.a = await grab();
+      }
+      if (takes.length > 1) await hideOthers({ ids: [] });
+      if (needMatte) {
+        // Minecraft answers once the blocks are out and the box is up (it may wait for chunks to load)
+        await runGameQuery('pose:backdrop', Object.assign({ c: 0, clear: 1 }, plan), 'Clearing around the scene');
+        await sleep(1000);
+        let colour = 0;
+        for (const take of takes) {
+          if (take.ids.length) await hideOthers(take);
+          for (const key of colour ? ['g', 'm'] : ['m', 'g']) {
+            const c = key === 'm' ? 0 : 1;
+            if (c !== colour) {
+              await link.command(`scriptevent pose:backdrop ${JSON.stringify(Object.assign({ c }, plan))}`);
+              await sleep(900);
+              colour = c;
+            }
+            take[key] = await grab();
+          }
+        }
+        if (takes.length > 1) await hideOthers({ ids: [] });
+        await link.command('scriptevent pose:backdrop {"off":1}');
+        if (options.sky) {
+          const up = (v) => [v[0], round(v[1] + SKY_RISE, 3), v[2]];
+          await link.command(`scriptevent pose:cam ${JSON.stringify(Object.assign({}, cam, { p: up(cam.p), t: up(cam.t) }))}`);
+          await sleep(1500);
+          sky = await grab();
+        }
       }
     } catch (e) {
       Blockbench.showMessageBox({ title: 'Capture Entities Only failed', message: String(e.message || e) });
       return;
     } finally {
+      link.command('scriptevent pose:shothide {"ids":[]}').catch(logFailure);
       link.command('scriptevent pose:backdrop {"off":1}').catch(logFailure);
       link.command('hud @s reset all').catch(logFailure);
       shooting = false;
-      lastCamera = null; // the game camera goes back to the shot's camera
+      resync(); // every pose (and the game camera) is sent again: anything still away comes back
       if (typeof currentwindow !== 'undefined' && currentwindow.focus) currentwindow.focus();
     }
     try {
-      const [a, m, g, s] = await Promise.all([shots.a, shots.m, shots.g, shots.s].map((b) => (b ? decodePng(b) : null)));
-      if (a.width !== m.width || a.width !== g.width || a.height !== m.height || a.height !== g.height || (s && (s.width !== a.width || s.height !== a.height))) {
-        throw new Error('The Minecraft window changed size during the shots. Try again without resizing it.');
-      }
-      const result = computeMatte(a.data, m.data, g.data, s && s.data, a.width, a.height);
+      const still = async (list) => {
+        const decoded = await Promise.all(list.map(decodePng));
+        return { width: decoded[0].width, height: decoded[0].height, data: medianFrames(decoded.map((d) => d.data)) };
+      };
+      const skyShot = sky ? await still(sky) : null;
       const lines = [];
-      if (options.full) lines.push('|' + shots.a);
-      if (options.transparent) lines.push('_entities|' + encodePng(result.cut, a.width, a.height));
-      if (options.sky && result.sky) lines.push('_entities_sky|' + encodePng(result.sky, a.width, a.height));
+      for (const take of takes) {
+        const a = await still(take.a);
+        if (options.full) lines.push(`${take.suffix}|` + (frames > 1 ? encodePng(a.data, a.width, a.height) : take.a[0]));
+        if (needMatte) {
+          const m = await still(take.m);
+          const g = await still(take.g);
+          if (a.width !== m.width || a.width !== g.width || a.height !== m.height || a.height !== g.height || (skyShot && (skyShot.width !== a.width || skyShot.height !== a.height))) {
+            throw new Error('The Minecraft window changed size during the shots. Try again without resizing it.');
+          }
+          const result = computeMatte(a.data, m.data, g.data, skyShot && skyShot.data, a.width, a.height);
+          if (options.transparent) lines.push(`_entities${take.suffix}|` + encodePng(result.cut, a.width, a.height));
+          if (options.sky && result.sky) lines.push(`_entities${take.suffix}_sky|` + encodePng(result.sky, a.width, a.height));
+        }
+        if (options.normals) lines.push(`_normals${take.suffix}|` + encodePng(renderNormalPass(take.roots, a.width, a.height), a.width, a.height));
+      }
       const saved = await runPowerShell(SAVE_PS1, lines.join('\n'), 'save the screenshots');
       const paths = saved.split(/\r?\n/).filter(Boolean);
       Blockbench.showQuickMessage(`Saved ${paths.length} shot${paths.length === 1 ? '' : 's'} in ${paths[0] ? paths[0].replace(/[\\/][^\\/]*$/, '') : 'Pictures\\Pose Studio'}`, 4000);
@@ -7909,7 +8076,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     return { id: idItem.slice(2), name: scene.world || '', anchor: point('A|'), player: point('P|'), locations, removed: scene.removed || [], protocol: version ? Number(version.slice(2)) : 0 };
   }
 
-  const EXPECTED_PACK_PROTOCOL = 16; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
+  const EXPECTED_PACK_PROTOCOL = 17; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
   let warnedOldPack = false;
 
   // Scene files in the scenes folders that belong to a world (their pose_world says so), as
@@ -8660,6 +8827,15 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // <changelog>
   const CHANGELOG = [
     {
+      "version": "0.48.0",
+      "date": "2026-10-02",
+      "changes": [
+        "Entity Shot Options has three new options. Each player and mob separately: as well as the group shots, each one is saved on its own (files named after it); the others go out of sight for its shots and come back after. Normal pass: each face coloured by the way it faces (camera space, x red, y green, z blue) on a transparent background, drawn by Blockbench from the shot's camera at the game window's size. Remove particles: each shot is taken three times, 0.4 seconds apart, and only what stays still is kept, so snow, rain and other moving particles drop out (it takes a little longer).",
+        "The explanation text in Entity Shot Options is gone.",
+        "Update the Minecraft packs (Check for Updates, then reopen the world)."
+      ]
+    },
+    {
       "version": "0.47.2",
       "date": "2026-10-02",
       "changes": [
@@ -9353,7 +9529,7 @@ ${PLUGIN_URL}`,
 
   // for the plugin's own tests only (they set this flag); nothing happens otherwise
   if (typeof globalThis !== 'undefined' && globalThis.__POSE_STUDIO_TEST) {
-    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan };
+    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass };
   }
 
   Plugin.register('pose_studio', {
@@ -9481,7 +9657,7 @@ ${PLUGIN_URL}`,
         }),
         entityshotoptions: new Action('pose_studio_entity_shot_options', {
           name: 'Entity Shot Options…', icon: 'tune', click: entityShotOptionsDialog,
-          description: 'What Capture Entities Only saves, and whether it hides the ground under the entities.',
+          description: 'What Capture Entities Only saves: on their own, on the sky, a normal pass, each one separately, without particles.',
         }),
         anchor: new Action('pose_studio_anchor', {
           name: 'Recenter Scene on Me', icon: 'my_location', click: setAnchor,

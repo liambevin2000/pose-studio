@@ -512,6 +512,36 @@ function setBackdrop(player, data) {
 }
 
 
+// `pose:shothide {"ids":[...]}` — Entity Shots of one player or mob on its own: the others (and
+// what they hold) go deep under the ground, straight down, for the shot; `{"ids":[]}` brings them
+// all back. Blockbench also sends every pose again afterwards, which puts anything still away back.
+const shotHidden = new Map(); // entity id -> { entity, at }
+
+function setShotHidden(data) {
+  for (const [, away] of shotHidden) {
+    try {
+      away.entity.teleport(away.at, { keepVelocity: false });
+    } catch {
+      // gone since
+    }
+  }
+  shotHidden.clear();
+  const anchor = getAnchor();
+  const ids = Array.isArray(data.ids) ? data.ids.map(String) : [];
+  if (!anchor || !ids.length) return;
+  const dim = world.getDimension(anchor.dim);
+  const bottom = dim.heightRange ? dim.heightRange.min + 2 : -60;
+  for (const id of ids) {
+    for (const tag of [id, `${id}__main`, `${id}__off`]) {
+      for (const e of findMannequins(dim, tag)) {
+        const at = Object.assign({}, e.location);
+        e.teleport({ x: at.x, y: bottom, z: at.z }, { keepVelocity: false });
+        shotHidden.set(e.id, { entity: e, at });
+      }
+    }
+  }
+}
+
 // `/scriptevent pose:debug` — prints what each mannequin has actually received.
 function debug(player) {
   const anchor = getAnchor();
@@ -571,7 +601,7 @@ function debug(player) {
 // Every name looks like `PSD[op|page|item]`; page 0 always carries
 // `M|ready|<pages>|<items>|<items per page>` or `M|busy|<percent>`.
 // What this script understands; Blockbench warns when the world runs an older one.
-const PACK_PROTOCOL = 16;
+const PACK_PROTOCOL = 17;
 const IO_OBJECTIVE = "pose_io";
 const ITEMS_PER_PAGE = 30;
 const MAX_PAGES_PER_BATCH = 16;
@@ -889,6 +919,8 @@ function handle(ev) {
       return clearAll();
     case "pose:cam":
       return setCamera(player, data);
+    case "pose:shothide":
+      return setShotHidden(data);
     case "pose:backdrop":
       return setBackdrop(player, data);
     case "pose:camclear":
