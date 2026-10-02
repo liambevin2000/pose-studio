@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.48.1'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.49.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -2418,7 +2418,71 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     return { p: min.map((v, i) => round((v + max[i]) / 2, 3)), h: half };
   }
 
-  async function captureEntities() {
+  // The normal pass on Minecraft's own outline (the cut-out's alpha): what Blockbench drew outside
+  // it goes, and where Minecraft shows something Blockbench didn't draw (an item placed a little
+  // differently, a swinging flail), the nearest face's colour fills in.
+  function fitNormalsToMatte(normals, alpha, width, height) {
+    const n = width * height;
+    const out = new Uint8ClampedArray(n * 4);
+    const from = new Int32Array(n).fill(-1); // which Blockbench pixel each pixel takes its colour from
+    const queue = new Int32Array(n);
+    let head = 0;
+    let tail = 0;
+    for (let i = 0; i < n; i++) {
+      if (normals[i * 4 + 3] > 127 && alpha[i] > 0.005) {
+        from[i] = i;
+        queue[tail++] = i;
+      }
+    }
+    // spread outwards from what Blockbench drew, through Minecraft's outline only
+    while (head < tail) {
+      const i = queue[head++];
+      const x = i % width;
+      for (const j of [x > 0 ? i - 1 : -1, x < width - 1 ? i + 1 : -1, i - width, i + width]) {
+        if (j < 0 || j >= n || from[j] >= 0 || alpha[j] <= 0.005) continue;
+        from[j] = from[i];
+        queue[tail++] = j;
+      }
+    }
+    for (let i = 0; i < n; i++) {
+      if (from[i] < 0) continue;
+      const k = i * 4;
+      const s = from[i] * 4;
+      out[k] = normals[s];
+      out[k + 1] = normals[s + 1];
+      out[k + 2] = normals[s + 2];
+      out[k + 3] = Math.round(alpha[i] * 255);
+    }
+    return out;
+  }
+
+  // Compare with Game: the game shot in grey; red where only Blockbench has the entities, green where
+  // only Minecraft has them, with their outlines. Lined up, it's all grey.
+  function compareImage(game, blockbench, alpha, width, height) {
+    const out = new Uint8ClampedArray(width * height * 4);
+    const inB = (i) => blockbench[i * 4 + 3] > 127;
+    const inM = (i) => alpha[i] > 0.5;
+    const edge = (test, i) => {
+      if (!test(i)) return false;
+      const x = i % width;
+      return (x > 0 && !test(i - 1)) || (x < width - 1 && !test(i + 1)) || (i >= width && !test(i - width)) || (i + width < width * height && !test(i + width));
+    };
+    for (let i = 0; i < width * height; i++) {
+      const k = i * 4;
+      const l = (game[k] * 0.3 + game[k + 1] * 0.59 + game[k + 2] * 0.11) * 0.85;
+      let r = l, g = l, b = l;
+      const bb = inB(i);
+      const mc = inM(i);
+      if (bb && !mc) { r = l * 0.5 + 128; g = l * 0.5; b = l * 0.5; }
+      if (mc && !bb) { r = l * 0.5; g = l * 0.5 + 128; b = l * 0.5; }
+      if (edge(inB, i)) { r = 255; g = 40; b = 40; }
+      if (edge(inM, i)) { r = 40; g = 230; b = 40; }
+      out[k] = r; out[k + 1] = g; out[k + 2] = b; out[k + 3] = 255;
+    }
+    return out;
+  }
+
+  async function captureEntities(compare = false) {
     if (!requireConnection()) return;
     if (!cameraSync) {
       Blockbench.showMessageBox({ title: 'Capture Entities Only', message: 'Turn on Pose Studio ▸ Camera ▸ Sync Game Camera first: the shot is taken from the game camera.' });
@@ -2431,8 +2495,9 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
       return;
     }
     if (shooting) return;
-    const options = entityShotOptions();
-    if (!options.transparent && !options.sky && !options.full && !options.normals) {
+    // Compare with Game: only the cut-out and Blockbench's outline, everyone together
+    const options = compare ? { transparent: false, sky: false, full: false, normals: false, separate: false, particles: false } : entityShotOptions();
+    if (!compare && !options.transparent && !options.sky && !options.full && !options.normals) {
       entityShotOptionsDialog();
       return;
     }
@@ -2447,7 +2512,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     const why = 'run PowerShell to screenshot the Minecraft window';
     const frames = options.particles ? STILL_FRAMES : 1;
     const grab = async () => (await runPowerShell(`$Frames = ${frames}; $Gap = 400` + '\n' + GRAB_PS1, '', why)).split(/\r?\n/).filter(Boolean);
-    const needMatte = options.transparent || options.sky;
+    const needMatte = compare || options.transparent || options.sky || options.normals;
     // the shots: everyone together, then (separately) each one with the others away
     const takes = [{ suffix: '', roots, ids: [] }];
     if (options.separate && roots.length > 1) {
@@ -2532,8 +2597,9 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
           const result = computeMatte(a.data, m.data, g.data, skyShot && skyShot.data, a.width, a.height);
           if (options.transparent) lines.push(`_entities${take.suffix}|` + encodePng(result.cut, a.width, a.height));
           if (options.sky && result.sky) lines.push(`_entities${take.suffix}_sky|` + encodePng(result.sky, a.width, a.height));
+          if (options.normals) lines.push(`_normals${take.suffix}|` + encodePng(fitNormalsToMatte(renderNormalPass(take.roots, a.width, a.height), result.alpha, a.width, a.height), a.width, a.height));
+          if (compare) lines.push('_compare|' + encodePng(compareImage(a.data, renderNormalPass(take.roots, a.width, a.height), result.alpha, a.width, a.height), a.width, a.height));
         }
-        if (options.normals) lines.push(`_normals${take.suffix}|` + encodePng(renderNormalPass(take.roots, a.width, a.height), a.width, a.height));
       }
       const saved = await runPowerShell(SAVE_PS1, lines.join('\n'), 'save the screenshots');
       const paths = saved.split(/\r?\n/).filter(Boolean);
@@ -8831,6 +8897,14 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // <changelog>
   const CHANGELOG = [
     {
+      "version": "0.49.0",
+      "date": "2026-10-02",
+      "changes": [
+        "Changed: the normal pass now follows Minecraft's exact outline of the players and mobs, taken from the cut-out. Anything Blockbench drew outside it is dropped. Anything Minecraft shows that Blockbench didn't draw (an item placed a little differently, a flail mid-swing) is filled with the colour of the nearest face. Its soft edges match the cut-out's.",
+        "New: More > Compare with Game. It saves the game shot in grey with Blockbench's outline in red and Minecraft's own in green: red areas are drawn only by Blockbench, green only by Minecraft. Use it to show where Blockbench places armour and held items differently from Minecraft. Needs Sync Game Camera, like Capture Entities Only."
+      ]
+    },
+    {
       "version": "0.48.1",
       "date": "2026-10-02",
       "changes": [
@@ -9540,7 +9614,7 @@ ${PLUGIN_URL}`,
 
   // for the plugin's own tests only (they set this flag); nothing happens otherwise
   if (typeof globalThis !== 'undefined' && globalThis.__POSE_STUDIO_TEST) {
-    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass };
+    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage };
   }
 
   Plugin.register('pose_studio', {
@@ -9666,6 +9740,11 @@ ${PLUGIN_URL}`,
           name: 'Capture Entities Only', icon: 'person_outline', click: () => captureEntities(),
           description: 'Shoots the players and mobs on their own from the game camera, without the world (transparent, or on the sky), in the light of the scene.',
         }),
+        comparegame: new Action('pose_studio_compare_game', {
+          name: 'Compare with Game', icon: 'compare',
+          click: () => captureEntities(true),
+          description: "Saves the game shot with Blockbench's outline of the players and mobs (red) over Minecraft's own (green), to see what Blockbench draws differently.",
+        }),
         entityshotoptions: new Action('pose_studio_entity_shot_options', {
           name: 'Entity Shot Options…', icon: 'tune', click: entityShotOptionsDialog,
           description: 'What Capture Entities Only saves: on their own, on the sky, a normal pass, each one separately, without particles.',
@@ -9768,7 +9847,7 @@ ${PLUGIN_URL}`,
         a.entityshot,
         a.entityshotoptions,
         '_',
-        { name: 'More', id: 'pose_studio_more', icon: 'more_horiz', children: [a.folders, a.installpacks, '_', a.anchor, a.skin, a.reloadpacks, a.clear] },
+        { name: 'More', id: 'pose_studio_more', icon: 'more_horiz', children: [a.folders, a.installpacks, '_', a.comparegame, a.anchor, a.skin, a.reloadpacks, a.clear] },
       ], { name: 'Pose Studio' });
       MenuBar.addMenu(menu, 'tools');
       startupTimer = setTimeout(() => {

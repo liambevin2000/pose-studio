@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.49.0 (2026-10-02)
+
+- Changed: the normal pass now follows Minecraft's exact outline of the players and mobs, taken from the cut-out. Anything Blockbench drew outside it is dropped. Anything Minecraft shows that Blockbench didn't draw (an item placed a little differently, a flail mid-swing) is filled with the colour of the nearest face. Its soft edges match the cut-out's.
+- New: More > Compare with Game. It saves the game shot in grey with Blockbench's outline in red and Minecraft's own in green: red areas are drawn only by Blockbench, green only by Minecraft. Use it to show where Blockbench places armour and held items differently from Minecraft. Needs Sync Game Camera, like Capture Entities Only.
+
 ## 0.48.1 (2026-10-02)
 
 - Changed: the normal pass now uses the Minecraft world's directions instead of the camera's: east is red, up is green, south is blue. A face's colour no longer depends on where the camera is, so tops of things are always green and a pass lines up with the world for relighting. Before, the colours turned with the camera.
