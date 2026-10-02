@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.42.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.42.1'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -3156,7 +3156,37 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     }
     const items = new Map();
     for (const pack of bp) if (pack.dir) readPackItems(fs, pack, items);
-    return { layers, rp, bp, entities, geometries, controllers, animations, animationControllers, names, attachables, itemNames, itemTextures, items };
+    const entityProperties = new Map(); // entity id -> { property -> enum values }
+    for (const pack of bp) if (pack.dir) readPackEntityProperties(fs, pack, entityProperties);
+    return { layers, rp, bp, entities, geometries, controllers, animations, animationControllers, names, attachables, itemNames, itemTextures, items, entityProperties };
+  }
+
+  // A behavior pack's entity properties that take named values (enums): id -> { name -> values }.
+  function readPackEntityProperties(fs, pack, out) {
+    const walk = (dir, depth) => {
+      let names = [];
+      try {
+        names = fs.readdirSync(dir);
+      } catch (e) {
+        return;
+      }
+      for (const name of names) {
+        const full = `${dir}\\${name}`;
+        if (/\.json$/i.test(name)) {
+          let d;
+          try {
+            d = (parseLooseJson(fs.readFileSync(full))['minecraft:entity'] || {}).description;
+          } catch (e) {
+            continue;
+          }
+          if (!d || !d.identifier || !d.properties) continue;
+          const enums = {};
+          for (const [prop, def] of Object.entries(d.properties)) if (def && def.type === 'enum' && Array.isArray(def.values)) enums[prop.toLowerCase()] = def.values.map(String);
+          if (Object.keys(enums).length) out.set(d.identifier, enums);
+        } else if (depth < 6 && !/\.[a-z0-9]{1,5}$/i.test(name)) walk(full, depth + 1);
+      }
+    };
+    walk(`${pack.dir}\\entities`, 0);
   }
 
   // A behavior pack's items: { id -> { slot (for armour), icon, name, source } }.
@@ -3238,6 +3268,11 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     const controller = mainController(content, description);
     const pick = (expr, kind) => {
       const map = description[kind === 'geometry' ? 'geometry' : 'textures'] || {};
+      // a condition ("v.stage == 'larva' ? … : …"): the idle state's answer
+      if (typeof expr === 'string' && /[?=]/.test(expr)) {
+        const picked = controllerPick(controller, description, expr, kind === 'geometry' ? 'geometry' : 'texture', {});
+        if (picked && picked.value) return picked.value;
+      }
       const arrays = (controller.arrays || {})[kind === 'geometry' ? 'geometries' : 'textures'] || {};
       for (let i = 0; i < 4 && typeof expr === 'string'; i++) {
         let m = expr.match(/^(?:geometry|texture)\.(\w+)$/i);
@@ -3278,6 +3313,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
       .replace(/\b(texture|geometry|material)\.(\w+)/gi, (m, k, name) => JSON.stringify('K:' + name))
       .replace(/\b(query|q|variable|v|temp|t|context|c)\.([a-z0-9_.]+)(\s*\([^()]*\))?/gi, (m, k, name) => {
         const n = name.toLowerCase();
+        if (typeof state[n] === 'string') return JSON.stringify(state[n]);
         return `(${Number(state[n] !== undefined ? state[n] : IDLE_QUERIES[n] || 0) || 0})`;
       })
       .replace(/\bmath\.\w+/gi, '0');
@@ -3367,7 +3403,48 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
         }
       }
     }
+    // a variable compared with text: its options are the texts (plus "anything else", named from
+    // the entity's own property values when the variable reads one)
+    const scripts = description.scripts || {};
+    const fromProperty = {};
+    for (const line of [].concat(scripts.initialize || [], scripts.pre_animation || [])) {
+      for (const m of String(line).matchAll(/(?:variable|v)\.(\w+)\s*=\s*(?:query|q)\.property\(\s*'([^']+)'\s*\)/gi)) fromProperty[m[1].toLowerCase()] = m[2].toLowerCase();
+    }
+    const enums = (content.entityProperties && content.entityProperties.get(description.identifier)) || {};
+    for (const def of controllers) {
+      const text = [def.geometry].concat(def.textures || []).map((e) => String(e || '')).join(' ');
+      const found = new Map();
+      for (const m of text.matchAll(/\b(?:query|q|variable|v)\.(\w+)\s*==\s*'([^']*)'/gi)) {
+        const name = m[1].toLowerCase();
+        if (choices.has(name)) continue;
+        if (!found.has(name)) found.set(name, []);
+        if (!found.get(name).includes(m[2])) found.get(name).push(m[2]);
+      }
+      for (const [name, compared] of found) {
+        const all = enums[fromProperty[name]] || [];
+        const others = all.filter((v) => !compared.includes(v));
+        // what the expression does for any other value: one option standing for all of them
+        const values = compared.concat(others.length ? [others[0]] : ['']);
+        const labels = values.map((v, i) => v || (i === values.length - 1 ? 'other' : v));
+        choices.set(name, { name, array: name, size: values.length, labels, values, text: true });
+      }
+    }
+    // a choice read from an array named after a text option ("young" for a stage) is that entity's
+    // plain variant: numbered, not named after the young array
+    const textValues = new Set([...choices.values()].filter((c) => c.text).flatMap((c) => c.values.map((v) => String(v).toLowerCase())));
+    for (const c of choices.values()) {
+      if (c.text || !textValues.has(c.array.toLowerCase())) continue;
+      c.array = 'variant';
+      c.labels = c.labels.map((l, i) => String(i + 1));
+    }
     return [...choices.values()];
+  }
+
+  // A choice's value for a state: text choices pick their text, the others their index.
+  function choiceState(choices, combo) {
+    const state = Object.assign({}, combo);
+    for (const c of choices) if (c.text && combo[c.name] !== undefined) state[c.name] = c.values[combo[c.name]];
+    return state;
   }
 
   // Geometry and texture layers for one state.
@@ -3426,7 +3503,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
       for (const combo of combos) {
         if (out.length >= MAX_LOOKS_PER_ENTITY) break;
         // pre-animation variables that follow a query (villager: profession_index = query.variant)
-        const state = Object.assign({ is_baby: baby }, combo);
+        const state = Object.assign({ is_baby: baby }, choiceState(choices, combo));
         if (combo.profession_index !== undefined && state.variant === undefined) state.variant = combo.profession_index;
         const look = lookFor(content, description, state);
         const geometryId = (look.geometry && look.geometry.value) || entry.geometryId;
@@ -3466,6 +3543,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
     if (/profession/.test(a)) return 'Profession';
     if (/decor/.test(a)) return 'Decor';
     if (/default|base|skin|coat|variant|texture/.test(a)) return 'Variant';
+    if (choice.text) return a.replace(/_/g, ' ').replace(/^\w/, (ch) => ch.toUpperCase());
     return a.replace(/_/g, ' ').replace(/^\w/, (ch) => ch.toUpperCase());
   }
 
@@ -5726,7 +5804,7 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   // Which model of pose:proxy an ent_ group is. Groups from 0.11.0 only stored the entity id.
   function proxyModelFor(info) {
     const models = proxyRegistry().models;
-    if (info.key && models[info.key]) return models[info.key];
+    if (info.key) return models[info.key] || null; // not prepared yet: nothing rather than another look
     return Object.entries(models).find(([key]) => key.startsWith(`${info.entity}|`))?.[1] || null;
   }
 
@@ -7895,6 +7973,15 @@ Run /connect 127.0.0.1:${PORT} in Minecraft again.`,
   // <changelog>
   const CHANGELOG = [
     {
+      "version": "0.42.1",
+      "date": "2026-10-02",
+      "changes": [
+        "Fixed: some pack mobs showed a different model in Minecraft than in Blockbench (DragonCraft's companions came in as a larva in Blockbench and an adult dragon in game). Looks picked by text values, like a companion's growth stage, are now understood: every stage is prepared for Minecraft, Variant… has a Stage choice (larva, young, adult), and a new companion comes in as its adult.",
+        "A copy whose look Minecraft doesn't have yet is no longer shown as another model; Pose Studio asks you to open Add Entity… (which prepares it) instead.",
+        "After updating, open Add Entity… once and reload Minecraft's packs when asked. Companions added before this may need Variant… to pick their stage again."
+      ]
+    },
+    {
       "version": "0.42.0",
       "date": "2026-10-02",
       "changes": [
@@ -8459,6 +8546,11 @@ ${PLUGIN_URL}`,
       if (self && self.source === 'url' && typeof self.reload === 'function') setTimeout(() => self.reload(), 300);
       else Blockbench.showMessageBox({ title: 'Pose Studio', message: 'Restart Blockbench to load the new version.' });
     }
+  }
+
+  // for the plugin's own tests only (they set this flag); nothing happens otherwise
+  if (typeof globalThis !== 'undefined' && globalThis.__POSE_STUDIO_TEST) {
+    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices };
   }
 
   Plugin.register('pose_studio', {

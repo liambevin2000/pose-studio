@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.42.1 (2026-10-02)
+
+- Fixed: some pack mobs showed a different model in Minecraft than in Blockbench (DragonCraft's companions came in as a larva in Blockbench and an adult dragon in game). Looks picked by text values, like a companion's growth stage, are now understood: every stage is prepared for Minecraft, Variant… has a Stage choice (larva, young, adult), and a new companion comes in as its adult.
+- A copy whose look Minecraft doesn't have yet is no longer shown as another model; Pose Studio asks you to open Add Entity… (which prepares it) instead.
+- After updating, open Add Entity… once and reload Minecraft's packs when asked. Companions added before this may need Variant… to pick their stage again.
+
 ## 0.42.0 (2026-10-02)
 
 - New: Drop to Ground (Pose Studio menu). Stands the selected players and mobs on the imported terrain under their feet (the highest ground they cover; with no terrain under them, the anchor's floor). The lowest point of a posed model is what lands, so a raised foot stays raised.
