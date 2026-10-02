@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.44.5 (2026-10-02)
+
+- Animation…: clicking an animation now shows just that one, so you can click down the list to look through them. Shift+click (or Ctrl+click) stacks several, as clicking did before. A weapon's holding pose and the riding pose stay on either way.
+
 ## 0.44.4 (2026-10-02)
 
 - Fixed: after Minecraft updated, Skin & Equipment, Add Entity… and other windows could fail with "ENOENT … resource_packs": Pose Studio kept looking in the old version's install folder. It now notices the folder is gone and finds Minecraft again.

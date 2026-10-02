@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.44.4'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.44.5'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -5504,11 +5504,32 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
             return this.layers.some((l) => l.id === a.id);
           },
           // clicking an animation adds it to the stack, clicking it again takes it off
-          pick(a) {
+          // A click shows just this animation (easy to look through them); Shift or Ctrl+click adds it
+          // to the stack or takes it off. A weapon's holding pose and the riding pose stay either way.
+          pick(a, event) {
+            const stacking = !!(event && (event.shiftKey || event.ctrlKey || event.metaKey));
             const found = this.layers.find((l) => l.id === a.id);
-            if (found) {
-              this.remove(found);
-              return;
+            const plain = this.layers.filter((l) => !l.hold && !l.ride);
+            if (stacking) {
+              if (found) {
+                this.remove(found);
+                return;
+              }
+            } else {
+              // the only one showing: clicking it again takes it off
+              if (found && plain.length === 1 && plain[0] === found) {
+                this.remove(found);
+                return;
+              }
+              // everything else goes; this one stays (at its frame) or comes in
+              for (const l of plain) if (l !== found) this.layers.splice(this.layers.indexOf(l), 1);
+              if (found) {
+                this.active = found.uid;
+                if (this.playing && this.activeLayer !== found) this.toggle();
+                update();
+                return;
+              }
+              if (this.playing) this.toggle();
             }
             const layer = { uid: ++uid, id: a.id, name: a.name, frames: a.frames, frame: 0 };
             this.layers.push(layer);
@@ -5552,7 +5573,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
             <div style="flex: 1; min-width: 0; display: flex; flex-direction: column;">
               <input type="text" v-model="search" placeholder="Search animations…" class="dark_bordered" style="width: 100%; margin-bottom: 6px;">
               <div style="flex: 1; max-height: 340px; overflow-y: auto; border: 1px solid var(--color-border); border-radius: 4px;">
-                <div v-for="a in shown" :key="a.id" @click="pick(a)" :title="(inStack(a) ? 'Take ' : 'Add ') + a.id + (inStack(a) ? ' off the stack' : ' to the stack')"
+                <div v-for="a in shown" :key="a.id" @click="pick(a, $event)" :title="a.id + (inStack(a) ? ': click to take it off (Shift+click when stacked)' : ': click to show it, Shift+click to add it to the stack')"
                      :style="{ padding: '4px 8px', cursor: 'pointer', display: 'flex', justifyContent: 'space-between', gap: '8px',
                                background: inStack(a) ? 'var(--color-selected)' : '' }">
                   <span>{{ inStack(a) ? '✓ ' : '' }}<span v-if="a.weapon" :title="'An animation of ' + weaponName" style="color: var(--color-accent);">⚔ </span>{{ a.name }}</span>
@@ -5568,7 +5589,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
                 <b>Stack</b>
                 <button @click="toggle()" :disabled="!activeLayer" style="min-width: 0; padding: 0 14px;">{{ playing ? 'Pause' : 'Play' }}</button>
               </div>
-              <p v-if="!layers.length" style="opacity: 0.7; margin: 0;">Click animations on the left to stack them (click again to take one off). Each adds to the pose at its own frame.</p>
+              <p v-if="!layers.length" style="opacity: 0.7; margin: 0;">Click an animation on the left to show it; click others to look through them. Shift+click (or Ctrl+click) stacks several, each at its own frame.</p>
               <div v-for="l in layers" :key="l.uid" @click="active = l.uid"
                    :style="{ border: '1px solid var(--color-border)', borderRadius: '4px', padding: '4px 6px',
                              background: l.uid === active ? 'var(--color-selected)' : '' }">
@@ -8332,6 +8353,13 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.44.5",
+      "date": "2026-10-02",
+      "changes": [
+        "Animation…: clicking an animation now shows just that one, so you can click down the list to look through them. Shift+click (or Ctrl+click) stacks several, as clicking did before. A weapon's holding pose and the riding pose stay on either way."
+      ]
+    },
     {
       "version": "0.44.4",
       "date": "2026-10-02",
