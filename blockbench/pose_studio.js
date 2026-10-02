@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.48.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.48.1'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -2159,8 +2159,8 @@ Write-Output $Out
   }
 
   // The normal pass, drawn by Blockbench from the shot's camera at the game window's size: only
-  // these players and mobs, each face coloured by the way it faces (camera space, x→red, y→green,
-  // z→blue), the rest transparent. Pixels a texture leaves see-through (an empty hat layer) stay
+  // these players and mobs, each face coloured by the way it faces in the Minecraft world (east→red,
+  // up→green, south→blue; a face's colour doesn't change with the camera), the rest transparent. Pixels a texture leaves see-through (an empty hat layer) stay
   // see-through, as in Minecraft.
   function renderNormalPass(roots, width, height) {
     const preview = viewportPreview();
@@ -2190,6 +2190,10 @@ Write-Output $Out
     camera.updateProjectionMatrix();
     camera.updateMatrixWorld(true);
 
+    // Blockbench's scene directions -> Minecraft's: back into model space, then as toWorld (x and z flipped)
+    const unturn = space && space.getWorldQuaternion ? space.getWorldQuaternion(new THREE.Quaternion()).conjugate() : new THREE.Quaternion();
+    const toGame = new THREE.Matrix3().setFromMatrix4(new THREE.Matrix4().makeScale(-1, 1, -1).multiply(new THREE.Matrix4().makeRotationFromQuaternion(unturn)));
+
     const keep = new Set();
     for (const root of roots) root.forEachChild((c) => c.mesh && keep.add(c.mesh));
     const materials = new Map(); // texture (or none) -> material
@@ -2197,8 +2201,8 @@ Write-Output $Out
       const map = original && ((original.uniforms && original.uniforms.map && original.uniforms.map.value) || original.map) || null;
       if (!materials.has(map)) {
         materials.set(map, new THREE.ShaderMaterial({
-          uniforms: { map: { value: map }, useMap: { value: map ? 1 : 0 } },
-          vertexShader: 'varying vec3 vN; varying vec2 vUv; void main() { vN = normalize(normalMatrix * normal); vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+          uniforms: { map: { value: map }, useMap: { value: map ? 1 : 0 }, toGame: { value: toGame } },
+          vertexShader: 'uniform mat3 toGame; varying vec3 vN; varying vec2 vUv; void main() { vN = toGame * normalize(mat3(modelMatrix) * normal); vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
           fragmentShader: 'uniform sampler2D map; uniform float useMap; varying vec3 vN; varying vec2 vUv; void main() { if (useMap > 0.5 && texture2D(map, vUv).a < 0.5) discard; gl_FragColor = vec4(normalize(vN) * 0.5 + 0.5, 1.0); }',
           side: THREE.DoubleSide,
         }));
@@ -8826,6 +8830,13 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.48.1",
+      "date": "2026-10-02",
+      "changes": [
+        "Changed: the normal pass now uses the Minecraft world's directions instead of the camera's: east is red, up is green, south is blue. A face's colour no longer depends on where the camera is, so tops of things are always green and a pass lines up with the world for relighting. Before, the colours turned with the camera."
+      ]
+    },
     {
       "version": "0.48.0",
       "date": "2026-10-02",

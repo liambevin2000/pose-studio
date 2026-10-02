@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.48.1 (2026-10-02)
+
+- Changed: the normal pass now uses the Minecraft world's directions instead of the camera's: east is red, up is green, south is blue. A face's colour no longer depends on where the camera is, so tops of things are always green and a pass lines up with the world for relighting. Before, the colours turned with the camera.
+
 ## 0.48.0 (2026-10-02)
 
 - Entity Shot Options has three new options. Each player and mob separately: as well as the group shots, each one is saved on its own (files named after it); the others go out of sight for its shots and come back after. Normal pass: each face coloured by the way it faces (camera space, x red, y green, z blue) on a transparent background, drawn by Blockbench from the shot's camera at the game window's size. Remove particles: each shot is taken three times, 0.4 seconds apart, and only what stays still is kept, so snow, rain and other moving particles drop out (it takes a little longer).

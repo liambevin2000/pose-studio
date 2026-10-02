@@ -1,5 +1,12 @@
 [
   {
+    "version": "0.48.1",
+    "date": "2026-10-02",
+    "changes": [
+      "Changed: the normal pass now uses the Minecraft world's directions instead of the camera's: east is red, up is green, south is blue. A face's colour no longer depends on where the camera is, so tops of things are always green and a pass lines up with the world for relighting. Before, the colours turned with the camera."
+    ]
+  },
+  {
     "version": "0.48.0",
     "date": "2026-10-02",
     "changes": [
