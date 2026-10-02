@@ -1,5 +1,14 @@
 [
   {
+    "version": "0.45.0",
+    "date": "2026-10-02",
+    "changes": [
+      "New: first-person shots (Camera > First-Person Shot…). The active camera shoots from the player's eyes in Minecraft's own first-person view, so the hand is in the shot, holding the items you pick for each hand (vanilla, your packs' 3D weapons in their first-person pose, or any item id).",
+      "While the shot is on, you're moved to the camera and held there, and your invisibility is lifted so your arm shows; switching cameras or turning Sync Game Camera off gives back exactly what you were holding. The arm wears your own skin. Capture Screenshot hides the HUD but keeps the hand.",
+      "Update the Minecraft packs (Check for Updates, then reopen the world)."
+    ]
+  },
+  {
     "version": "0.44.5",
     "date": "2026-10-02",
     "changes": [

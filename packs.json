@@ -1,6 +1,6 @@
 {
-  "version": "0.44.5",
-  "revision": "69e37b2a4cfa",
+  "version": "0.45.0",
+  "revision": "7f46540c02c7",
   "files": [
     {
       "path": "PoseStudio_BP/entities/mannequin.json",
@@ -14,8 +14,8 @@
     },
     {
       "path": "PoseStudio_BP/scripts/main.js",
-      "size": 33068,
-      "sha1": "441bba9a344e18df6521e558995ebc4e8ab72fe9"
+      "size": 37548,
+      "sha1": "48fdd01a5982a3a1d4e7213a04513dd0d56bea64"
     },
     {
       "path": "PoseStudio_RP/animations/mannequin.animation.json",

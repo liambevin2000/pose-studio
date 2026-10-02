@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.44.5'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.45.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -761,7 +761,7 @@
   }
 
   function povLabelText(cam) {
-    let text = cam ? `CAMERA VIEW · ${cam.name}` : 'CAMERA VIEW · no camera (select a cam_ group)';
+    let text = cam ? `CAMERA VIEW · ${cam.name}${cam.pose_fp ? ' · first person (hand in Minecraft)' : ''}` : 'CAMERA VIEW · no camera (select a cam_ group)';
     const preset = aspectPreset();
     if (preset && preset.ratio) {
       text += ` · ${preset.id}`;
@@ -898,6 +898,55 @@
     createPovFovSlider(node);
     createPovTimeBox(node);
     return bar;
+  }
+
+  // ---- First-person shots ------------------------------------------------------------------------
+  // Pose Studio ▸ Camera ▸ First-Person Shot…: the active camera shoots from the player's eyes in
+  // Minecraft's first-person view, with the hand and the items it holds (Minecraft does the hand:
+  // Blockbench's camera view shows the scene only). Uses your player's skin for the arm.
+  async function firstPersonDialog() {
+    const cam = activeCamera();
+    if (!cam) {
+      Blockbench.showQuickMessage('Select a camera (cam_) first', 2000);
+      return;
+    }
+    let content = null;
+    try {
+      content = await previewContent();
+    } catch (e) {
+      content = null;
+    }
+    const options = { '': 'Nothing' };
+    for (const i of HAND_ITEMS) options[`minecraft:${i.id}`] = i.name;
+    for (const i of content ? customHandItems(content) : []) options[i.id] = `${i.name} (pack)`;
+    const fp = cam.pose_fp || {};
+    const known = (id) => !id || id in options;
+    new Dialog({
+      id: 'pose_studio_first_person',
+      title: `First-Person Shot: ${cam.name}`,
+      width: 520,
+      form: {
+        on: { label: "Shoot from the player's eyes", type: 'checkbox', value: !!cam.pose_fp },
+        main: { label: 'Main hand', type: 'select', options, value: known(fp.main) ? fp.main || '' : '' },
+        main_id: { label: 'or any item id', type: 'text', value: known(fp.main) ? '' : fp.main || '', placeholder: 'e.g. minecraft:torch' },
+        off: { label: 'Off hand', type: 'select', options, value: known(fp.off) ? fp.off || '' : '' },
+        off_id: { label: 'or any item id', type: 'text', value: known(fp.off) ? '' : fp.off || '', placeholder: 'e.g. minecraft:shield' },
+        info: {
+          type: 'info',
+          text:
+            "While this camera is active and Sync Game Camera is on, Minecraft shows its own first-person view from the camera: your hand holding these items, as when you play (pack weapons in their first-person pose). " +
+            "You're moved to the camera and held there; the items you were holding come back when you switch cameras or turn syncing off. The arm wears your own skin. Blockbench's camera view shows the scene without the hand.",
+        },
+      },
+      onConfirm(form) {
+        const main = String(form.main_id || '').trim() || form.main || '';
+        const off = String(form.off_id || '').trim() || form.off || '';
+        cam.pose_fp = form.on ? { main, off } : null;
+        if (typeof Project !== 'undefined' && Project) Project.saved = false;
+        lastCamera = null; // send it again
+        Blockbench.showQuickMessage(form.on ? `${cam.name} shoots first person${main ? ` holding ${options[main] || main}` : ''}` : `${cam.name} is a free camera again`, 2500);
+      },
+    }).show();
   }
 
   // ---- Framing grid ----------------------------------------------------------------------------
@@ -1398,7 +1447,10 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
     if (cam) {
       const origin = new THREE.Vector3().fromArray(cam.origin);
       const target = origin.clone().add(cameraForward(cam).multiplyScalar(160));
-      return JSON.stringify({ p: toWorld(origin.toArray()), t: toWorld(target.toArray()), f: cam.pose_fov || fov });
+      const msg = { p: toWorld(origin.toArray()), t: toWorld(target.toArray()), f: cam.pose_fov || fov };
+      // a first-person shot: Minecraft's own first-person view from the player's eyes, hands holding these
+      if (cam.pose_fp) Object.assign(msg, { fp: 1, m: cam.pose_fp.main || '', o: cam.pose_fp.off || '' });
+      return JSON.stringify(msg);
     }
     if (!preview || !preview.camera || !preview.controls) return null;
     const space = modelSpace();
@@ -7603,7 +7655,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     return { id: idItem.slice(2), name: scene.world || '', anchor: point('A|'), player: point('P|'), locations, removed: scene.removed || [], protocol: version ? Number(version.slice(2)) : 0 };
   }
 
-  const EXPECTED_PACK_PROTOCOL = 11; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
+  const EXPECTED_PACK_PROTOCOL = 12; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
   let warnedOldPack = false;
 
   // Scene files in the scenes folders that belong to a world (their pose_world says so), as
@@ -8354,6 +8406,15 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // <changelog>
   const CHANGELOG = [
     {
+      "version": "0.45.0",
+      "date": "2026-10-02",
+      "changes": [
+        "New: first-person shots (Camera > First-Person Shot…). The active camera shoots from the player's eyes in Minecraft's own first-person view, so the hand is in the shot, holding the items you pick for each hand (vanilla, your packs' 3D weapons in their first-person pose, or any item id).",
+        "While the shot is on, you're moved to the camera and held there, and your invisibility is lifted so your arm shows; switching cameras or turning Sync Game Camera off gives back exactly what you were holding. The arm wears your own skin. Capture Screenshot hides the HUD but keeps the hand.",
+        "Update the Minecraft packs (Check for Updates, then reopen the world)."
+      ]
+    },
+    {
       "version": "0.44.5",
       "date": "2026-10-02",
       "changes": [
@@ -9007,6 +9068,7 @@ ${PLUGIN_URL}`,
         new Property(Group, 'object', 'pose_equipment'),
         new Property(Group, 'object', 'pose_animation'),
         new Property(Group, 'object', 'pose_vars'),
+        new Property(Group, 'object', 'pose_fp'),
         new Property(Group, 'object', 'pose_mount'),
         new Property(Group, 'object', 'pose_driver'),
         new Property(Group, 'number', 'pose_skin_slot', { default: 0 }),
@@ -9088,6 +9150,10 @@ ${PLUGIN_URL}`,
           description: 'Saves your current in-game view as a cam_ group.',
         }),
         savecam: new Action('pose_studio_savecam', { name: 'From Blockbench View', icon: 'switch_video', click: saveViewportAsCamera }),
+        firstperson: new Action('pose_studio_first_person', {
+          name: 'First-Person Shot…', icon: 'back_hand', click: () => firstPersonDialog(),
+          description: "Makes the active camera shoot from the player's eyes in Minecraft's first-person view, with the hand holding the items you pick.",
+        }),
         timeweather: new Action('pose_studio_time_weather', {
           name: 'Time & Weather…', icon: 'schedule', click: timeWeatherDialog,
           description: 'Time of day and weather in Minecraft, kept with each location.',
@@ -9197,7 +9263,7 @@ ${PLUGIN_URL}`,
         { name: 'Add Camera', id: 'pose_studio_add_camera', icon: 'videocam', children: [a.grabcam, a.savecam] },
         {
           name: 'Camera', id: 'pose_studio_camera_menu', icon: 'photo_camera_front',
-          children: [a.pov, a.camera, '_', a.fov, { name: 'Aspect Ratio', id: 'pose_studio_aspect', icon: 'aspect_ratio', children: aspectMenuItems }, a.timeweather, '_', a.lookcam, a.follow],
+          children: [a.pov, a.camera, '_', a.fov, a.firstperson, { name: 'Aspect Ratio', id: 'pose_studio_aspect', icon: 'aspect_ratio', children: aspectMenuItems }, a.timeweather, '_', a.lookcam, a.follow],
         },
         '_',
         a.scan,

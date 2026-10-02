@@ -2,7 +2,7 @@
 // The Blockbench plugin runs commands through the /connect websocket as the player,
 // e.g. `/scriptevent pose:set {"id":"mq_1","p":[x,y,z],"b":[...21 angles]}`.
 // Positions arrive as block offsets from the anchor; angles are already in Bedrock convention.
-import { world, system } from "@minecraft/server";
+import { world, system, ItemStack, EquipmentSlot } from "@minecraft/server";
 
 const TYPE = "pose:mannequin";
 const TAG_PREFIX = "pose_id.";
@@ -285,7 +285,12 @@ function setCamera(player, data) {
   const anchor = requireAnchor(player);
   const pos = toWorld(anchor, data.p);
   const target = toWorld(anchor, data.t);
-  player.runCommand(`camera @s set minecraft:free pos ${fmt(pos)} facing ${fmt(target)}`);
+  if (data.fp) {
+    setFirstPerson(player, anchor, pos, target, data);
+  } else {
+    leaveFirstPerson(player);
+    player.runCommand(`camera @s set minecraft:free pos ${fmt(pos)} facing ${fmt(target)}`);
+  }
   if (data.f) {
     try {
       player.runCommand(`camera @s fov_set ${Number(data.f).toFixed(1)}`);
@@ -298,6 +303,7 @@ function setCamera(player, data) {
 
 function clearCamera(player) {
   if (!player) return;
+  leaveFirstPerson(player);
   player.runCommand("camera @s clear");
   try {
     player.runCommand("camera @s fov_clear");
@@ -306,12 +312,116 @@ function clearCamera(player) {
   }
 }
 
+// First-person shots ({"fp":1,"m":item,"o":item} on pose:cam): the player stands with their eyes at
+// the camera, looking where it looks, in Minecraft's own first-person view, so the hand and what it
+// holds are in the shot (a pack weapon's first-person pose included). The items go in the player's
+// hands; what was there comes back when the shot ends. The player is held in place every tick.
+const firstPerson = new Map(); // player id -> { at, rotation, dim, saved: { main, off }, slot, unhid }
+
+function itemOrNothing(id) {
+  const name = String(id || "").trim();
+  if (!name) return undefined;
+  try {
+    return new ItemStack(name.includes(":") ? name : `minecraft:${name}`, 1);
+  } catch {
+    return undefined;
+  }
+}
+
+function setFirstPerson(player, anchor, eye, target, data) {
+  let state = firstPerson.get(player.id);
+  if (!state) {
+    const inventory = player.getComponent("minecraft:inventory");
+    const equippable = player.getComponent("minecraft:equippable");
+    const slot = player.selectedSlotIndex;
+    state = {
+      slot,
+      saved: {
+        main: inventory && inventory.container ? inventory.container.getItem(slot) : undefined,
+        off: equippable ? equippable.getEquipment(EquipmentSlot.Offhand) : undefined,
+      },
+      unhid: false,
+    };
+    // the camera view hides the player (invisibility); in first person their arm must show
+    if (player.hasTag(HIDDEN_TAG)) {
+      player.removeEffect("invisibility");
+      state.unhid = true;
+    }
+    firstPerson.set(player.id, state);
+  }
+  // the hands
+  const inventory = player.getComponent("minecraft:inventory");
+  const equippable = player.getComponent("minecraft:equippable");
+  const key = JSON.stringify([data.m || "", data.o || ""]);
+  if (state.items !== key) {
+    if (inventory && inventory.container) inventory.container.setItem(state.slot, itemOrNothing(data.m));
+    if (equippable) equippable.setEquipment(EquipmentSlot.Offhand, itemOrNothing(data.o));
+    state.items = key;
+  }
+  // eyes at the camera, looking at its target
+  const head = player.getHeadLocation();
+  const eyeHeight = head && Number.isFinite(head.y) ? head.y - player.location.y : 1.62;
+  const dx = target.x - eye.x;
+  const dy = target.y - eye.y;
+  const dz = target.z - eye.z;
+  state.at = { x: eye.x, y: eye.y - eyeHeight, z: eye.z };
+  state.rotation = { x: -Math.atan2(dy, Math.hypot(dx, dz)) * 180 / Math.PI, y: Math.atan2(-dx, dz) * 180 / Math.PI };
+  state.dim = world.getDimension(anchor.dim);
+  player.teleport(state.at, { dimension: state.dim, rotation: state.rotation });
+  player.runCommand("camera @s set minecraft:first_person");
+  if (data.f) {
+    try {
+      player.runCommand(`camera @s fov_set ${Number(data.f).toFixed(1)}`);
+    } catch {
+      // older versions without fov support
+    }
+  }
+}
+
+function leaveFirstPerson(player) {
+  const state = player && firstPerson.get(player.id);
+  if (!state) return;
+  firstPerson.delete(player.id);
+  try {
+    const inventory = player.getComponent("minecraft:inventory");
+    const equippable = player.getComponent("minecraft:equippable");
+    if (inventory && inventory.container) inventory.container.setItem(state.slot, state.saved.main);
+    if (equippable) equippable.setEquipment(EquipmentSlot.Offhand, state.saved.off);
+  } catch (e) {
+    console.warn(`[Pose Studio] couldn't give back the held items: ${e}`);
+  }
+  if (state.unhid && player.hasTag(HIDDEN_TAG)) player.addEffect("invisibility", 20000000, { amplifier: 0, showParticles: false });
+}
+
+// held in place: no falling or wandering between frames of a first-person shot
+system.runInterval(() => {
+  for (const [id, state] of firstPerson) {
+    const player = world.getAllPlayers().find((p) => p.id === id);
+    if (!player) {
+      firstPerson.delete(id);
+      continue;
+    }
+    const l = player.location;
+    const r = player.getRotation();
+    if (Math.hypot(l.x - state.at.x, l.y - state.at.y, l.z - state.at.z) > 0.001 || Math.abs(r.x - state.rotation.x) > 0.01 || Math.abs(r.y - state.rotation.y) > 0.01) {
+      player.teleport(state.at, { dimension: state.dim, rotation: state.rotation });
+    }
+  }
+}, 1);
+
 // `pose:hideplayer {"hide":true}` — hides the player's own model (invisibility, no particles)
 // while Blockbench's camera view is on, so it doesn't end up in shots.
 const HIDDEN_TAG = "pose_hidden";
 
 function setPlayerHidden(player, hide) {
   if (!player) return;
+  const shot = firstPerson.get(player.id);
+  if (shot) {
+    if (hide) player.addTag(HIDDEN_TAG);
+    else player.removeTag(HIDDEN_TAG);
+    shot.unhid = !!hide;
+    return;
+  }
   if (hide) {
     player.addEffect("invisibility", 20000000, { amplifier: 0, showParticles: false });
     player.addTag(HIDDEN_TAG);
@@ -381,7 +491,7 @@ function debug(player) {
 // Every name looks like `PSD[op|page|item]`; page 0 always carries
 // `M|ready|<pages>|<items>|<items per page>` or `M|busy|<percent>`.
 // What this script understands; Blockbench warns when the world runs an older one.
-const PACK_PROTOCOL = 11;
+const PACK_PROTOCOL = 12;
 const IO_OBJECTIVE = "pose_io";
 const ITEMS_PER_PAGE = 30;
 const MAX_PAGES_PER_BATCH = 16;

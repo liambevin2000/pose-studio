@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.45.0 (2026-10-02)
+
+- New: first-person shots (Camera > First-Person Shot…). The active camera shoots from the player's eyes in Minecraft's own first-person view, so the hand is in the shot, holding the items you pick for each hand (vanilla, your packs' 3D weapons in their first-person pose, or any item id).
+- While the shot is on, you're moved to the camera and held there, and your invisibility is lifted so your arm shows; switching cameras or turning Sync Game Camera off gives back exactly what you were holding. The arm wears your own skin. Capture Screenshot hides the HUD but keeps the hand.
+- Update the Minecraft packs (Check for Updates, then reopen the world).
+
 ## 0.44.5 (2026-10-02)
 
 - Animation…: clicking an animation now shows just that one, so you can click down the list to look through them. Shift+click (or Ctrl+click) stacks several, as clicking did before. A weapon's holding pose and the riding pose stay on either way.
