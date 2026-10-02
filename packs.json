@@ -1,7 +1,12 @@
 {
-  "version": "0.46.1",
-  "revision": "b5246c0e1c24",
+  "version": "0.47.0",
+  "revision": "9bbb89860a5d",
   "files": [
+    {
+      "path": "PoseStudio_BP/entities/backdrop.json",
+      "size": 1110,
+      "sha1": "72903d9ea40dc8fd3c7b286abe2bd54c754f15eb"
+    },
     {
       "path": "PoseStudio_BP/entities/mannequin.json",
       "size": 6906,
@@ -14,13 +19,23 @@
     },
     {
       "path": "PoseStudio_BP/scripts/main.js",
-      "size": 33400,
-      "sha1": "9edbbc83df49f75fb3ab27add3f5a6ca5d03206d"
+      "size": 35110,
+      "sha1": "11b7695d6ff6f4a88b42da59354fe9ef9addea87"
+    },
+    {
+      "path": "PoseStudio_RP/animations/backdrop.animation.json",
+      "size": 403,
+      "sha1": "3f02ee51c1f5de0d38d4d4d7ef9636910cbf3792"
     },
     {
       "path": "PoseStudio_RP/animations/mannequin.animation.json",
       "size": 4995,
       "sha1": "d37b47d5ade72720ca5bbac6706ed103d9826ee0"
+    },
+    {
+      "path": "PoseStudio_RP/entity/backdrop.entity.json",
+      "size": 686,
+      "sha1": "a7b3092569440c92e82dbd8233be84ad01a8f4aa"
     },
     {
       "path": "PoseStudio_RP/entity/mannequin.entity.json",
@@ -33,9 +48,19 @@
       "sha1": "f29a6f8fba045ffe0b6291f67b4af7926edd8754"
     },
     {
+      "path": "PoseStudio_RP/models/entity/backdrop.geo.json",
+      "size": 12419,
+      "sha1": "91f20f69bdbc7a3b24c427e1539216ec5f4c08d1"
+    },
+    {
       "path": "PoseStudio_RP/models/entity/mannequin.geo.json",
       "size": 8176,
       "sha1": "23556beedfa799dacadcea84b55c8aabb43a0f23"
+    },
+    {
+      "path": "PoseStudio_RP/render_controllers/backdrop.render_controllers.json",
+      "size": 622,
+      "sha1": "a41bdd309a27e79e1458504e6ef0963ecb2400da"
     },
     {
       "path": "PoseStudio_RP/render_controllers/mannequin.render_controllers.json",
@@ -51,6 +76,16 @@
       "path": "PoseStudio_RP/texts/languages.json",
       "size": 10,
       "sha1": "a132d5620ca2f490c046b5da103e659aa765fdb9"
+    },
+    {
+      "path": "PoseStudio_RP/textures/entity/pose_studio/backdrop_green.png",
+      "size": 73,
+      "sha1": "485b108fad9fafb06a221b6feac03bfa22d640a4"
+    },
+    {
+      "path": "PoseStudio_RP/textures/entity/pose_studio/backdrop_magenta.png",
+      "size": 72,
+      "sha1": "aa447cb30741ef01eb0cb800212ed54dd5863e3f"
     },
     {
       "path": "PoseStudio_RP/textures/entity/pose_studio/clear.png",

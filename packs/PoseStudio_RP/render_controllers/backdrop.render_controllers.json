@@ -1,0 +1,32 @@
+{
+  "format_version": "1.8.0",
+  "render_controllers": {
+    "controller.render.pose_studio.backdrop": {
+      "arrays": {
+        "textures": {
+          "Array.colours": [
+            "Texture.magenta",
+            "Texture.green"
+          ]
+        }
+      },
+      "geometry": "Geometry.default",
+      "materials": [
+        {
+          "*": "Material.default"
+        }
+      ],
+      "textures": [
+        "Array.colours[q.property('pose:c')]"
+      ],
+      "part_visibility": [
+        {
+          "*": true
+        },
+        {
+          "floor": "q.property('pose:fy') > -100000"
+        }
+      ]
+    }
+  }
+}

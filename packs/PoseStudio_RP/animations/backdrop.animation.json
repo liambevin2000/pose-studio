@@ -1,0 +1,17 @@
+{
+  "format_version": "1.8.0",
+  "animations": {
+    "animation.pose_studio.backdrop.size": {
+      "loop": true,
+      "bones": {
+        "walls": {
+          "scale": "q.property('pose:r') / 100"
+        },
+        "floor": {
+          "position": [0, "q.property('pose:fy') * 0.16", 0],
+          "scale": ["q.property('pose:r') / 100", 1, "q.property('pose:r') / 100"]
+        }
+      }
+    }
+  }
+}

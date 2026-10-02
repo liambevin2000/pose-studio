@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.46.1'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.47.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -1490,7 +1490,7 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
       lastSent.delete(id);
     }
 
-    if (cameraSync && link.inFlight < MAX_IN_FLIGHT) {
+    if (cameraSync && !shooting && link.inFlight < MAX_IN_FLIGHT) {
       const cam = cameraMessage();
       if (cam && cam !== lastCamera) {
         send(`scriptevent pose:cam ${cam}`);
@@ -2077,6 +2077,280 @@ Write-Output $Out
     } finally {
       link.command('hud @s reset all').catch(logFailure);
       if (typeof currentwindow !== 'undefined' && currentwindow.focus) currentwindow.focus();
+    }
+  }
+
+
+  // ---- Entity shots --------------------------------------------------------------------------
+  // Pose Studio ▸ Capture Entities Only: the players and mobs on their own, cut out of the world
+  // without moving anything (so they keep exactly the scene's light). Shots are taken from the game
+  // camera: the normal one, then two with a box of flat colour (magenta, then green) around the
+  // camera hiding the world behind the scene. Only the background changes between those two, by a
+  // known amount, so how much each pixel changed says how much of the background shows through it.
+  // The colour comes from the normal shot. "On the sky" puts them in front of a shot of the sky
+  // taken from straight above the camera, looking the same way.
+  const ENTITY_SHOT_KEY = 'pose_studio_entity_shot';
+  const ENTITY_SHOT_DEFAULTS = { floor: true, transparent: true, sky: true, full: false };
+  const SKY_RISE = 256; // blocks the camera goes up for the sky shot
+  let shooting = false; // the camera isn't synced while an entity shot is being taken
+
+  function entityShotOptions() {
+    let saved = {};
+    try {
+      saved = JSON.parse(localStorage.getItem(ENTITY_SHOT_KEY) || '{}') || {};
+    } catch (e) {
+      saved = {};
+    }
+    return Object.assign({}, ENTITY_SHOT_DEFAULTS, saved);
+  }
+
+  function entityShotOptionsDialog() {
+    const o = entityShotOptions();
+    new Dialog({
+      id: 'pose_studio_entity_shot_options',
+      title: 'Entity Shot Options',
+      width: 500,
+      form: {
+        transparent: { label: 'Save the entities on their own (transparent PNG, no sky)', type: 'checkbox', value: o.transparent },
+        sky: { label: 'Save the entities on the sky', type: 'checkbox', value: o.sky },
+        full: { label: 'Also save the normal shot', type: 'checkbox', value: o.full },
+        floor: { label: 'Hide the ground they stand on', type: 'checkbox', value: o.floor },
+        info: {
+          type: 'info',
+          text: 'Capture Entities Only shoots from the game camera (Sync Game Camera on) and keeps everything where it is, so the light on the players and mobs is the light of the scene. ' +
+            "Hiding the ground covers it just below the lowest foot; turn it off for shots from below or of things in the air. Anything of the world between the camera and the entities (grass at their feet, say) stays in the shot.",
+        },
+      },
+      onConfirm(form) {
+        const next = { floor: !!form.floor, transparent: !!form.transparent, sky: !!form.sky, full: !!form.full };
+        try {
+          localStorage.setItem(ENTITY_SHOT_KEY, JSON.stringify(next));
+        } catch (e) {
+          // not remembered; used this time only
+        }
+      },
+    }).show();
+  }
+
+  // a, m, g, s: RGBA pixels of the normal shot, the magenta and green backdrop shots and the sky
+  // shot (or null). Returns { alpha (0-1 per pixel), cut (RGBA, transparent background),
+  // sky (RGBA on the sky, or null) }.
+  function computeMatte(a, m, g, s, width, height) {
+    const n = width * height;
+    // what the backdrop alone changes: the typical magenta - green difference where it's seen
+    const step = Math.max(1, Math.floor(n / 200000));
+    const lengths = [];
+    for (let i = 0; i < n; i += step) {
+      const k = i * 4;
+      lengths.push(Math.hypot(m[k] - g[k], m[k + 1] - g[k + 1], m[k + 2] - g[k + 2]));
+    }
+    const sorted = lengths.slice().sort((x, y) => x - y);
+    const high = sorted[Math.floor(sorted.length * 0.99)] || 0;
+    if (high < 40) throw new Error("The backdrop didn't show in the game shots, so the entities couldn't be cut out. Update the Minecraft packs (Check for Updates, then reopen the world) and keep Minecraft's window visible while it shoots.");
+    const picks = [[], [], []];
+    for (let i = 0, j = 0; i < n; i += step, j++) {
+      if (lengths[j] < high * 0.5) continue;
+      const k = i * 4;
+      for (let c = 0; c < 3; c++) picks[c].push(m[k + c] - g[k + c]);
+    }
+    const median = (list) => list.sort((x, y) => x - y)[Math.floor(list.length / 2)] || 0;
+    const ref = picks.map(median);
+    const refLength2 = ref[0] * ref[0] + ref[1] * ref[1] + ref[2] * ref[2];
+    // how much backdrop each pixel shows (0-1), with a little room for noise at both ends
+    const alpha = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      const k = i * 4;
+      const t = ((m[k] - g[k]) * ref[0] + (m[k + 1] - g[k + 1]) * ref[1] + (m[k + 2] - g[k + 2]) * ref[2]) / refLength2;
+      const seen = Math.max(0, Math.min(1, (t - 0.08) / 0.77));
+      alpha[i] = 1 - seen;
+    }
+    // colour from the normal shot; along the edges, the world behind (found next to the edge) is
+    // taken out of the colour
+    const cut = new Uint8ClampedArray(n * 4);
+    const sky = s ? new Uint8ClampedArray(n * 4) : null;
+    const RADIUS = 3;
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const i = y * width + x;
+        const k = i * 4;
+        const al = alpha[i];
+        let r = a[k], gr = a[k + 1], b = a[k + 2];
+        if (al > 0.005 && al < 0.995) {
+          let br = 0, bg = 0, bb = 0, count = 0;
+          for (let dy = -RADIUS; dy <= RADIUS; dy++) {
+            const yy = y + dy;
+            if (yy < 0 || yy >= height) continue;
+            for (let dx = -RADIUS; dx <= RADIUS; dx++) {
+              const xx = x + dx;
+              if (xx < 0 || xx >= width) continue;
+              const j = yy * width + xx;
+              if (alpha[j] > 0.02) continue;
+              br += a[j * 4]; bg += a[j * 4 + 1]; bb += a[j * 4 + 2]; count++;
+            }
+          }
+          if (count) {
+            r = (r - (1 - al) * br / count) / al;
+            gr = (gr - (1 - al) * bg / count) / al;
+            b = (b - (1 - al) * bb / count) / al;
+          }
+        }
+        cut[k] = r; cut[k + 1] = gr; cut[k + 2] = b;
+        cut[k + 3] = al <= 0.005 ? 0 : Math.round(al * 255);
+        if (sky) {
+          sky[k] = s[k] * (1 - al) + cut[k] * al;
+          sky[k + 1] = s[k + 1] * (1 - al) + cut[k + 1] * al;
+          sky[k + 2] = s[k + 2] * (1 - al) + cut[k + 2] * al;
+          sky[k + 3] = 255;
+        }
+      }
+    }
+    return { alpha, cut, sky };
+  }
+
+  // The Minecraft window as PNG (base64), without saving it anywhere.
+  const GRAB_PS1 = CAPTURE_PS1
+    .replace(/^[\s\S]*?Add-Type -AssemblyName/, 'Add-Type -AssemblyName')
+    .replace(/\$bmp\.Save\(\$Out[\s\S]*$/, () => String.raw`$ms = New-Object System.IO.MemoryStream
+$bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
+$gfx.Dispose(); $bmp.Dispose()
+[Console]::Out.Write([Convert]::ToBase64String($ms.ToArray()))
+`);
+  // Saves "name|base64" lines (stdin) in Pictures\Pose Studio; prints the paths.
+  const SAVE_PS1 = String.raw`$dir = Join-Path ([Environment]::GetFolderPath('MyPictures')) 'Pose Studio'
+New-Item -ItemType Directory -Force $dir | Out-Null
+$stamp = Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'
+foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
+  if (-not $line) { continue }
+  $parts = $line.Split('|', 2)
+  $out = Join-Path $dir ('pose_' + $stamp + $parts[0] + '.png')
+  [IO.File]::WriteAllBytes($out, [Convert]::FromBase64String($parts[1]))
+  Write-Output $out
+}
+`;
+
+  function runPowerShell(script, input, why) {
+    const childProcess = nodeRequire('child_process', why);
+    if (!childProcess) return Promise.reject(new Error('PowerShell is not available'));
+    const encoded = bufferClass().from(script, 'utf16le').toString('base64');
+    return new Promise((resolve, reject) => {
+      const child = childProcess.execFile(
+        'powershell.exe',
+        ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded],
+        { windowsHide: true, maxBuffer: 512 * 1024 * 1024 },
+        (err, stdout, stderr) => (err ? reject(new Error(String(stderr || err.message))) : resolve(String(stdout).trim()))
+      );
+      if (child.stdin) child.stdin.end(input || '');
+    });
+  }
+
+  function decodePng(base64) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = img.naturalWidth;
+        canvas.height = img.naturalHeight;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0);
+        resolve({ width: canvas.width, height: canvas.height, data: ctx.getImageData(0, 0, canvas.width, canvas.height).data });
+      };
+      img.onerror = () => reject(new Error("couldn't read a shot of the Minecraft window"));
+      img.src = 'data:image/png;base64,' + base64;
+    });
+  }
+
+  function encodePng(pixels, width, height) {
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    canvas.getContext('2d').putImageData(new ImageData(pixels, width, height), 0, 0);
+    return canvas.toDataURL('image/png').split(',')[1];
+  }
+
+  // Where the backdrop goes: centred on the game camera, past the farthest entity; the floor just
+  // under the lowest foot (when the camera is above it). Offsets in blocks from the anchor.
+  function backdropPlan(camera, roots, floor) {
+    let far = 0;
+    let low = Infinity;
+    for (const root of roots) {
+      for (const v of modelSpacePoints(root)) {
+        const w = toWorld(v.toArray());
+        far = Math.max(far, Math.hypot(w[0] - camera[0], w[1] - camera[1], w[2] - camera[2]));
+        low = Math.min(low, w[1]);
+      }
+    }
+    const plan = { p: camera.map((v) => round(v, 3)), r: round(Math.max(6, far + 4), 2) };
+    if (floor && Number.isFinite(low) && camera[1] > low + 0.05) plan.fy = round(low + 0.02 - camera[1], 3);
+    return plan;
+  }
+
+  async function captureEntities() {
+    if (!requireConnection()) return;
+    if (!cameraSync) {
+      Blockbench.showMessageBox({ title: 'Capture Entities Only', message: 'Turn on Pose Studio ▸ Camera ▸ Sync Game Camera first: the shot is taken from the game camera.' });
+      return;
+    }
+    const roots = mannequinRoots().concat(entityRoots());
+    const camText = cameraMessage();
+    if (!roots.length || !camText) {
+      Blockbench.showQuickMessage(roots.length ? 'No camera to shoot from' : 'There are no players or mobs in this scene', 2500);
+      return;
+    }
+    if (shooting) return;
+    const options = entityShotOptions();
+    if (!options.transparent && !options.sky && !options.full) {
+      entityShotOptionsDialog();
+      return;
+    }
+    const cam = JSON.parse(camText);
+    const plan = backdropPlan(cam.p, roots, options.floor);
+    const why = 'run PowerShell to screenshot the Minecraft window';
+    const grab = () => runPowerShell(GRAB_PS1, '', why);
+    const shots = {};
+    shooting = true;
+    Blockbench.showQuickMessage('Taking the entity shots… keep Minecraft in view', 6000);
+    try {
+      await link.command('hud @s hide all');
+      await sleep(250);
+      shots.a = await grab();
+      await link.command(`scriptevent pose:backdrop ${JSON.stringify(Object.assign({ c: 0 }, plan))}`);
+      await sleep(1200);
+      shots.m = await grab();
+      await link.command(`scriptevent pose:backdrop ${JSON.stringify(Object.assign({ c: 1 }, plan))}`);
+      await sleep(900);
+      shots.g = await grab();
+      await link.command('scriptevent pose:backdrop {"off":1}');
+      if (options.sky) {
+        const up = (v) => [v[0], round(v[1] + SKY_RISE, 3), v[2]];
+        await link.command(`scriptevent pose:cam ${JSON.stringify(Object.assign({}, cam, { p: up(cam.p), t: up(cam.t) }))}`);
+        await sleep(1500);
+        shots.s = await grab();
+      }
+    } catch (e) {
+      Blockbench.showMessageBox({ title: 'Capture Entities Only failed', message: String(e.message || e) });
+      return;
+    } finally {
+      link.command('scriptevent pose:backdrop {"off":1}').catch(logFailure);
+      link.command('hud @s reset all').catch(logFailure);
+      shooting = false;
+      lastCamera = null; // the game camera goes back to the shot's camera
+      if (typeof currentwindow !== 'undefined' && currentwindow.focus) currentwindow.focus();
+    }
+    try {
+      const [a, m, g, s] = await Promise.all([shots.a, shots.m, shots.g, shots.s].map((b) => (b ? decodePng(b) : null)));
+      if (a.width !== m.width || a.width !== g.width || a.height !== m.height || a.height !== g.height || (s && (s.width !== a.width || s.height !== a.height))) {
+        throw new Error('The Minecraft window changed size during the shots. Try again without resizing it.');
+      }
+      const result = computeMatte(a.data, m.data, g.data, s && s.data, a.width, a.height);
+      const lines = [];
+      if (options.full) lines.push('|' + shots.a);
+      if (options.transparent) lines.push('_entities|' + encodePng(result.cut, a.width, a.height));
+      if (options.sky && result.sky) lines.push('_entities_sky|' + encodePng(result.sky, a.width, a.height));
+      const saved = await runPowerShell(SAVE_PS1, lines.join('\n'), 'save the screenshots');
+      const paths = saved.split(/\r?\n/).filter(Boolean);
+      Blockbench.showQuickMessage(`Saved ${paths.length} shot${paths.length === 1 ? '' : 's'} in ${paths[0] ? paths[0].replace(/[\\/][^\\/]*$/, '') : 'Pictures\\Pose Studio'}`, 4000);
+    } catch (e) {
+      Blockbench.showMessageBox({ title: 'Capture Entities Only failed', message: String(e.message || e) });
     }
   }
 
@@ -7617,7 +7891,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     return { id: idItem.slice(2), name: scene.world || '', anchor: point('A|'), player: point('P|'), locations, removed: scene.removed || [], protocol: version ? Number(version.slice(2)) : 0 };
   }
 
-  const EXPECTED_PACK_PROTOCOL = 14; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
+  const EXPECTED_PACK_PROTOCOL = 15; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
   let warnedOldPack = false;
 
   // Scene files in the scenes folders that belong to a world (their pose_world says so), as
@@ -8368,6 +8642,16 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // <changelog>
   const CHANGELOG = [
     {
+      "version": "0.47.0",
+      "date": "2026-10-02",
+      "changes": [
+        "New: Capture Entities Only (in the Pose Studio menu, under Capture Screenshot). It saves the players and mobs on their own, without the world: a transparent PNG, and/or in front of the sky. It needs no developer build of Minecraft, and nothing in the scene is moved, so the light on them is exactly the scene's light. No HUD, no hand.",
+        "How it works: from the game camera it takes the normal shot, then two quick shots with a flat-coloured box (magenta, then green) around the camera that hides the world behind the scene. What changes between those two shots is the background, which gives a clean cut-out with soft edges. The colours come from the normal shot. For the sky, one more shot is taken from straight above the camera, looking the same way. The box is only there for about two seconds.",
+        "Entity Shot Options… sets what is saved: on their own, on the sky, and/or the normal shot. It also sets whether the ground under them is hidden: covered just below the lowest foot. Turn that off for shots from below or of things in the air. Parts of the world between the camera and the entities, such as grass at their feet, stay in the shot.",
+        "Turn on Sync Game Camera first, and keep Minecraft visible while it shoots. Update the Minecraft packs (Check for Updates, then reopen the world)."
+      ]
+    },
+    {
       "version": "0.46.1",
       "date": "2026-10-02",
       "changes": [
@@ -9030,7 +9314,7 @@ ${PLUGIN_URL}`,
 
   // for the plugin's own tests only (they set this flag); nothing happens otherwise
   if (typeof globalThis !== 'undefined' && globalThis.__POSE_STUDIO_TEST) {
-    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations };
+    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan };
   }
 
   Plugin.register('pose_studio', {
@@ -9152,6 +9436,14 @@ ${PLUGIN_URL}`,
         scan: new Action('pose_studio_scan', { name: 'Import World…', icon: 'travel_explore', click: scanWorldDialog,
           description: 'Brings the terrain around you in Minecraft into Blockbench as one mesh.' }),
         capture: new Action('pose_studio_capture', { name: 'Capture Screenshot', icon: 'photo_camera', click: capture }),
+        entityshot: new Action('pose_studio_capture_entities', {
+          name: 'Capture Entities Only', icon: 'person_outline', click: () => captureEntities(),
+          description: 'Shoots the players and mobs on their own from the game camera, without the world (transparent, or on the sky), in the light of the scene.',
+        }),
+        entityshotoptions: new Action('pose_studio_entity_shot_options', {
+          name: 'Entity Shot Options…', icon: 'tune', click: entityShotOptionsDialog,
+          description: 'What Capture Entities Only saves, and whether it hides the ground under the entities.',
+        }),
         anchor: new Action('pose_studio_anchor', {
           name: 'Recenter Scene on Me', icon: 'my_location', click: setAnchor,
           description: "Moves the whole scene in Minecraft so Blockbench's origin is where you're standing.",
@@ -9247,6 +9539,8 @@ ${PLUGIN_URL}`,
         '_',
         a.scan,
         a.capture,
+        a.entityshot,
+        a.entityshotoptions,
         '_',
         { name: 'More', id: 'pose_studio_more', icon: 'more_horiz', children: [a.folders, a.installpacks, '_', a.anchor, a.skin, a.reloadpacks, a.clear] },
       ], { name: 'Pose Studio' });

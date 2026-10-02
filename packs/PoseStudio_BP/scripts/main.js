@@ -322,6 +322,43 @@ function setPlayerHidden(player, hide) {
   }
 }
 
+// `pose:backdrop {"c":0|1,"p":[x,y,z],"r":blocks,"fy":blocks}` — Entity Shots: a box of one flat,
+// unlit colour around the camera (p, from the anchor), r blocks each way, with a floor fy blocks
+// above the camera (none without fy). It hides the world behind the scene for a moment so
+// Blockbench can tell the scene from the background; nothing in the scene moves. {"off":1} removes it.
+const BACKDROP_TYPE = "pose:backdrop";
+const BACKDROP_TAG = "pose_backdrop";
+
+function removeBackdrops() {
+  for (const dimension of ["overworld", "nether", "the_end"]) {
+    try {
+      for (const e of world.getDimension(dimension).getEntities({ tags: [BACKDROP_TAG] })) e.remove();
+    } catch {
+      // dimension not loaded
+    }
+  }
+}
+
+function setBackdrop(player, data) {
+  if (data.off) return removeBackdrops();
+  const anchor = requireAnchor(player);
+  if (!finite(data.p)) throw new Error("backdrop needs p:[x,y,z]");
+  const dim = world.getDimension(anchor.dim);
+  const at = toWorld(anchor, data.p.map(Number));
+  let box = dim.getEntities({ tags: [BACKDROP_TAG] })[0];
+  if (!box) {
+    box = dim.spawnEntity(BACKDROP_TYPE, at);
+    box.addTag(BACKDROP_TAG);
+  } else {
+    box.teleport(at, { dimension: dim });
+  }
+  const r = Math.max(0.01, Math.min(1000, Number(data.r) || 10));
+  box.setProperty("pose:r", Math.round(r * 100));
+  box.setProperty("pose:c", data.c ? 1 : 0);
+  const fy = Number(data.fy);
+  box.setProperty("pose:fy", Number.isFinite(fy) ? Math.max(-99999, Math.min(100000, Math.round(fy * 100))) : -100000);
+}
+
 // `/scriptevent pose:debug` — prints what each mannequin has actually received.
 function debug(player) {
   const anchor = getAnchor();
@@ -381,7 +418,7 @@ function debug(player) {
 // Every name looks like `PSD[op|page|item]`; page 0 always carries
 // `M|ready|<pages>|<items>|<items per page>` or `M|busy|<percent>`.
 // What this script understands; Blockbench warns when the world runs an older one.
-const PACK_PROTOCOL = 14;
+const PACK_PROTOCOL = 15;
 const IO_OBJECTIVE = "pose_io";
 const ITEMS_PER_PAGE = 30;
 const MAX_PAGES_PER_BATCH = 16;
@@ -699,6 +736,8 @@ function handle(ev) {
       return clearAll();
     case "pose:cam":
       return setCamera(player, data);
+    case "pose:backdrop":
+      return setBackdrop(player, data);
     case "pose:camclear":
       return clearCamera(player);
     case "pose:debug":
@@ -742,6 +781,8 @@ function removeLeftoverHolders() {
   }
 }
 system.runTimeout(removeLeftoverHolders, 20);
+// an Entity Shot backdrop left behind (the world closed mid-shot)
+system.runTimeout(removeBackdrops, 20);
 // invisible seats left by first-person shots (0.45, since removed)
 system.runTimeout(() => {
   for (const dimension of ["overworld", "nether", "the_end"]) {

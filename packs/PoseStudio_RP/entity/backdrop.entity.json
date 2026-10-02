@@ -1,0 +1,29 @@
+{
+  "format_version": "1.10.0",
+  "minecraft:client_entity": {
+    "description": {
+      "identifier": "pose:backdrop",
+      "materials": {
+        "default": "entity_emissive"
+      },
+      "textures": {
+        "magenta": "textures/entity/pose_studio/backdrop_magenta",
+        "green": "textures/entity/pose_studio/backdrop_green"
+      },
+      "geometry": {
+        "default": "geometry.pose_studio.backdrop"
+      },
+      "animations": {
+        "size": "animation.pose_studio.backdrop.size"
+      },
+      "scripts": {
+        "animate": [
+          "size"
+        ]
+      },
+      "render_controllers": [
+        "controller.render.pose_studio.backdrop"
+      ]
+    }
+  }
+}

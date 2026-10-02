@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.47.0 (2026-10-02)
+
+- New: Capture Entities Only (in the Pose Studio menu, under Capture Screenshot). It saves the players and mobs on their own, without the world: a transparent PNG, and/or in front of the sky. It needs no developer build of Minecraft, and nothing in the scene is moved, so the light on them is exactly the scene's light. No HUD, no hand.
+- How it works: from the game camera it takes the normal shot, then two quick shots with a flat-coloured box (magenta, then green) around the camera that hides the world behind the scene. What changes between those two shots is the background, which gives a clean cut-out with soft edges. The colours come from the normal shot. For the sky, one more shot is taken from straight above the camera, looking the same way. The box is only there for about two seconds.
+- Entity Shot Options… sets what is saved: on their own, on the sky, and/or the normal shot. It also sets whether the ground under them is hidden: covered just below the lowest foot. Turn that off for shots from below or of things in the air. Parts of the world between the camera and the entities, such as grass at their feet, stay in the shot.
+- Turn on Sync Game Camera first, and keep Minecraft visible while it shoots. Update the Minecraft packs (Check for Updates, then reopen the world).
+
 ## 0.46.1 (2026-10-02)
 
 - Fixed: Drop to Ground (and Ride, Animation…, Variant…, Equipment…) said to select a player or mob when you'd clicked a mob in the viewport. Newer Blockbench keeps the selected groups as a list, and when a cube is clicked that list is empty; Pose Studio now goes from the clicked cube to the mob or player it belongs to.
