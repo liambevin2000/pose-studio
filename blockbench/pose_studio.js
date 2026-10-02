@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.44.1'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.44.2'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -5402,10 +5402,26 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     let vm = null;
     let uid = 0;
     const baseNow = () => (vm && vm.fromRest ? target.rest : base);
+    // bones an entity copy can't pose in Minecraft (a model with more bones than a copy has room
+    // for): the window names the ones the stacked animations use
+    const shownBones = (() => {
+      if (!ENTITY_PREFIX.test(root.name) || !root.pose_entity) return null;
+      const model = proxyModelFor(root.pose_entity);
+      return new Set(((model && model.bones) || root.pose_entity.bones || []).map((b) => b.toLowerCase()));
+    })();
     const update = () => {
       if (!vm) return;
       const layers = vm.layers.map((l) => ({ anim: byId.get(l.id), frame: l.frame }));
       applyPose(target, composePose(target, content, baseNow(), layers));
+      if (shownBones) {
+        const missing = new Set();
+        for (const l of layers) {
+          for (const [bone, ch] of Object.entries((l.anim && l.anim.def.bones) || {})) {
+            if (ch && ch.rotation !== undefined && target.groups.has(bone.toLowerCase()) && !shownBones.has(bone.toLowerCase())) missing.add(bone);
+          }
+        }
+        vm.notShown = [...missing].join(', ');
+      }
     };
     const frameCount = (a) => Math.max(1, Math.round(a.length * ANIM_FPS));
     const dialog = new Dialog({
@@ -5418,6 +5434,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
         data: () => ({
           animations: animations.map((a) => ({ name: a.name, id: a.id, frames: frameCount(a), keyframed: a.keyframed, weapon: !!(weapon && weapon.ids.has(a.id)) })),
           weaponName: weapon ? weapon.name : '',
+          notShown: '',
           search: '',
           layers: savedLayers.map((l) => ({ uid: ++uid, id: l.id, name: byId.get(l.id).name, frames: frameCount(byId.get(l.id)), frame: Math.min(l.frame, frameCount(byId.get(l.id))), hold: !!l.hold })),
           active: uid,
@@ -5527,6 +5544,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
               <label style="display: flex; gap: 6px; align-items: center;" title="Off: animations add to the pose you've already made. On: start from the model's default pose.">
                 <input type="checkbox" v-model="fromRest" @change="changedBase()"> Reset pose (start from the default pose)
               </label>
+              <p v-if="notShown" style="margin: 0; font-size: 0.85em; color: var(--color-warning, #e8a33d);" title="Minecraft's copy of a mob can pose 19 bones; this model has more. The ones its animations use most are posable.">Minecraft won't show these bones moving (the model has more bones than a copy can pose): {{ notShown }}</p>
               <p style="opacity: 0.6; margin: 0; font-size: 0.85em;">Walk cycles move at a steady pace; attacks play once per loop. Bones turn and move as in Minecraft (sizes aren't copied).</p>
             </div>
           </div>`,
@@ -5658,15 +5676,51 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     return g.origin.map((v, i) => round(v - from[i] - (rest[i] - restFrom[i]), 4));
   }
 
-  function posableBones(model) {
+  // How much a mob's own animations use each bone (lower-case name -> score): turning it in an
+  // animation counts most, moving it some. Big models (DragonCraft's dragons have 28 and 37 bones)
+  // can only pose 19 in Minecraft, so these are the ones worth having.
+  const usageCache = new WeakMap();
+  function boneUsage(content, entityId) {
+    if (!content || !entityId) return null;
+    let perEntity = usageCache.get(content);
+    if (!perEntity) usageCache.set(content, (perEntity = new Map()));
+    if (perEntity.has(entityId)) return perEntity.get(entityId);
+    const usage = new Map();
+    for (const anim of entityAnimations(content, entityId)) {
+      for (const [bone, ch] of Object.entries(anim.def.bones || {})) {
+        if (!ch) continue;
+        const k = bone.toLowerCase();
+        usage.set(k, (usage.get(k) || 0) + (ch.rotation !== undefined ? 2 : 0) + (ch.position !== undefined ? 1 : 0));
+      }
+    }
+    perEntity.set(entityId, usage);
+    return usage;
+  }
+
+  function posableBones(model, usage = null) {
+    const used = (b) => (usage && usage.get(b.name.toLowerCase())) || 0;
     const score = (b) =>
+      used(b) * 10 +
       (/head|neck|body|torso|arm|leg|wing|tail|jaw|hand|foot|spine|chest|hip/i.test(b.name) ? 2 : 0) + (b.cubes.length ? 1 : 0);
-    return model.bones
-      .map((b, i) => ({ b, i, s: score(b) }))
-      .sort((x, y) => y.s - x.s || x.i - y.i)
-      .slice(0, MAX_POSABLE_BONES)
-      .sort((x, y) => x.i - y.i)
-      .map((x) => x.b.name);
+    const ranked = model.bones.map((b, i) => ({ b, i, s: score(b) })).sort((x, y) => y.s - x.s || x.i - y.i);
+    // left and right go together (one wing tip posed and not the other would look lopsided): a
+    // pair only goes in when there's room for both
+    const byName = new Map(ranked.map((x) => [x.b.name.toLowerCase(), x]));
+    const partnerOf = (name) => {
+      const swapped = name.replace(/left|right/gi, (w) => (/^l/i.test(w) ? (w[0] === 'L' ? 'Right' : 'right') : w[0] === 'R' ? 'Left' : 'left'));
+      return swapped !== name ? byName.get(swapped.toLowerCase()) || null : null;
+    };
+    const chosen = new Set();
+    for (const x of ranked) {
+      if (chosen.has(x) || chosen.size >= MAX_POSABLE_BONES) continue;
+      const partner = partnerOf(x.b.name);
+      if (partner && !chosen.has(partner)) {
+        if (chosen.size + 2 > MAX_POSABLE_BONES) continue;
+        chosen.add(partner);
+      }
+      chosen.add(x);
+    }
+    return [...chosen].sort((x, y) => x.i - y.i).map((x) => x.b.name);
   }
 
   // The texture for an entity look (shared by copies with the same look).
@@ -5754,9 +5808,9 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     return { cubes, rest };
   }
 
-  function entityInfo(entry, model, rest) {
+  function entityInfo(entry, model, rest, content = null) {
     return {
-      entity: entry.id, key: entryKey(entry), bones: posableBones(model), rest, source: entry.source,
+      entity: entry.id, key: entryKey(entry), bones: posableBones(model, boneUsage(content, entry.id)), rest, source: entry.source,
       variant: entry.variant || 'default', baby: !!entry.baby, choices: entry.choices || {},
     };
   }
@@ -5773,7 +5827,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     Undo.initEdit({ outliner: true, elements: [], textures: [] });
     const root = new Group({ name, origin: at.slice(), rotation: [0, yaw, 0] }).init();
     const { cubes, rest } = buildEntityBones(root, model, texture, at);
-    root.pose_entity = entityInfo(entry, model, rest);
+    root.pose_entity = entityInfo(entry, model, rest, content);
     root.pose_entity.pivots = entityPivots(root);
     Undo.finishEdit('Add entity', { outliner: true, elements: cubes, textures: texture ? [texture] : [] });
     Canvas.updateAll();
@@ -5821,7 +5875,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
       }
       root.pose_animation = Object.assign({}, root.pose_animation, { base });
     }
-    root.pose_entity = entityInfo(entry, model, rest);
+    root.pose_entity = entityInfo(entry, model, rest, content);
     root.pose_entity.pivots = entityPivots(root);
     Undo.finishEdit('Change entity variant', { outliner: true, elements: cubes, groups: [root], textures: texture ? [texture] : [] });
     if (root.pose_equipment && Object.values(root.pose_equipment).some(Boolean)) refreshEquipmentPreview(root);
@@ -5881,9 +5935,9 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     const models = list.map((entry) => {
       const geometry = restGeometry(content, entry.id, entry.geometryId, entry.flags);
       const model = geometry ? bedrockToBlockbench(geometry) : null;
-      return { key: entryKey(entry), entry, geometry, bones: model ? posableBones(model) : [] };
+      return { key: entryKey(entry), entry, geometry, bones: model ? posableBones(model, boneUsage(content, entry.id)) : [] };
     });
-    const hash = hashString('v13|' + JSON.stringify(models.map((m) => [m.key, m.entry.material, m.bones, m.geometry && m.geometry.bones.length])));
+    const hash = hashString('v14|' + JSON.stringify(models.map((m) => [m.key, m.entry.material, m.bones, m.geometry && m.geometry.bones.length])));
     const registry = proxyRegistry();
     if (registry.hash === hash) return 0;
 
@@ -8240,6 +8294,15 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // <changelog>
   const CHANGELOG = [
     {
+      "version": "0.44.2",
+      "date": "2026-10-02",
+      "changes": [
+        "Fixed: big mobs (DragonCraft's dragons have 28 and 37 bones) animated differently in Minecraft. A copy in Minecraft can pose 19 bones, and they were picked by name, so the dragons' bodies and wing parts weren't among them. Now the 19 are the bones the mob's own animations use most, and left/right pairs stay together (no lopsided wings).",
+        "Animation… says when the stacked animations move bones Minecraft can't show for that model.",
+        "Open Add Entity… once and reload Minecraft's packs when asked, so the copies pick up the new bones."
+      ]
+    },
+    {
       "version": "0.44.1",
       "date": "2026-10-02",
       "changes": [
@@ -8841,7 +8904,7 @@ ${PLUGIN_URL}`,
 
   // for the plugin's own tests only (they set this flag); nothing happens otherwise
   if (typeof globalThis !== 'undefined' && globalThis.__POSE_STUDIO_TEST) {
-    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor };
+    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage };
   }
 
   Plugin.register('pose_studio', {

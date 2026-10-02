@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.44.2 (2026-10-02)
+
+- Fixed: big mobs (DragonCraft's dragons have 28 and 37 bones) animated differently in Minecraft. A copy in Minecraft can pose 19 bones, and they were picked by name, so the dragons' bodies and wing parts weren't among them. Now the 19 are the bones the mob's own animations use most, and left/right pairs stay together (no lopsided wings).
+- Animation… says when the stacked animations move bones Minecraft can't show for that model.
+- Open Add Entity… once and reload Minecraft's packs when asked, so the copies pick up the new bones.
+
 ## 0.44.1 (2026-10-02)
 
 - Fixed: some mobs (horses, pigs, sheep, chickens and others a pack builds from texture layers, like DragonCraft's) didn't show in Minecraft after being added. They're now added in the look Minecraft has a copy of, and ones already in your scenes find their copy again (always the same model).
