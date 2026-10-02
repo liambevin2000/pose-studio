@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.50.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.50.1'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -2268,7 +2268,36 @@ Write-Output $Out
   // a, m, g, s: RGBA pixels of the normal shot, the magenta and green backdrop shots and the sky
   // shot (or null). Returns { alpha (0-1 per pixel), cut (RGBA, transparent background),
   // sky (RGBA on the sky, or null) }.
-  function computeMatte(a, m, g, s, width, height) {
+  // Where Blockbench draws the entities, grown by `radius` pixels (a box, in two passes): with
+  // particles removed, nothing of the cut-out further away than that is kept (smoke drifting by).
+  const KEEP_RADIUS = 14;
+  function nearMask(drawn, width, height, radius = KEEP_RADIUS) {
+    const n = width * height;
+    const across = new Uint8Array(n);
+    const out = new Uint8Array(n);
+    for (let y = 0; y < height; y++) {
+      let count = 0;
+      const row = y * width;
+      const at = (x) => (x >= 0 && x < width && drawn[(row + x) * 4 + 3] > 127 ? 1 : 0);
+      for (let x = -radius; x <= radius; x++) count += at(x);
+      for (let x = 0; x < width; x++) {
+        across[row + x] = count > 0 ? 1 : 0;
+        count += at(x + radius + 1) - at(x - radius);
+      }
+    }
+    for (let x = 0; x < width; x++) {
+      let count = 0;
+      const at = (y) => (y >= 0 && y < height ? across[y * width + x] : 0);
+      for (let y = -radius; y <= radius; y++) count += at(y);
+      for (let y = 0; y < height; y++) {
+        out[y * width + x] = count > 0 ? 1 : 0;
+        count += at(y + radius + 1) - at(y - radius);
+      }
+    }
+    return out;
+  }
+
+  function computeMatte(a, m, g, s, width, height, keep = null) {
     const n = width * height;
     // what the backdrop alone changes: the typical magenta - green difference where it's seen
     const step = Math.max(1, Math.floor(n / 200000));
@@ -2295,7 +2324,7 @@ Write-Output $Out
       const k = i * 4;
       const t = ((m[k] - g[k]) * ref[0] + (m[k + 1] - g[k + 1]) * ref[1] + (m[k + 2] - g[k + 2]) * ref[2]) / refLength2;
       const seen = Math.max(0, Math.min(1, (t - 0.08) / 0.77));
-      alpha[i] = 1 - seen;
+      alpha[i] = keep && !keep[i] ? 0 : 1 - seen;
     }
     // colour from the normal shot; along the edges, the world behind (found next to the edge) is
     // taken out of the colour
@@ -2607,11 +2636,13 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
           if (a.width !== m.width || a.width !== g.width || a.height !== m.height || a.height !== g.height || (skyShot && (skyShot.width !== a.width || skyShot.height !== a.height))) {
             throw new Error('The Minecraft window changed size during the shots. Try again without resizing it.');
           }
-          const result = computeMatte(a.data, m.data, g.data, skyShot && skyShot.data, a.width, a.height);
+          const drawn = options.normals || compare || options.particles ? renderNormalPass(take.roots, a.width, a.height) : null;
+          const keep = options.particles && drawn ? nearMask(drawn, a.width, a.height) : null;
+          const result = computeMatte(a.data, m.data, g.data, skyShot && skyShot.data, a.width, a.height, keep);
           if (options.transparent) lines.push(`_entities${take.suffix}|` + encodePng(result.cut, a.width, a.height));
           if (options.sky && result.sky) lines.push(`_entities${take.suffix}_sky|` + encodePng(result.sky, a.width, a.height));
-          if (options.normals) lines.push(`_normals${take.suffix}|` + encodePng(fitNormalsToMatte(renderNormalPass(take.roots, a.width, a.height), result.alpha, a.width, a.height), a.width, a.height));
-          if (compare) lines.push('_compare|' + encodePng(compareImage(a.data, renderNormalPass(take.roots, a.width, a.height), result.alpha, a.width, a.height), a.width, a.height));
+          if (options.normals) lines.push(`_normals${take.suffix}|` + encodePng(fitNormalsToMatte(drawn, result.alpha, a.width, a.height), a.width, a.height));
+          if (compare) lines.push('_compare|' + encodePng(compareImage(a.data, drawn, result.alpha, a.width, a.height), a.width, a.height));
         }
       }
       const saved = await runPowerShell(SAVE_PS1, lines.join('\n'), 'save the screenshots');
@@ -9051,6 +9082,13 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // <changelog>
   const CHANGELOG = [
     {
+      "version": "0.50.1",
+      "date": "2026-10-02",
+      "changes": [
+        "Remove particles now also removes slow particles like smoke, which drift too little between frames to drop out. With it on, the cut-outs, sky shots and normal pass keep only what is within a few pixels of the players and mobs as Blockbench draws them. Smoke right in front of them still shows."
+      ]
+    },
+    {
       "version": "0.50.0",
       "date": "2026-10-02",
       "changes": [
@@ -9791,7 +9829,7 @@ ${PLUGIN_URL}`,
 
   // for the plugin's own tests only (they set this flag); nothing happens otherwise
   if (typeof globalThis !== 'undefined' && globalThis.__POSE_STUDIO_TEST) {
-    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, restDelta, buildEquipmentPreview, stillItems, prepareStillItems };
+    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems };
   }
 
   Plugin.register('pose_studio', {

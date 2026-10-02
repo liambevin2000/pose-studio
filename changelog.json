@@ -1,5 +1,12 @@
 [
   {
+    "version": "0.50.1",
+    "date": "2026-10-02",
+    "changes": [
+      "Remove particles now also removes slow particles like smoke, which drift too little between frames to drop out. With it on, the cut-outs, sky shots and normal pass keep only what is within a few pixels of the players and mobs as Blockbench draws them. Smoke right in front of them still shows."
+    ]
+  },
+  {
     "version": "0.50.0",
     "date": "2026-10-02",
     "changes": [

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.50.1 (2026-10-02)
+
+- Remove particles now also removes slow particles like smoke, which drift too little between frames to drop out. With it on, the cut-outs, sky shots and normal pass keep only what is within a few pixels of the players and mobs as Blockbench draws them. Smoke right in front of them still shows.
+
 ## 0.50.0 (2026-10-02)
 
 - New: weapons and armour that swing or sway by themselves (a flail chain falling and swinging, a swaying lantern, a cloak drifting as you walk) stay still on Pose Studio players and mobs, where Blockbench shows them. Pose Studio adds a still copy of each such item to its own pack: the same model, texture and resting pose, with movement and time frozen at zero. It is used only when a Pose Studio player or mob holds or wears the item; real players keep the swing. Cloaks still follow their posed angle, and tridents and spears are held the same way.
