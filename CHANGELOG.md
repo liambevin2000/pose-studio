@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.50.0 (2026-10-02)
+
+- New: weapons and armour that swing or sway by themselves (a flail chain falling and swinging, a swaying lantern, a cloak drifting as you walk) stay still on Pose Studio players and mobs, where Blockbench shows them. Pose Studio adds a still copy of each such item to its own pack: the same model, texture and resting pose, with movement and time frozen at zero. It is used only when a Pose Studio player or mob holds or wears the item; real players keep the swing. Cloaks still follow their posed angle, and tridents and spears are held the same way.
+- The copies are made when you open Skin & Equipment (or prepare entities), and only change when the packs do. Minecraft then needs one pack reload or world reopen.
+
 ## 0.49.2 (2026-10-02)
 
 - Fixed: scenes saved before 0.49.1 kept their misplaced armour until it was taken off and put back. Players with moved bones now get their armour rebuilt when the scene opens or Blockbench starts, connected to Minecraft or not.

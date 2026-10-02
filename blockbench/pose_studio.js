@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.49.2'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.50.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -6833,16 +6833,121 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     return JSON.stringify({ id: mannequinId(root.name), t: PROXY_TYPE, m: model.index, p: toWorld(root.origin), y: 0, q: packAngles(angles, moves).map((n) => n.toString(36)).join(','), e: armour });
   }
 
+  // ---- Still items -----------------------------------------------------------------------------
+  // Packs' weapons and armour can swing and settle by themselves (a flail's chain falls when it's
+  // equipped and sways as the wearer moves), so Minecraft shows them somewhere Blockbench can't
+  // know. For Pose Studio's players and mobs only, the Pose Studio pack gives such items a still
+  // copy: everything the same, except that in their animations movement and time read as zero, as
+  // for someone who has never moved (a cloak still follows its angle, a trident is held the same way).
+  // Real players keep the pack's own.
+  const STILL_OWNERS = `query.owner_identifier == 'pose:mannequin' || query.owner_identifier == '${PROXY_TYPE}'`;
+  const MOTION_SOURCE = '\\b(?:q|query)\\.(?:modified_distance_moved|distance_moved|ground_speed|vertical_speed|modified_move_speed|walk_distance|life_time|anim_time|time_stamp|delta_time)\\b(?!\\s*=(?!=))|\\b(?:v|variable)\\.smooth_\\w+\\b(?!\\s*=(?!=))';
+  const STILL_HASH_KEY = 'pose_studio_still_items';
+
+  function stillAnimation(def) {
+    return JSON.parse(JSON.stringify(def).replace(new RegExp(MOTION_SOURCE, 'gi'), '0'));
+  }
+
+  // The still copies this world's packs need: { items: [{ id, file, json }], animations: { id: def } }
+  function stillItems(content) {
+    const items = [];
+    const animations = {};
+    const moving = new RegExp(MOTION_SOURCE, 'i');
+    for (const id of (content.attachables && content.attachables.keys()) || []) {
+      const attachable = findAttachable(content, id);
+      const d = attachable && attachable.description;
+      if (!d || !d.animations) continue;
+      const remap = {};
+      for (const [key, animId] of Object.entries(d.animations)) {
+        if (typeof animId !== 'string' || /^controller\./.test(animId)) continue;
+        const def = content.animations.get(animId);
+        if (!def || !moving.test(JSON.stringify(def))) continue;
+        const stillId = `animation.pose_studio.still.${hashString(animId)}`;
+        animations[stillId] = stillAnimation(def);
+        remap[key] = stillId;
+      }
+      if (!Object.keys(remap).length) continue;
+      const copy = JSON.parse(JSON.stringify(d));
+      copy.identifier = `${id}.pose_studio`;
+      copy.item = { [id]: STILL_OWNERS };
+      copy.animations = Object.assign({}, copy.animations, remap);
+      const name = id.replace(/[^a-z0-9_]+/gi, '_').toLowerCase();
+      items.push({ id, file: `${name}.json`, json: { format_version: '1.10.0', 'minecraft:attachable': { description: copy } } });
+    }
+    return { items, animations };
+  }
+
+  // Writes the still copies into the Pose Studio resource pack. Returns how many when files were
+  // (re)written, 0 when they were already up to date.
+  function prepareStillItems(content) {
+    if (globalThis.__POSE_STUDIO_TEST && globalThis.__POSE_STUDIO_TEST.noPackWrites) return 0;
+    const { items, animations } = stillItems(content);
+    const hash = hashString('still2|' + JSON.stringify(items.map((i) => i.json)) + JSON.stringify(animations));
+    let saved = '';
+    try {
+      saved = localStorage.getItem(STILL_HASH_KEY) || '';
+    } catch (e) {
+      saved = '';
+    }
+    const fs = bedrockFs();
+    const rp = devPackDir('resource');
+    const dir = `${rp}\\attachables\\pose_still`;
+    const animFile = `${rp}\\animations\\pose_still.animation.json`;
+    if (saved === hash && (!items.length || fs.existsSync(dir))) return 0;
+    if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
+    if (fs.existsSync(animFile)) fs.rmSync(animFile, { force: true });
+    if (items.length) {
+      fs.mkdirSync(dir, { recursive: true });
+      if (!fs.existsSync(`${rp}\\animations`)) fs.mkdirSync(`${rp}\\animations`, { recursive: true });
+      for (const item of items) fs.writeFileSync(`${dir}\\${item.file}`, JSON.stringify(item.json, null, 2));
+      fs.writeFileSync(animFile, JSON.stringify({ format_version: '1.8.0', animations }, null, 2));
+    }
+    try {
+      localStorage.setItem(STILL_HASH_KEY, hash);
+    } catch (e) {
+      // written again next time; harmless
+    }
+    return items.length || (saved ? 1 : 0);
+  }
+
+  // Before equipment is picked: the still copies are in place (one pack reload when they change).
+  function offerStillItems(content) {
+    let count = 0;
+    try {
+      count = prepareStillItems(content);
+    } catch (e) {
+      console.warn('[Pose Studio] still items', e);
+      return;
+    }
+    if (!count || !link.connected) return;
+    Blockbench.showMessageBox(
+      {
+        title: 'Pose Studio: still weapons',
+        message: `Pose Studio prepared ${count} item${count === 1 ? '' : 's'} from this world's packs that swing or sway by themselves (a flail's chain, a lantern), so they stay still on Pose Studio's players and mobs, as Blockbench shows them. Players in the game keep the swing. Minecraft needs to reload its packs once. Reload now? (Or leave the world and open it again.)`,
+        buttons: ['Reload now', 'Later'],
+        confirm: 0,
+        cancel: 1,
+      },
+      (button) => button === 0 && reloadMinecraftPacks()
+    );
+  }
+
   // Prepares pose:proxy for the browser's world and offers the one reload it needs.
   async function prepareForWorld(state) {
     // every variant and baby of every entity, so switching variants never needs a reload
     const count = await prepareProxy(state.content, state.list.flatMap((e) => variantEntries(state.content, e)));
-    if (!count) return;
+    let still = 0;
+    try {
+      still = prepareStillItems(state.content);
+    } catch (e) {
+      console.warn('[Pose Studio] still items', e);
+    }
+    if (!count && !still) return;
     Blockbench.showMessageBox(
       {
         title: 'Pose Studio: entities prepared',
         message:
-          `Pose Studio prepared all ${state.list.length} entities in this world for Minecraft (${count} looks, counting variants and babies). Minecraft needs to reload its packs once to load them. ` +
+          (count ? `Pose Studio prepared all ${state.list.length} entities in this world for Minecraft (${count} looks, counting variants and babies). ` : 'Pose Studio prepared still copies of the items that swing by themselves. ') + 'Minecraft needs to reload its packs once to load them. ' +
           "After that, adding any of these entities is instant.\n\nYou'll only be asked again when this world's packs change. Reload now? (Or leave the world and open it again, which does the same and is more reliable in worlds with large packs.)",
         buttons: ['Reload now', 'Later'],
         confirm: 0,
@@ -7655,6 +7760,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
       showError('Pose Studio: skin & equipment', e);
       return;
     }
+    offerStillItems(content);
     const skin = isEntity ? null : skinParts(target, slots);
     const equipment = equipmentParts(target, content);
     const parts = skin ? [skin, equipment] : [equipment];
@@ -8945,6 +9051,14 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // <changelog>
   const CHANGELOG = [
     {
+      "version": "0.50.0",
+      "date": "2026-10-02",
+      "changes": [
+        "New: weapons and armour that swing or sway by themselves (a flail chain falling and swinging, a swaying lantern, a cloak drifting as you walk) stay still on Pose Studio players and mobs, where Blockbench shows them. Pose Studio adds a still copy of each such item to its own pack: the same model, texture and resting pose, with movement and time frozen at zero. It is used only when a Pose Studio player or mob holds or wears the item; real players keep the swing. Cloaks still follow their posed angle, and tridents and spears are held the same way.",
+        "The copies are made when you open Skin & Equipment (or prepare entities), and only change when the packs do. Minecraft then needs one pack reload or world reopen."
+      ]
+    },
+    {
       "version": "0.49.2",
       "date": "2026-10-02",
       "changes": [
@@ -9677,7 +9791,7 @@ ${PLUGIN_URL}`,
 
   // for the plugin's own tests only (they set this flag); nothing happens otherwise
   if (typeof globalThis !== 'undefined' && globalThis.__POSE_STUDIO_TEST) {
-    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, restDelta, buildEquipmentPreview };
+    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, restDelta, buildEquipmentPreview, stillItems, prepareStillItems };
   }
 
   Plugin.register('pose_studio', {
