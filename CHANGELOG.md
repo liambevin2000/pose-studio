@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.44.0 (2026-10-02)
+
+- New: Ride (Pose Studio menu). Select a player and a mob (Ctrl-click both) and Ride: the player sits on the mob's seat (from the mob's own definition: pigs, horses, camels, striders, DragonCraft's dragons and any pack mob with seats), on its back, facing its way, in Minecraft's riding pose. Dragons use the seat for their stage; a camel's second rider takes the back seat.
+- Riders stay on: moving or turning the mob carries them, and moving a rider by hand changes its place on the mob. Select a riding player alone and Ride again to get off. Drop to Ground leaves riders on their mounts (drop the mob instead).
+
 ## 0.43.0 (2026-10-02)
 
 - New: Camera > Aspect Ratio > 16:9 Left Half. Puts Minecraft at 16:9 in the top-left half of its screen and Blockbench in the right half, side by side.

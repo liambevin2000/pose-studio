@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.43.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.44.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -362,6 +362,11 @@
       checkGroupSpin();
     } catch (e) {
       console.warn('[Pose Studio] group rotation', e);
+    }
+    try {
+      checkRiders();
+    } catch (e) {
+      console.warn('[Pose Studio] riders', e);
     }
     try {
       if (povPreview) updatePovViewport();
@@ -1583,6 +1588,178 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
     return { origin: [Math.round(point.x), Math.round(point.y), Math.round(point.z)], yaw: round(yaw, 1) };
   }
 
+  // ---- Riding ----
+  // Pose Studio ▸ Ride: a player sits on a mob's seat (from the mob's minecraft:rideable), on the
+  // mob's back at that spot, facing the mob's way, in Minecraft's riding pose. The rider stays on:
+  // moving or turning the mob carries it, and moving the rider by hand changes its place on the mob.
+  // In Minecraft the rider and the mob are posed separately, so they look exactly the same there.
+
+  // The seats for a copy: ones players may take, for its look (a dragon's adult seat for an adult).
+  function mountSeats(content, info) {
+    const list = (content && content.seats && content.seats.get(info.entity)) || [];
+    const forPlayers = list.filter((s) => !s.family || s.family.includes('player'));
+    const pool = forPlayers.length ? forPlayers : list;
+    const words = String(info.variant || '').toLowerCase().split(/[\s_]+/).filter((w) => w.length > 2);
+    const fit = pool.find((s) => words.some((w) => s.group.toLowerCase().includes(w))) || pool.find((s) => /saddle|tame/i.test(s.group)) || pool[0];
+    return fit ? fit.seats : [];
+  }
+
+  // Each cube's box in the model, posed, measured from the model's own origin (not its turn).
+  function localCubeBoxes(root) {
+    const boxes = [];
+    const turn = (v, origin, rotation) =>
+      !rotation || !rotation.some((r) => r) ? v : v.clone().sub(new THREE.Vector3(...origin)).applyQuaternion(eulerQuaternion(rotation)).add(new THREE.Vector3(...origin));
+    root.forEachChild((c) => {
+      if (!(c instanceof Cube) || /^eq_/.test(c.name) || !c.from || !c.to) return;
+      const points = [];
+      for (let i = 0; i < 8; i++) {
+        let v = new THREE.Vector3(i & 1 ? c.to[0] : c.from[0], i & 2 ? c.to[1] : c.from[1], i & 4 ? c.to[2] : c.from[2]);
+        v = turn(v, c.origin || [0, 0, 0], c.rotation);
+        for (let g = c.parent; g instanceof Group && g !== root; g = g.parent) v = turn(v, g.origin, g.rotation);
+        points.push(v.sub(new THREE.Vector3(...root.origin)));
+      }
+      boxes.push(new THREE.Box3().setFromPoints(points));
+    });
+    return boxes;
+  }
+
+  // Where a rider sits on a mob, from the mob's origin (unturned): the seat across, the back's top
+  // under the seat for height (the hips 2px above it; a player's hips are 12px above its feet).
+  function seatSpot(mob, seat) {
+    const boxes = localCubeBoxes(mob);
+    // seats are in the entity's frame, which faces the other way from its model (+z ahead in the
+    // world, -z at the model's front); Blockbench also mirrors X, so across stays as is
+    const sx = seat ? seat.position[0] * 16 : 0;
+    const sz = seat ? -seat.position[2] * 16 : 0;
+    const sy = seat ? seat.position[1] * 16 : null;
+    const under = boxes.filter((b) => b.min.x <= sx + 0.01 && b.max.x >= sx - 0.01 && b.min.z <= sz + 0.01 && b.max.z >= sz - 0.01);
+    // the back: the highest top near the seat's height (a wing or head far above it isn't the back)
+    const near = sy === null ? under : under.filter((b) => b.max.y >= sy - 4 && b.max.y <= sy + 13);
+    let back = near.length ? Math.max(...near.map((b) => b.max.y)) : sy;
+    if (back === null) back = under.length ? Math.max(...under.map((b) => b.max.y)) : Math.max(0, ...boxes.map((b) => b.max.y));
+    return [round(sx, 3), round(back - 10, 3), round(sz, 3)];
+  }
+
+  // Puts a rider where its mount says (the mob's origin and turn, the rider's place on it).
+  function placeRider(rider, mob) {
+    const m = rider.pose_mount;
+    const qMob = eulerQuaternion(mob.rotation);
+    const at = new THREE.Vector3(...m.at).applyQuaternion(qMob).add(new THREE.Vector3(...mob.origin));
+    const d = [at.x - rider.origin[0], at.y - rider.origin[1], at.z - rider.origin[2]].map((v) => round(v, 4));
+    if (d.some((v) => Math.abs(v) > 1e-4)) translateTree(rider, d);
+    const rot = m.rot || [0, 0, 0];
+    const flat = (r) => Math.abs(r[0]) < 1e-3 && Math.abs(r[2]) < 1e-3;
+    if (flat(mob.rotation) && flat(rot)) {
+      // both only turned around: keep it a plain turn
+      rider.rotation = [0, round(wrap(mob.rotation[1] + rot[1]), 3), 0];
+      return;
+    }
+    const e = new THREE.Euler().setFromQuaternion(qMob.multiply(eulerQuaternion(rot)), eulerOrder());
+    rider.rotation = [e.x / DEG, e.y / DEG, e.z / DEG].map((v) => round(v, 3));
+  }
+
+  const findRoot = (name) => (typeof Outliner !== 'undefined' ? Outliner.root.find((g) => g instanceof Group && g.name === name) : null) || null;
+
+  // Every frame: riders follow their mobs; a rider moved by hand keeps its new place on the mob.
+  const mountSeen = new Map(); // rider -> the mob's origin and turn last applied
+  function checkRiders() {
+    if (typeof Project === 'undefined' || !Project) return;
+    let moved = false;
+    for (const rider of mannequinRoots()) {
+      const m = rider.pose_mount;
+      if (!m) continue;
+      const mob = findRoot(m.mob);
+      if (!mob) continue;
+      const signature = JSON.stringify([mob.origin, mob.rotation]);
+      if (mountSeen.get(rider) !== signature) {
+        placeRider(rider, mob);
+        mountSeen.set(rider, signature);
+        moved = true;
+        continue;
+      }
+      const qInv = eulerQuaternion(mob.rotation).invert();
+      const at = new THREE.Vector3(...rider.origin).sub(new THREE.Vector3(...mob.origin)).applyQuaternion(qInv.clone());
+      const e = new THREE.Euler().setFromQuaternion(qInv.multiply(eulerQuaternion(rider.rotation)), eulerOrder());
+      const next = { at: [at.x, at.y, at.z].map((v) => round(v, 3)), rot: [e.x / DEG, e.y / DEG, e.z / DEG].map((v) => round(v, 3)) };
+      if (next.at.some((v, i) => Math.abs(v - m.at[i]) > 1e-3) || next.rot.some((v, i) => Math.abs(v - (m.rot || [0, 0, 0])[i]) > 1e-2)) {
+        rider.pose_mount = Object.assign({}, m, next);
+      }
+    }
+    if (moved) Canvas.updateAll();
+  }
+
+  // Animation layers marked with a flag (the riding pose), put on or taken off together.
+  async function setPoseLayers(root, flag, ids, label) {
+    const content = await previewContent();
+    ensureRig(root);
+    const state = poseState(root, content);
+    const layers = state.savedLayers.filter((l) => !l[flag]);
+    for (const id of ids) if (state.byId.has(id)) layers.push({ id, frame: 0, [flag]: true });
+    if (!state.savedLayers.some((l) => l[flag]) && !layers.some((l) => l[flag])) return;
+    Undo.initEdit({ groups: [root].concat([...state.target.groups.values()]), elements: carriedCubes(root) });
+    applyPose(state.target, composePose(state.target, content, state.base, layers.map((l) => ({ anim: state.byId.get(l.id), frame: l.frame }))));
+    root.pose_animation = layers.length ? { base: Object.fromEntries([...state.base].map(([k, r]) => [k, r.slice()])), layers } : null;
+    Undo.finishEdit(label);
+    refreshGroups([...state.target.groups.values()]);
+  }
+
+  // The player's riding animations (legs forward, arms out), from the world's player model.
+  function ridingAnimations(content) {
+    const player = content.entities.get('minecraft:player');
+    const anims = (player && player.description.animations) || {};
+    return ['riding.legs', 'riding.arms'].map((k) => anims[k]).filter((id) => typeof id === 'string' && !/^controller\./.test(id));
+  }
+
+  async function rideSelected() {
+    const selected = selectedPoseRoots().length ? selectedPoseRoots() : [selectedPoseRoot()].filter(Boolean);
+    const players = selected.filter((g) => MANNEQUIN_PREFIX.test(g.name));
+    const mobs = selected.filter((g) => ENTITY_PREFIX.test(g.name) && g.pose_entity);
+    if (players.length && !mobs.length && players.some((g) => g.pose_mount)) return dismount(players.filter((g) => g.pose_mount));
+    if (!players.length || mobs.length !== 1) {
+      Blockbench.showQuickMessage('Select a player and the mob to ride (Ctrl-click both). Select a mounted player alone to get off.', 3500);
+      return;
+    }
+    const mob = mobs[0];
+    let content = null;
+    try {
+      content = await previewContent();
+    } catch (e) {
+      content = null;
+    }
+    const seats = mountSeats(content, mob.pose_entity);
+    const riders = mannequinRoots().filter((g) => g.pose_mount && g.pose_mount.mob === mob.name && !players.includes(g));
+    const cubes = [];
+    for (const player of players) player.forEachChild((c) => c instanceof Cube && cubes.push(c));
+    Undo.initEdit({ outliner: true, elements: cubes, groups: players });
+    players.forEach((player, i) => {
+      // the next free seat (a camel has two); more riders than seats share the last
+      const seatIndex = Math.min(riders.length + i, Math.max(0, seats.length - 1));
+      player.pose_mount = { mob: mob.name, seat: seatIndex, at: seatSpot(mob, seats[seatIndex] || null), rot: [0, 0, 0] };
+      placeRider(player, mob);
+      mountSeen.set(player, JSON.stringify([mob.origin, mob.rotation]));
+      lastSent.delete(mannequinId(player.name));
+    });
+    Undo.finishEdit('Ride', { outliner: true, elements: cubes, groups: players });
+    Canvas.updateAll();
+    if (content) for (const player of players) await setPoseLayers(player, 'ride', ridingAnimations(content), 'Riding pose').catch((e) => console.warn('[Pose Studio] riding pose', e));
+    Blockbench.showQuickMessage(
+      seats.length
+        ? `${players.map((g) => g.name).join(', ')} riding ${mob.name}`
+        : `${mob.name} has no seats for players in its pack: ${players.length > 1 ? 'they sit' : 'it sits'} on top of its back`,
+      3000
+    );
+  }
+
+  async function dismount(players) {
+    for (const player of players) {
+      player.pose_mount = null;
+      mountSeen.delete(player);
+      await setPoseLayers(player, 'ride', [], 'Get off').catch((e) => console.warn('[Pose Studio] riding pose', e));
+      lastSent.delete(mannequinId(player.name));
+    }
+    Blockbench.showQuickMessage(`${players.map((g) => g.name).join(', ')} got off (Drop to Ground puts ${players.length > 1 ? 'them' : 'it'} on the ground)`, 3000);
+  }
+
   // Pose Studio ▸ Drop to Ground: the selected players and mobs stand on the imported terrain under
   // them (the highest ground under their feet), or on the anchor's floor with no terrain imported.
   function modelSpacePoints(root) {
@@ -1632,7 +1809,7 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
 
   function dropToGround() {
     const posable = (g) => MANNEQUIN_PREFIX.test(g.name) || ENTITY_PREFIX.test(g.name);
-    const roots = (selectedPoseRoots().filter(posable).length ? selectedPoseRoots().filter(posable) : [selectedPoseRoot()].filter((g) => g && posable(g)));
+    const roots = (selectedPoseRoots().filter(posable).length ? selectedPoseRoots().filter(posable) : [selectedPoseRoot()].filter((g) => g && posable(g))).filter((g) => !g.pose_mount);
     if (!roots.length) {
       Blockbench.showQuickMessage('Select players (Player_) or mobs (ent_) first', 2000);
       return;
@@ -3176,12 +3353,60 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     const items = new Map();
     for (const pack of bp) if (pack.dir) readPackItems(fs, pack, items);
     const entityProperties = new Map(); // entity id -> { property -> enum values }
-    for (const pack of bp) if (pack.dir) readPackEntityProperties(fs, pack, entityProperties);
-    return { layers, rp, bp, entities, geometries, controllers, animations, animationControllers, names, attachables, itemNames, itemTextures, items, entityProperties };
+    const seats = new Map(); // entity id -> [{ group, family, seats: [{ position }] }]
+    try {
+      for (const dir of vanillaBehaviorDirs(fs, installData)) readArchivedSeats(fs, dir, seats);
+    } catch (e) {
+      // Minecraft's own behavior files unreadable: pack mobs still have theirs
+    }
+    for (const pack of bp) if (pack.dir) readPackEntityProperties(fs, pack, entityProperties, seats);
+    return { layers, rp, bp, entities, geometries, controllers, animations, animationControllers, names, attachables, itemNames, itemTextures, items, entityProperties, seats };
+  }
+
+  // The seats a mob offers riders (minecraft:rideable, in its components or component groups).
+  function entitySeats(entity) {
+    const out = [];
+    const look = (components, group) => {
+      const r = components && components['minecraft:rideable'];
+      if (!r || !r.seats) return;
+      const list = (Array.isArray(r.seats) ? r.seats : [r.seats]).filter((s) => s && Array.isArray(s.position));
+      if (list.length) out.push({ group, family: Array.isArray(r.family_types) ? r.family_types : null, seats: list.map((s) => ({ position: s.position.map(Number) })) });
+    };
+    look(entity.components, '');
+    for (const [group, components] of Object.entries(entity.component_groups || {})) look(components, group);
+    return out;
+  }
+
+  // Minecraft's own behavior packs (oldest first; later versions replace earlier definitions).
+  function vanillaBehaviorDirs(fs, installData) {
+    const base = `${installData}\\behavior_packs`;
+    const versioned = fs
+      .readdirSync(base)
+      .map((name) => ({ name, m: name.match(/^vanilla_(\d+(?:\.\d+)*)$/) }))
+      .filter((p) => p.m)
+      .sort((a, b) => compareVersions(a.m[1].split('.').map(Number), b.m[1].split('.').map(Number)));
+    return [`${base}\\vanilla`, ...versioned.map((p) => `${base}\\${p.name}`)];
+  }
+
+  function readArchivedSeats(fs, dir, out) {
+    const file = `${dir}\\__brarchive\\entities.brarchive`;
+    if (!fs.existsSync(file)) return;
+    for (const entry of readBrarchive(fs.readFileSync(file))) {
+      if (!/\.json$/i.test(entry.name) || !entry.size) continue;
+      try {
+        const e = parseLooseJson(entry.read())['minecraft:entity'];
+        if (e && e.description && e.description.identifier) {
+          const seats = entitySeats(e);
+          if (seats.length) out.set(e.description.identifier, seats);
+        }
+      } catch (err) {
+        // skip
+      }
+    }
   }
 
   // A behavior pack's entity properties that take named values (enums): id -> { name -> values }.
-  function readPackEntityProperties(fs, pack, out) {
+  function readPackEntityProperties(fs, pack, out, seatsOut) {
     const walk = (dir, depth) => {
       let names = [];
       try {
@@ -3192,11 +3417,16 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
       for (const name of names) {
         const full = `${dir}\\${name}`;
         if (/\.json$/i.test(name)) {
-          let d;
+          let entity;
           try {
-            d = (parseLooseJson(fs.readFileSync(full))['minecraft:entity'] || {}).description;
+            entity = parseLooseJson(fs.readFileSync(full))['minecraft:entity'] || {};
           } catch (e) {
             continue;
+          }
+          const d = entity.description;
+          if (d && d.identifier && seatsOut) {
+            const seats = entitySeats(entity);
+            if (seats.length) seatsOut.set(d.identifier, seats);
           }
           if (!d || !d.identifier || !d.properties) continue;
           const enums = {};
@@ -7992,6 +8222,14 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // <changelog>
   const CHANGELOG = [
     {
+      "version": "0.44.0",
+      "date": "2026-10-02",
+      "changes": [
+        "New: Ride (Pose Studio menu). Select a player and a mob (Ctrl-click both) and Ride: the player sits on the mob's seat (from the mob's own definition: pigs, horses, camels, striders, DragonCraft's dragons and any pack mob with seats), on its back, facing its way, in Minecraft's riding pose. Dragons use the seat for their stage; a camel's second rider takes the back seat.",
+        "Riders stay on: moving or turning the mob carries them, and moving a rider by hand changes its place on the mob. Select a riding player alone and Ride again to get off. Drop to Ground leaves riders on their mounts (drop the mob instead)."
+      ]
+    },
+    {
       "version": "0.43.0",
       "date": "2026-10-02",
       "changes": [
@@ -8577,7 +8815,7 @@ ${PLUGIN_URL}`,
 
   // for the plugin's own tests only (they set this flag); nothing happens otherwise
   if (typeof globalThis !== 'undefined' && globalThis.__POSE_STUDIO_TEST) {
-    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset };
+    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot };
   }
 
   Plugin.register('pose_studio', {
@@ -8599,6 +8837,7 @@ ${PLUGIN_URL}`,
         new Property(Group, 'object', 'pose_equipment'),
         new Property(Group, 'object', 'pose_animation'),
         new Property(Group, 'object', 'pose_vars'),
+        new Property(Group, 'object', 'pose_mount'),
         new Property(Group, 'object', 'pose_driver'),
         new Property(Group, 'number', 'pose_skin_slot', { default: 0 }),
         new Property(Group, 'boolean', 'pose_slim', { default: false }),
@@ -8656,6 +8895,10 @@ ${PLUGIN_URL}`,
           name: 'Variant…', icon: 'palette', click: openVariants,
           description: 'Other looks of the selected entity: biome and colour variants, and its baby version.',
           condition: () => selectionIs('entity'),
+        }),
+        ride: new Action('pose_studio_ride', {
+          name: 'Ride', icon: 'airline_seat_recline_normal', click: () => rideSelected(),
+          description: "Sits the selected player on the selected mob's seat (Ctrl-click both). Select a riding player alone to get off.",
         }),
         drop: new Action('pose_studio_drop', {
           name: 'Drop to Ground', icon: 'vertical_align_bottom', click: dropToGround,
@@ -8780,6 +9023,7 @@ ${PLUGIN_URL}`,
         a.variant,
         a.animation,
         a.drop,
+        a.ride,
         { name: 'Add Camera', id: 'pose_studio_add_camera', icon: 'videocam', children: [a.grabcam, a.savecam] },
         {
           name: 'Camera', id: 'pose_studio_camera_menu', icon: 'photo_camera_front',
