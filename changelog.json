@@ -1,5 +1,13 @@
 [
   {
+    "version": "0.45.1",
+    "date": "2026-10-02",
+    "changes": [
+      "Fixed: first-person shots with a low camera jolted back and forth: standing with your eyes at the camera put your legs in the ground, and Minecraft kept pushing you out. You now sit on an invisible seat (no collision, no gravity) placed so your eyes are exactly at the camera, whatever the terrain. Getting off puts you straight back on; the seat goes when the shot ends.",
+      "Update the Minecraft packs (Check for Updates, then reopen the world)."
+    ]
+  },
+  {
     "version": "0.45.0",
     "date": "2026-10-02",
     "changes": [

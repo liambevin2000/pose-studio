@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.45.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.45.1'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -935,7 +935,7 @@
           type: 'info',
           text:
             "While this camera is active and Sync Game Camera is on, Minecraft shows its own first-person view from the camera: your hand holding these items, as when you play (pack weapons in their first-person pose). " +
-            "You're moved to the camera and held there; the items you were holding come back when you switch cameras or turn syncing off. The arm wears your own skin. Blockbench's camera view shows the scene without the hand.",
+            "You sit on an invisible seat at the camera (so low cameras don't put you in the ground), eyes exactly at the camera; the items you were holding come back when you switch cameras or turn syncing off. The arm wears your own skin. Blockbench's camera view shows the scene without the hand.",
         },
       },
       onConfirm(form) {
@@ -7655,7 +7655,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     return { id: idItem.slice(2), name: scene.world || '', anchor: point('A|'), player: point('P|'), locations, removed: scene.removed || [], protocol: version ? Number(version.slice(2)) : 0 };
   }
 
-  const EXPECTED_PACK_PROTOCOL = 12; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
+  const EXPECTED_PACK_PROTOCOL = 13; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
   let warnedOldPack = false;
 
   // Scene files in the scenes folders that belong to a world (their pose_world says so), as
@@ -8405,6 +8405,14 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.45.1",
+      "date": "2026-10-02",
+      "changes": [
+        "Fixed: first-person shots with a low camera jolted back and forth: standing with your eyes at the camera put your legs in the ground, and Minecraft kept pushing you out. You now sit on an invisible seat (no collision, no gravity) placed so your eyes are exactly at the camera, whatever the terrain. Getting off puts you straight back on; the seat goes when the shot ends.",
+        "Update the Minecraft packs (Check for Updates, then reopen the world)."
+      ]
+    },
     {
       "version": "0.45.0",
       "date": "2026-10-02",

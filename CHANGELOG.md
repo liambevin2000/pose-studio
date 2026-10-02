@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.45.1 (2026-10-02)
+
+- Fixed: first-person shots with a low camera jolted back and forth: standing with your eyes at the camera put your legs in the ground, and Minecraft kept pushing you out. You now sit on an invisible seat (no collision, no gravity) placed so your eyes are exactly at the camera, whatever the terrain. Getting off puts you straight back on; the seat goes when the shot ends.
+- Update the Minecraft packs (Check for Updates, then reopen the world).
+
 ## 0.45.0 (2026-10-02)
 
 - New: first-person shots (Camera > First-Person Shot…). The active camera shoots from the player's eyes in Minecraft's own first-person view, so the hand is in the shot, holding the items you pick for each hand (vanilla, your packs' 3D weapons in their first-person pose, or any item id).

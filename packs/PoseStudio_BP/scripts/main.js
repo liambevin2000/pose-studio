@@ -312,11 +312,15 @@ function clearCamera(player) {
   }
 }
 
-// First-person shots ({"fp":1,"m":item,"o":item} on pose:cam): the player stands with their eyes at
-// the camera, looking where it looks, in Minecraft's own first-person view, so the hand and what it
-// holds are in the shot (a pack weapon's first-person pose included). The items go in the player's
-// hands; what was there comes back when the shot ends. The player is held in place every tick.
-const firstPerson = new Map(); // player id -> { at, rotation, dim, saved: { main, off }, slot, unhid }
+// First-person shots ({"fp":1,"m":item,"o":item} on pose:cam): Minecraft's own first-person view
+// from the camera, so the hand and what it holds are in the shot (a pack weapon's first-person pose
+// included). Standing there would put the player's legs in the ground when the camera is low, and
+// Minecraft pushes players out of blocks; so the player rides an invisible seat (a mannequin with no
+// collision or gravity) placed so their eyes are exactly at the camera. Riders aren't pushed out of
+// blocks. The seat's direction holds the player's yaw; the pitch is set on the player. The items go
+// in the player's hands; what was there comes back when the shot ends.
+const firstPerson = new Map(); // player id -> { eye, rotation, dim, seat, offset, saved, slot, items, unhid }
+const SEAT_TAG = "pose_seat";
 
 function itemOrNothing(id) {
   const name = String(id || "").trim();
@@ -328,8 +332,31 @@ function itemOrNothing(id) {
   }
 }
 
+function ridingOn(player) {
+  try {
+    const riding = player.getComponent("minecraft:riding");
+    return riding ? riding.entityRidingOn : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+// Puts the seat where the player's eyes land on the camera (offset: eyes from the seat, as measured
+// while riding; a first guess before that) and seats the player on it.
+function placeSeat(player, state) {
+  const seat = state.seat;
+  const offset = state.offset || { x: 0, y: 1.1, z: 0 };
+  const at = { x: state.eye.x - offset.x, y: state.eye.y - offset.y, z: state.eye.z - offset.z };
+  const rideable = seat.getComponent("minecraft:rideable");
+  if (ridingOn(player) && rideable) rideable.ejectRider(player);
+  seat.teleport(at, { dimension: state.dim, rotation: { x: 0, y: state.rotation.y } });
+  if (rideable) rideable.addRider(player);
+  state.placedAt = at;
+}
+
 function setFirstPerson(player, anchor, eye, target, data) {
   let state = firstPerson.get(player.id);
+  const dim = world.getDimension(anchor.dim);
   if (!state) {
     const inventory = player.getComponent("minecraft:inventory");
     const equippable = player.getComponent("minecraft:equippable");
@@ -358,16 +385,27 @@ function setFirstPerson(player, anchor, eye, target, data) {
     if (equippable) equippable.setEquipment(EquipmentSlot.Offhand, itemOrNothing(data.o));
     state.items = key;
   }
-  // eyes at the camera, looking at its target
-  const head = player.getHeadLocation();
-  const eyeHeight = head && Number.isFinite(head.y) ? head.y - player.location.y : 1.62;
+  // where to look from, and which way
   const dx = target.x - eye.x;
   const dy = target.y - eye.y;
   const dz = target.z - eye.z;
-  state.at = { x: eye.x, y: eye.y - eyeHeight, z: eye.z };
+  state.eye = { x: eye.x, y: eye.y, z: eye.z };
   state.rotation = { x: -Math.atan2(dy, Math.hypot(dx, dz)) * 180 / Math.PI, y: Math.atan2(-dx, dz) * 180 / Math.PI };
-  state.dim = world.getDimension(anchor.dim);
-  player.teleport(state.at, { dimension: state.dim, rotation: state.rotation });
+  state.dim = dim;
+  const seatValid = (s) => !!s && (typeof s.isValid === "function" ? s.isValid() : s.isValid !== false);
+  if (!seatValid(state.seat)) {
+    const seat = dim.spawnEntity(TYPE, state.eye);
+    seat.addTag(SEAT_TAG);
+    seat.setProperty("pose:hidden", true);
+    seat.triggerEvent("pose:make_seat");
+    state.seat = seat;
+  }
+  placeSeat(player, state);
+  try {
+    player.setRotation(state.rotation);
+  } catch {
+    // older versions: the seat still holds the yaw
+  }
   player.runCommand("camera @s set minecraft:first_person");
   if (data.f) {
     try {
@@ -383,6 +421,13 @@ function leaveFirstPerson(player) {
   if (!state) return;
   firstPerson.delete(player.id);
   try {
+    const rideable = state.seat && state.seat.getComponent("minecraft:rideable");
+    if (rideable && ridingOn(player)) rideable.ejectRider(player);
+    if (state.seat) state.seat.remove();
+  } catch {
+    // the seat is gone already
+  }
+  try {
     const inventory = player.getComponent("minecraft:inventory");
     const equippable = player.getComponent("minecraft:equippable");
     if (inventory && inventory.container) inventory.container.setItem(state.slot, state.saved.main);
@@ -393,7 +438,8 @@ function leaveFirstPerson(player) {
   if (state.unhid && player.hasTag(HIDDEN_TAG)) player.addEffect("invisibility", 20000000, { amplifier: 0, showParticles: false });
 }
 
-// held in place: no falling or wandering between frames of a first-person shot
+// every tick: still seated (sneaking gets you off; you're put back), eyes exactly at the camera
+// (the seat moves to correct it once the real offset is measured), looking the camera's way
 system.runInterval(() => {
   for (const [id, state] of firstPerson) {
     const player = world.getAllPlayers().find((p) => p.id === id);
@@ -401,10 +447,28 @@ system.runInterval(() => {
       firstPerson.delete(id);
       continue;
     }
-    const l = player.location;
+    if (!state.seat) continue;
+    const mount = ridingOn(player);
+    if (!mount || mount.id !== state.seat.id) {
+      const rideable = state.seat.getComponent("minecraft:rideable");
+      if (rideable) rideable.addRider(player);
+      continue;
+    }
+    const head = player.getHeadLocation();
+    const err = Math.hypot(head.x - state.eye.x, head.y - state.eye.y, head.z - state.eye.z);
+    if (err > 0.005) {
+      const s = state.seat.location;
+      state.offset = { x: head.x - s.x, y: head.y - s.y, z: head.z - s.z };
+      placeSeat(player, state);
+      continue;
+    }
     const r = player.getRotation();
-    if (Math.hypot(l.x - state.at.x, l.y - state.at.y, l.z - state.at.z) > 0.001 || Math.abs(r.x - state.rotation.x) > 0.01 || Math.abs(r.y - state.rotation.y) > 0.01) {
-      player.teleport(state.at, { dimension: state.dim, rotation: state.rotation });
+    if (Math.abs(r.x - state.rotation.x) > 0.01 || Math.abs(r.y - state.rotation.y) > 0.01) {
+      try {
+        player.setRotation(state.rotation);
+      } catch {
+        // can't turn the player in this version
+      }
     }
   }
 }, 1);
@@ -491,7 +555,7 @@ function debug(player) {
 // Every name looks like `PSD[op|page|item]`; page 0 always carries
 // `M|ready|<pages>|<items>|<items per page>` or `M|busy|<percent>`.
 // What this script understands; Blockbench warns when the world runs an older one.
-const PACK_PROTOCOL = 12;
+const PACK_PROTOCOL = 13;
 const IO_OBJECTIVE = "pose_io";
 const ITEMS_PER_PAGE = 30;
 const MAX_PAGES_PER_BATCH = 16;
@@ -852,6 +916,15 @@ function removeLeftoverHolders() {
   }
 }
 system.runTimeout(removeLeftoverHolders, 20);
+system.runTimeout(() => {
+  for (const dimension of ["overworld", "nether", "the_end"]) {
+    try {
+      for (const e of world.getDimension(dimension).getEntities({ tags: [SEAT_TAG] })) e.remove();
+    } catch {
+      // dimension not loaded
+    }
+  }
+}, 20);
 
 // Updates for a spot whose chunks aren't loaded (a location far from the player) wait here and
 // are retried every second, so the location appears as soon as you get there.
