@@ -1,5 +1,13 @@
 [
   {
+    "version": "0.44.1",
+    "date": "2026-10-02",
+    "changes": [
+      "Fixed: some mobs (horses, pigs, sheep, chickens and others a pack builds from texture layers, like DragonCraft's) didn't show in Minecraft after being added. They're now added in the look Minecraft has a copy of, and ones already in your scenes find their copy again (always the same model).",
+      "Faster riding: moving or turning a mob someone rides redraws only the rider, not the whole scene, so dragging it is smooth again."
+    ]
+  },
+  {
     "version": "0.44.0",
     "date": "2026-10-02",
     "changes": [

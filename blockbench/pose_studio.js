@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.44.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.44.1'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -1660,11 +1660,19 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
 
   const findRoot = (name) => (typeof Outliner !== 'undefined' ? Outliner.root.find((g) => g instanceof Group && g.name === name) : null) || null;
 
+  // Redraws one model's groups and cubes (cheap, unlike redrawing the scene with its terrain).
+  function redrawTree(root) {
+    const groups = [root];
+    const cubes = [];
+    root.forEachChild((c) => (c instanceof Cube ? cubes.push(c) : c instanceof Group && groups.push(c)));
+    if (Canvas.updateView) Canvas.updateView({ groups, group_aspects: { transform: true }, elements: cubes, element_aspects: { geometry: true, transform: true } });
+    else Canvas.updateAll();
+  }
+
   // Every frame: riders follow their mobs; a rider moved by hand keeps its new place on the mob.
   const mountSeen = new Map(); // rider -> the mob's origin and turn last applied
   function checkRiders() {
     if (typeof Project === 'undefined' || !Project) return;
-    let moved = false;
     for (const rider of mannequinRoots()) {
       const m = rider.pose_mount;
       if (!m) continue;
@@ -1674,7 +1682,7 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
       if (mountSeen.get(rider) !== signature) {
         placeRider(rider, mob);
         mountSeen.set(rider, signature);
-        moved = true;
+        redrawTree(rider);
         continue;
       }
       const qInv = eulerQuaternion(mob.rotation).invert();
@@ -1685,7 +1693,6 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
         rider.pose_mount = Object.assign({}, m, next);
       }
     }
-    if (moved) Canvas.updateAll();
   }
 
   // Animation layers marked with a flag (the riding pose), put on or taken off together.
@@ -6053,7 +6060,15 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // Which model of pose:proxy an ent_ group is. Groups from 0.11.0 only stored the entity id.
   function proxyModelFor(info) {
     const models = proxyRegistry().models;
-    if (info.key) return models[info.key] || null; // not prepared yet: nothing rather than another look
+    if (info.key && models[info.key]) return models[info.key];
+    if (info.key) {
+      // a copy made before its look was prepared this way (a mob a pack builds from texture
+      // layers): the prepared look of the same model and age, never a different model
+      const [entity, geometry] = info.key.split('|');
+      const baby = /\|baby$/.test(info.key);
+      const same = Object.entries(models).find(([key]) => key.startsWith(`${entity}|${geometry}|`) && /\|baby$/.test(key) === baby);
+      return same ? same[1] : null;
+    }
     return Object.entries(models).find(([key]) => key.startsWith(`${info.entity}|`))?.[1] || null;
   }
 
@@ -6382,7 +6397,10 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
           },
           async add(item) {
             try {
-              let entry = item;
+              // the look Minecraft has a copy of: the mob's plain look as prepared (a pack's horse is
+              // its coat with markings merged in, not the bare coat texture)
+              const looks = variantEntries(browserState.content, item);
+              let entry = looks.find((l) => entryKey(l) === entryKey(item)) || looks.find((l) => !l.baby && l.geometryId === item.geometryId) || item;
               if (this.baby) {
                 entry = variantEntries(browserState.content, item).find((v) => v.baby);
                 if (!entry) {
@@ -8222,6 +8240,14 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // <changelog>
   const CHANGELOG = [
     {
+      "version": "0.44.1",
+      "date": "2026-10-02",
+      "changes": [
+        "Fixed: some mobs (horses, pigs, sheep, chickens and others a pack builds from texture layers, like DragonCraft's) didn't show in Minecraft after being added. They're now added in the look Minecraft has a copy of, and ones already in your scenes find their copy again (always the same model).",
+        "Faster riding: moving or turning a mob someone rides redraws only the rider, not the whole scene, so dragging it is smooth again."
+      ]
+    },
+    {
       "version": "0.44.0",
       "date": "2026-10-02",
       "changes": [
@@ -8815,7 +8841,7 @@ ${PLUGIN_URL}`,
 
   // for the plugin's own tests only (they set this flag); nothing happens otherwise
   if (typeof globalThis !== 'undefined' && globalThis.__POSE_STUDIO_TEST) {
-    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot };
+    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor };
   }
 
   Plugin.register('pose_studio', {

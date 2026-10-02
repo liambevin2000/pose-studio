@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.44.1 (2026-10-02)
+
+- Fixed: some mobs (horses, pigs, sheep, chickens and others a pack builds from texture layers, like DragonCraft's) didn't show in Minecraft after being added. They're now added in the look Minecraft has a copy of, and ones already in your scenes find their copy again (always the same model).
+- Faster riding: moving or turning a mob someone rides redraws only the rider, not the whole scene, so dragging it is smooth again.
+
 ## 0.44.0 (2026-10-02)
 
 - New: Ride (Pose Studio menu). Select a player and a mob (Ctrl-click both) and Ride: the player sits on the mob's seat (from the mob's own definition: pigs, horses, camels, striders, DragonCraft's dragons and any pack mob with seats), on its back, facing its way, in Minecraft's riding pose. Dragons use the seat for their stage; a camel's second rider takes the back seat.
