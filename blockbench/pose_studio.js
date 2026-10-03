@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.51.1'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.51.2'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -1444,11 +1444,18 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
     if (!equipmentChecking) {
       equipmentChecking = true;
       const uuid = Project.uuid;
+      const done = () => {
+        equipmentChecked.add(uuid);
+        equipmentChecking = false;
+      };
+      // equipment is never held back for long: if reading the packs takes more than a few seconds
+      // (or never finishes), it's sent as the scene has it
+      const limit = setTimeout(done, 6000);
       checkEquipmentItems()
         .catch((e) => console.warn('[Pose Studio] item check', e))
         .finally(() => {
-          equipmentChecked.add(uuid);
-          equipmentChecking = false;
+          clearTimeout(limit);
+          done();
         });
     }
     return false;
@@ -9209,6 +9216,14 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.51.2",
+      "date": "2026-10-03",
+      "changes": [
+        "Fixed: equipment could be held back for good if checking a scene's items against the world's packs never finished. It now waits six seconds at most, then sends the equipment as the scene has it.",
+        "Clearer message in Minecraft when the world has no such item: \"this world has no item called …\" instead of a syntax error. It means the world's behavior pack is a different version from the one the scene was made with, or isn't active in that world. Update the Minecraft packs for this message (Check for Updates, then reopen the world)."
+      ]
+    },
     {
       "version": "0.51.1",
       "date": "2026-10-03",

@@ -1,5 +1,13 @@
 [
   {
+    "version": "0.51.2",
+    "date": "2026-10-03",
+    "changes": [
+      "Fixed: equipment could be held back for good if checking a scene's items against the world's packs never finished. It now waits six seconds at most, then sends the equipment as the scene has it.",
+      "Clearer message in Minecraft when the world has no such item: \"this world has no item called …\" instead of a syntax error. It means the world's behavior pack is a different version from the one the scene was made with, or isn't active in that world. Update the Minecraft packs for this message (Check for Updates, then reopen the world)."
+    ]
+  },
+  {
     "version": "0.51.1",
     "date": "2026-10-03",
     "changes": [

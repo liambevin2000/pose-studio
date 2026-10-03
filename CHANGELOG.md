@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.51.2 (2026-10-03)
+
+- Fixed: equipment could be held back for good if checking a scene's items against the world's packs never finished. It now waits six seconds at most, then sends the equipment as the scene has it.
+- Clearer message in Minecraft when the world has no such item: "this world has no item called …" instead of a syntax error. It means the world's behavior pack is a different version from the one the scene was made with, or isn't active in that world. Update the Minecraft packs for this message (Check for Updates, then reopen the world).
+
 ## 0.51.1 (2026-10-03)
 
 - Fixed: a scene made with another version of a pack could name items that have since been renamed, and Minecraft answered with "pose:eq failed: some equipment couldn't be set … Syntax error: Unexpected 'spark_dc:mid_light_armor_helmet'". When a scene connects, its pack items are now checked against the world's packs first. A renamed item (the one now defined in the file named after the old id) is swapped for its new name, and Blockbench tells you which.

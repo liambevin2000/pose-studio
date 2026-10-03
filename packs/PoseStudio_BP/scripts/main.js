@@ -261,7 +261,9 @@ function applyEquipment(entity, equipment, slots = Object.keys(EQUIP_SLOTS)) {
     try {
       entity.runCommand(`replaceitem entity @s ${target} 0 ${wanted}`);
     } catch (e) {
-      problems.push(`${slot}: ${wanted} (${e})`);
+      // Minecraft reports an item it doesn't have as a syntax error at the item's name
+      const unknown = /Unexpected/.test(String(e)) && String(e).includes(wanted);
+      problems.push(unknown ? `${slot}: this world has no item called ${wanted} (its behavior pack is a different version, or isn't active in this world)` : `${slot}: ${wanted} (${e})`);
     }
   }
   if (problems.length) throw new Error(`some equipment couldn't be set: ${problems.join("; ")}`);
