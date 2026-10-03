@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.51.2'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.51.3'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -3928,11 +3928,17 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     return worlds.sort((a, b) => b.lastActive - a.lastActive);
   }
 
-  // Finds pack folders by UUID in the world itself and in the (development_)resource_packs folders.
+  // Finds pack folders by UUID, every copy of each, in the order Minecraft prefers them: the
+  // development_*_packs folders first (a development pack replaces a copy of the same pack inside
+  // the world, which is what people working on a pack have), then the world's own copy, then the
+  // installed packs. Map(uuid -> [{ dir, name, version }]).
   function findPackDirs(fs, world, bedrockRoot, kind) {
     const byUuid = new Map();
-    const roots = [`${world.path}\\${kind}_packs`];
-    for (const mojang of mojangFolders(fs, bedrockRoot)) roots.push(`${mojang}\\development_${kind}_packs`, `${mojang}\\${kind}_packs`);
+    const mojangs = mojangFolders(fs, bedrockRoot);
+    const roots = mojangs
+      .map((mojang) => `${mojang}\\development_${kind}_packs`)
+      .concat([`${world.path}\\${kind}_packs`])
+      .concat(mojangs.map((mojang) => `${mojang}\\${kind}_packs`));
     for (const root of roots) {
       let names = [];
       try {
@@ -3944,9 +3950,10 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
         const dir = `${root}\\${name}`;
         const manifest = readPackManifest(fs, dir);
         const uuid = manifest && manifest.header && manifest.header.uuid;
-        if (uuid && !byUuid.has(uuid.toLowerCase())) {
-          byUuid.set(uuid.toLowerCase(), { dir, name: (manifest.header.name || name).replace(/§./g, ''), version: manifest.header.version });
-        }
+        if (!uuid) continue;
+        const copies = byUuid.get(uuid.toLowerCase()) || [];
+        copies.push({ dir, name: (manifest.header.name || name).replace(/§./g, ''), version: manifest.header.version, development: /development_\w+_packs$/i.test(root) });
+        byUuid.set(uuid.toLowerCase(), copies);
       }
     }
     return byUuid;
@@ -3962,7 +3969,11 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     }
     const found = findPackDirs(fs, world, bedrockRoot, kind);
     return list.map((entry) => {
-      const pack = found.get(String(entry.pack_id).toLowerCase());
+      // a development copy if there is one (it is the one being worked on, whatever its version),
+      // else the copy with the version the world asks for, else the first found
+      const copies = found.get(String(entry.pack_id).toLowerCase()) || [];
+      const wanted = JSON.stringify(entry.version);
+      const pack = copies.find((c) => c.development) || copies.find((c) => JSON.stringify(c.version) === wanted) || copies[0];
       return { uuid: entry.pack_id, version: entry.version, dir: pack ? pack.dir : null, name: pack ? pack.name : `Missing pack ${entry.pack_id}` };
     });
   }
@@ -9217,6 +9228,14 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // <changelog>
   const CHANGELOG = [
     {
+      "version": "0.51.3",
+      "date": "2026-10-03",
+      "changes": [
+        "Fixed: for people working on a pack, Blockbench could read an old copy of it. When a pack is both inside the world folder and in Minecraft's development packs folder, Minecraft runs the development one, but Pose Studio read the copy inside the world. So it could offer items, armour and mobs under names the running game no longer has (\"this world has no item called spark_dc:mid_light_armor_helmet\"). Pose Studio now reads the development copy when there is one, as Minecraft does.",
+        "Scenes that still name the old items are switched to the new names when they connect (see 0.51.1)."
+      ]
+    },
+    {
       "version": "0.51.2",
       "date": "2026-10-03",
       "changes": [
@@ -9989,7 +10008,7 @@ ${PLUGIN_URL}`,
 
   // for the plugin's own tests only (they set this flag); nothing happens otherwise
   if (typeof globalThis !== 'undefined' && globalThis.__POSE_STUDIO_TEST) {
-    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId };
+    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks };
   }
 
   Plugin.register('pose_studio', {

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.51.3 (2026-10-03)
+
+- Fixed: for people working on a pack, Blockbench could read an old copy of it. When a pack is both inside the world folder and in Minecraft's development packs folder, Minecraft runs the development one, but Pose Studio read the copy inside the world. So it could offer items, armour and mobs under names the running game no longer has ("this world has no item called spark_dc:mid_light_armor_helmet"). Pose Studio now reads the development copy when there is one, as Minecraft does.
+- Scenes that still name the old items are switched to the new names when they connect (see 0.51.1).
+
 ## 0.51.2 (2026-10-03)
 
 - Fixed: equipment could be held back for good if checking a scene's items against the world's packs never finished. It now waits six seconds at most, then sends the equipment as the scene has it.
