@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.51.1 (2026-10-03)
+
+- Fixed: a scene made with another version of a pack could name items that have since been renamed, and Minecraft answered with "pose:eq failed: some equipment couldn't be set … Syntax error: Unexpected 'spark_dc:mid_light_armor_helmet'". When a scene connects, its pack items are now checked against the world's packs first. A renamed item (the one now defined in the file named after the old id) is swapped for its new name, and Blockbench tells you which.
+- An item that isn't in the world's packs at all is no longer sent to Minecraft: it stays in the scene, and a message names it, instead of an error in chat on every update.
+
 ## 0.51.0 (2026-10-02)
 
 - New in Entity Shot Options: ID mask pass. Each player and mob is one flat colour of its own on a transparent background, so selecting one in Photoshop is a single click. Its colour stays the same from shot to shot (files end in _ids).

@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.51.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.51.1'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -1370,6 +1370,90 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
     lastErrorLog = now;
   }
 
+  // ---- Items a scene has that the world doesn't ---------------------------------------------------
+  // A scene made with another version of a pack can name items that have since been renamed (or
+  // removed): Minecraft refuses to equip those. Once per scene, its pack items are checked against
+  // the world's packs: a renamed one (the item now defined in the file named after the old id)
+  // is swapped for its new name; one that isn't there at all is left in the scene but not sent.
+  const unknownItems = new Set();
+  const equipmentChecked = new Set(); // project uuids
+  let equipmentChecking = false;
+
+  // The id this world has for an item: itself if it's there, its new name if it was renamed, else null.
+  function currentItemId(content, id) {
+    if (!id || /^minecraft:/.test(id) || !id.includes(':')) return id;
+    if ((content.items && content.items.has(id)) || (content.attachables && content.attachables.has(id))) return id;
+    const [namespace, short] = id.toLowerCase().split(':');
+    for (const item of (content.items && content.items.values()) || []) {
+      if (item.file === short && item.id.toLowerCase().startsWith(namespace + ':')) return item.id;
+    }
+    return null;
+  }
+
+  function knownEquipment(root) {
+    const eq = root.pose_equipment || {};
+    if (!unknownItems.size) return eq;
+    return Object.fromEntries(Object.entries(eq).map(([slot, id]) => [slot, unknownItems.has(id) ? '' : id]));
+  }
+
+  async function checkEquipmentItems() {
+    const roots = mannequinRoots().concat(entityRoots()).filter((r) => Object.values(r.pose_equipment || {}).some((id) => id && !/^minecraft:/.test(id)));
+    if (!roots.length) return;
+    const content = await previewContent();
+    const renamed = [];
+    const missing = [];
+    for (const root of roots) {
+      let changed = false;
+      const next = Object.assign({}, root.pose_equipment);
+      for (const [slot, id] of Object.entries(next)) {
+        if (!id) continue;
+        const now = currentItemId(content, id);
+        if (now === id) continue;
+        if (now) {
+          next[slot] = now;
+          changed = true;
+          if (!renamed.includes(`${id} → ${now}`)) renamed.push(`${id} → ${now}`);
+        } else {
+          unknownItems.add(id);
+          if (!missing.includes(id)) missing.push(id);
+        }
+      }
+      if (changed) {
+        root.pose_equipment = next;
+        if (typeof Project !== 'undefined' && Project) Project.saved = false;
+        refreshEquipmentPreview(root);
+      }
+    }
+    if (renamed.length || missing.length) {
+      const lines = [];
+      if (renamed.length) lines.push(`These items were renamed in this world's packs, so the scene now uses the new names:\n${renamed.join('\n')}`);
+      if (missing.length) lines.push(`These items aren't in this world's packs, so Minecraft can't show them (they stay in the scene):\n${missing.join('\n')}\n\nThe scene was probably made with a different version of the packs.`);
+      Blockbench.showMessageBox({ title: 'Pose Studio: items from another pack version', message: lines.join('\n\n') });
+    }
+  }
+
+  // true once this scene's items have been checked (starts the check the first time)
+  function equipmentReady() {
+    if (typeof Project === 'undefined' || !Project) return false;
+    if (equipmentChecked.has(Project.uuid)) return true;
+    const custom = mannequinRoots().concat(entityRoots()).some((r) => Object.values(r.pose_equipment || {}).some((id) => id && !/^minecraft:/.test(id)));
+    if (!custom) {
+      equipmentChecked.add(Project.uuid);
+      return true;
+    }
+    if (!equipmentChecking) {
+      equipmentChecking = true;
+      const uuid = Project.uuid;
+      checkEquipmentItems()
+        .catch((e) => console.warn('[Pose Studio] item check', e))
+        .finally(() => {
+          equipmentChecked.add(uuid);
+          equipmentChecking = false;
+        });
+    }
+    return false;
+  }
+
   // Minecraft can drop the whole world on long commands, so nothing over MAX_COMMAND is sent.
   const MAX_COMMAND = 400;
   let warnedLong = false;
@@ -1468,9 +1552,10 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
     }
     // equipment goes separately and only when it changes (a pose plus a full set of pack items
     // would make one command too long); Minecraft remembers it per mannequin
-    for (const root of mannequinRoots()) {
+    const itemsChecked = equipmentReady();
+    for (const root of itemsChecked ? mannequinRoots() : []) {
       const id = mannequinId(root.name);
-      const msg = JSON.stringify({ id, e: root.pose_equipment || {} });
+      const msg = JSON.stringify({ id, e: knownEquipment(root) });
       if (lastSent.get(`${id}#eq`) === msg) continue;
       if (link.inFlight >= MAX_IN_FLIGHT) return;
       send(`scriptevent pose:eq ${msg}`);
@@ -1480,6 +1565,12 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
       const id = mannequinId(root.name);
       if (seen.has(id)) continue;
       seen.add(id);
+      if (!itemsChecked && Object.values(root.pose_equipment || {}).some(Boolean)) {
+        // sent once its items are checked; what is already in the world stays
+        seen.add(`${id}__main`);
+        seen.add(`${id}__off`);
+        continue;
+      }
       const msg = entityMessage(root);
       if (!msg) continue;
       if (lastSent.get(id) !== msg) {
@@ -4098,7 +4189,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
           const display = c['minecraft:display_name'];
           const tagList = c['minecraft:tags'] && Array.isArray(c['minecraft:tags'].tags) ? c['minecraft:tags'].tags.slice() : [];
           for (const key of Object.keys(c)) if (/^tag:/.test(key)) tagList.push(key.slice(4));
-          out.set(id, { id, slot, icon: typeof icon === 'string' ? icon : '', name: display && typeof display.value === 'string' ? display.value : '', source: pack.name, tags: tagList });
+          out.set(id, { id, slot, icon: typeof icon === 'string' ? icon : '', name: display && typeof display.value === 'string' ? display.value : '', source: pack.name, tags: tagList, file: name.replace(/(\.item)?\.json$/i, '').toLowerCase() });
         } else if (depth < 6 && !/\.[a-z0-9]{1,5}$/i.test(name)) walk(full, depth + 1);
       }
     };
@@ -6832,7 +6923,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // space) lands exactly on the copy's hand.
   const MANNEQUIN_HAND = { rightItem: [6, 15, 1], leftItem: [-6, 15, 1] };
   function heldItems(root) {
-    const eq = root.pose_equipment || {};
+    const eq = knownEquipment(root);
     const hands = {};
     for (const [side, slot, bone] of [['main', 'mainhand', 'rightItem'], ['off', 'offhand', 'leftItem']]) {
       if (!eq[slot]) continue;
@@ -6896,7 +6987,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     }
     // only worn armour goes to the copy; held items are sent separately (see handMessage)
     const armour = {};
-    for (const slot of ['head', 'chest', 'legs', 'feet']) if ((root.pose_equipment || {})[slot]) armour[slot] = root.pose_equipment[slot];
+    for (const slot of ['head', 'chest', 'legs', 'feet']) if (knownEquipment(root)[slot]) armour[slot] = knownEquipment(root)[slot];
     return JSON.stringify({ id: mannequinId(root.name), t: PROXY_TYPE, m: model.index, p: toWorld(root.origin), y: 0, q: packAngles(angles, moves).map((n) => n.toString(36)).join(','), e: armour });
   }
 
@@ -7797,6 +7888,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   }
 
   function setEquipment(mannequin, slot, item) {
+    unknownItems.delete(item);
     mannequin.pose_equipment = Object.assign({}, mannequin.pose_equipment, { [slot]: item || '' });
     lastSent.delete(mannequinId(mannequin.name));
     return refreshEquipmentPreview(mannequin);
@@ -9118,6 +9210,14 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // <changelog>
   const CHANGELOG = [
     {
+      "version": "0.51.1",
+      "date": "2026-10-03",
+      "changes": [
+        "Fixed: a scene made with another version of a pack could name items that have since been renamed, and Minecraft answered with \"pose:eq failed: some equipment couldn't be set … Syntax error: Unexpected 'spark_dc:mid_light_armor_helmet'\". When a scene connects, its pack items are now checked against the world's packs first. A renamed item (the one now defined in the file named after the old id) is swapped for its new name, and Blockbench tells you which.",
+        "An item that isn't in the world's packs at all is no longer sent to Minecraft: it stays in the scene, and a message names it, instead of an error in chat on every update."
+      ]
+    },
+    {
       "version": "0.51.0",
       "date": "2026-10-02",
       "changes": [
@@ -9874,7 +9974,7 @@ ${PLUGIN_URL}`,
 
   // for the plugin's own tests only (they set this flag); nothing happens otherwise
   if (typeof globalThis !== 'undefined' && globalThis.__POSE_STUDIO_TEST) {
-    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems };
+    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId };
   }
 
   Plugin.register('pose_studio', {
