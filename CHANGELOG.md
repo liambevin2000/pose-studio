@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.52.2 (2026-10-04)
+
+- Stream Deck plugin 1.2: each key's picture now follows what the key is set to. Time & Weather keys show a sunrise, the sun, a sunset, the moon and stars, rain or a thundercloud, on a button the colour of that time of day. Toggle keys show what they toggle: arrows for Sync Game Camera, an eye for the Camera POV view, connection bars for the Minecraft link. Camera keys show an arrow for next and previous, a film camera for a numbered camera.
+- Run Action keys get a sprite for their action: a creeper for Add Entity, a chestplate for Skin & Equipment, a saddle for Ride, a grass block for Import World, an arrow onto the ground for Drop to Ground, a clock, a chest, a lever, and so on (a command block for anything else).
+- Get it again with More > Get the Stream Deck Plugin and double-click the download.
+
 ## 0.52.1 (2026-10-04)
 
 - Stream Deck plugin 1.1: the keys are pixel art now, Minecraft style. Each is a stone button with a bevel and a sprite: a camera, the classic face, a film camera, a redstone lamp (lit, on a grass button, while a toggle is on), the square sun with a cloud, and a command block. The active camera's key turns grass green. Get it again with More > Get the Stream Deck Plugin and double-click the download.

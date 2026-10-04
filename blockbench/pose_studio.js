@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.52.1'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.52.2'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -9411,6 +9411,15 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.52.2",
+      "date": "2026-10-04",
+      "changes": [
+        "Stream Deck plugin 1.2: each key's picture now follows what the key is set to. Time & Weather keys show a sunrise, the sun, a sunset, the moon and stars, rain or a thundercloud, on a button the colour of that time of day. Toggle keys show what they toggle: arrows for Sync Game Camera, an eye for the Camera POV view, connection bars for the Minecraft link. Camera keys show an arrow for next and previous, a film camera for a numbered camera.",
+        "Run Action keys get a sprite for their action: a creeper for Add Entity, a chestplate for Skin & Equipment, a saddle for Ride, a grass block for Import World, an arrow onto the ground for Drop to Ground, a clock, a chest, a lever, and so on (a command block for anything else).",
+        "Get it again with More > Get the Stream Deck Plugin and double-click the download."
+      ]
+    },
     {
       "version": "0.52.1",
       "date": "2026-10-04",
