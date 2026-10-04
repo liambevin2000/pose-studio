@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.55.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.56.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -3030,6 +3030,228 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     if (!requireConnection()) return;
     send(`scriptevent pose:corner ${which}`);
     if (which === 'clear') removeStructureMesh();
+  }
+
+  // ---- The Pose Studio panel ------------------------------------------------------------------------
+  // A panel in the sidebar (movable, collapsible, floatable, like Blockbench's own) with what you use
+  // all the time as buttons: connecting, adding things, what applies to the selection, the cameras,
+  // capturing, and moving structures. Every button runs the action of the same name, so the menu,
+  // keyboard shortcuts and Stream Deck keys do exactly the same. It shows what's true now: whether
+  // Minecraft is connected, which camera is the active one, what's switched on.
+  let posePanel = null;
+  let posePanelTimer = null;
+  let posePanelCss = null;
+  const PANEL_FOLDED_KEY = 'pose_studio_panel_folded';
+
+  const PANEL_CSS = `
+    .pose_studio_panel { padding: 6px 8px 10px; overflow-y: auto; height: 100%; box-sizing: border-box; }
+    .pose_studio_panel .ps-head { display: flex; align-items: center; gap: 4px; margin: 8px 0 4px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--color-subtle_text); cursor: pointer; user-select: none; }
+    .pose_studio_panel .ps-head i { font-size: 16px; }
+    .pose_studio_panel .ps-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
+    .pose_studio_panel .ps-btn { display: flex; align-items: center; gap: 6px; min-height: 30px; padding: 2px 8px; border-radius: 4px; background: var(--color-button); color: var(--color-text); cursor: pointer; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+    .pose_studio_panel .ps-btn:hover { background: var(--color-selected); color: var(--color-light); }
+    .pose_studio_panel .ps-btn i { font-size: 18px; flex: none; }
+    .pose_studio_panel .ps-btn span { overflow: hidden; text-overflow: ellipsis; }
+    .pose_studio_panel .ps-btn.ps-wide { grid-column: 1 / -1; }
+    .pose_studio_panel .ps-btn.ps-big { min-height: 40px; justify-content: center; font-weight: 600; }
+    .pose_studio_panel .ps-btn.ps-on { background: var(--color-accent); color: var(--color-accent_text, #fff); }
+    .pose_studio_panel .ps-btn.ps-off { opacity: 0.45; pointer-events: none; }
+    .pose_studio_panel .ps-note { margin: 4px 0 0; font-size: 12px; color: var(--color-subtle_text); }
+    .pose_studio_panel .ps-connect.ps-live { background: #2e7d32; color: #fff; }
+    .pose_studio_panel .ps-connect.ps-wait { background: #a66a00; color: #fff; }
+    .pose_studio_panel .ps-cam { display: flex; align-items: center; gap: 6px; padding: 3px 8px; border-radius: 4px; cursor: pointer; }
+    .pose_studio_panel .ps-cam:hover { background: var(--color-button); }
+    .pose_studio_panel .ps-cam.ps-on { background: var(--color-accent); color: var(--color-accent_text, #fff); }
+    .pose_studio_panel .ps-cam i { font-size: 16px; }
+  `;
+
+  function panelState() {
+    const hasProject = typeof Project !== 'undefined' && !!Project;
+    const root = hasProject ? selectedPoseRoot() : null;
+    const cam = hasProject ? selectedCamera() : null;
+    const active = hasProject ? activeCamera() : null;
+    return {
+      linkOn: !!(linkToggle && linkToggle.value),
+      connected: !!link.connected,
+      world: (connectedWorld && connectedWorld.name) || '',
+      command: `/connect 127.0.0.1:${PORT}`,
+      sync: !!cameraSync,
+      pov: !!(povToggle && povToggle.value),
+      cameras: hasProject ? cameraRoots().map((c) => c.name) : [],
+      camera: active ? active.name : '',
+      selected: cam ? cam.name : root ? root.name : '',
+      kind: cam ? 'camera' : root ? (ENTITY_PREFIX.test(root.name) ? 'mob' : 'player') : '',
+      structure: !!structure,
+      shooting: !!shooting,
+    };
+  }
+
+  function setupPosePanel() {
+    if (typeof Panel === 'undefined' || posePanel) return;
+    if (Blockbench.addCSS) posePanelCss = Blockbench.addCSS(PANEL_CSS);
+    let folded = {};
+    try {
+      folded = JSON.parse(localStorage.getItem(PANEL_FOLDED_KEY) || '{"structure":true}') || {};
+    } catch (e) {
+      folded = { structure: true };
+    }
+    let vm = null;
+    posePanel = new Panel('pose_studio_panel', {
+      name: 'Pose Studio',
+      icon: 'accessibility_new',
+      growable: true,
+      resizable: true,
+      default_position: { slot: 'right_bar', float_position: [0, 0], float_size: [300, 520], height: 520, sidebar_index: 0 },
+      component: {
+        data: () => ({ s: panelState(), folded }),
+        mounted() {
+          vm = this;
+        },
+        methods: {
+          run(id) {
+            const item = typeof BarItems !== 'undefined' && BarItems[id];
+            if (item && typeof item.trigger === 'function') item.trigger();
+            this.refresh();
+          },
+          refresh() {
+            this.s = panelState();
+          },
+          pickCamera(name) {
+            try {
+              deckCamera(name);
+            } catch (e) {
+              Blockbench.showQuickMessage(String(e.message || e), 2000);
+            }
+            this.refresh();
+          },
+          copyCommand() {
+            try {
+              if (typeof clipboard !== 'undefined' && clipboard.writeText) clipboard.writeText(this.s.command);
+              else navigator.clipboard.writeText(this.s.command);
+              Blockbench.showQuickMessage(`Copied ${this.s.command}: paste it in Minecraft's chat`, 2500);
+            } catch (e) {
+              Blockbench.showQuickMessage(`Type ${this.s.command} in Minecraft's chat`, 3000);
+            }
+          },
+          fold(key) {
+            this.$set(this.folded, key, !this.folded[key]);
+            try {
+              localStorage.setItem(PANEL_FOLDED_KEY, JSON.stringify(this.folded));
+            } catch (e) {
+              // not remembered
+            }
+          },
+        },
+        template: `
+          <div class="pose_studio_panel">
+            <div class="ps-btn ps-big ps-wide ps-connect" :class="{ 'ps-live': s.connected, 'ps-wait': s.linkOn && !s.connected }" @click="run('pose_studio_link')" :title="s.linkOn ? 'Click to disconnect' : 'Starts listening for Minecraft'">
+              <i class="material-icons">{{ s.connected ? 'link' : s.linkOn ? 'hourglass_top' : 'cable' }}</i>
+              <span>{{ s.connected ? 'Connected' + (s.world ? ': ' + s.world : '') : s.linkOn ? 'Waiting for Minecraft…' : 'Connect to Minecraft' }}</span>
+            </div>
+            <div v-if="s.linkOn && !s.connected" class="ps-btn ps-wide" style="margin-top: 4px" @click="copyCommand" title="Copy it, then paste it in Minecraft's chat">
+              <i class="material-icons">content_copy</i><span>{{ s.command }}</span>
+            </div>
+
+            <div class="ps-head" @click="fold('scene')"><i class="material-icons">{{ folded.scene ? 'chevron_right' : 'expand_more' }}</i>Scene</div>
+            <div class="ps-grid" v-show="!folded.scene">
+              <div class="ps-btn" @click="run('pose_studio_add')"><i class="material-icons">accessibility_new</i><span>Add Player</span></div>
+              <div class="ps-btn" @click="run('pose_studio_entity')"><i class="material-icons">pets</i><span>Add Entity…</span></div>
+              <div class="ps-btn" @click="run('pose_studio_grabcam')" title="A camera where you're looking from in Minecraft"><i class="material-icons">add_a_photo</i><span>Camera: Game</span></div>
+              <div class="ps-btn" @click="run('pose_studio_savecam')" title="A camera where the Blockbench view is"><i class="material-icons">switch_video</i><span>Camera: View</span></div>
+              <div class="ps-btn" @click="run('pose_studio_scan')"><i class="material-icons">travel_explore</i><span>Import World…</span></div>
+              <div class="ps-btn" @click="run('pose_studio_scan_expand')"><i class="material-icons">add_location_alt</i><span>Expand World…</span></div>
+            </div>
+
+            <div class="ps-head" @click="fold('selected')"><i class="material-icons">{{ folded.selected ? 'chevron_right' : 'expand_more' }}</i>{{ s.selected || 'Selected' }}</div>
+            <div v-show="!folded.selected">
+              <div class="ps-note" v-if="!s.kind">Select a player, a mob or a camera.</div>
+              <div class="ps-grid" v-if="s.kind === 'player'">
+                <div class="ps-btn ps-wide" @click="run('pose_studio_outfit')"><i class="material-icons">checkroom</i><span>Skin &amp; Equipment…</span></div>
+                <div class="ps-btn" @click="run('pose_studio_animation')"><i class="material-icons">animation</i><span>Animation…</span></div>
+                <div class="ps-btn" @click="run('pose_studio_drop')"><i class="material-icons">vertical_align_bottom</i><span>Drop to Ground</span></div>
+                <div class="ps-btn" @click="run('pose_studio_ride')"><i class="material-icons">airline_seat_recline_normal</i><span>Ride</span></div>
+              </div>
+              <div class="ps-grid" v-if="s.kind === 'mob'">
+                <div class="ps-btn" @click="run('pose_studio_variant')"><i class="material-icons">palette</i><span>Variant…</span></div>
+                <div class="ps-btn" @click="run('pose_studio_equipment')"><i class="material-icons">shield</i><span>Equipment…</span></div>
+                <div class="ps-btn" @click="run('pose_studio_animation')"><i class="material-icons">animation</i><span>Animation…</span></div>
+                <div class="ps-btn" @click="run('pose_studio_drop')"><i class="material-icons">vertical_align_bottom</i><span>Drop to Ground</span></div>
+              </div>
+              <div class="ps-grid" v-if="s.kind === 'camera'">
+                <div class="ps-btn" @click="run('pose_studio_fov')"><i class="material-icons">camera</i><span>FOV…</span></div>
+                <div class="ps-btn" @click="run('pose_studio_lookcam')"><i class="material-icons">visibility</i><span>Look Through</span></div>
+              </div>
+            </div>
+
+            <div class="ps-head" @click="fold('cameras')"><i class="material-icons">{{ folded.cameras ? 'chevron_right' : 'expand_more' }}</i>Cameras</div>
+            <div v-show="!folded.cameras">
+              <div class="ps-grid">
+                <div class="ps-btn" :class="{ 'ps-on': s.sync }" @click="run('pose_studio_camera')" title="The Minecraft camera follows the active camera"><i class="material-icons">videocam</i><span>Sync Game</span></div>
+                <div class="ps-btn" :class="{ 'ps-on': s.pov }" @click="run('pose_studio_pov')" title="A second view locked to the active camera"><i class="material-icons">splitscreen</i><span>POV View</span></div>
+              </div>
+              <div class="ps-note" v-if="!s.cameras.length">No cameras yet: add one above.</div>
+              <div style="margin-top: 4px">
+                <div v-for="name in s.cameras" :key="name" class="ps-cam" :class="{ 'ps-on': name === s.camera }" @click="pickCamera(name)" :title="name === s.camera ? 'The active camera' : 'Make this the active camera'">
+                  <i class="material-icons">{{ name === s.camera ? 'radio_button_checked' : 'radio_button_unchecked' }}</i><span>{{ name }}</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="ps-head" @click="fold('capture')"><i class="material-icons">{{ folded.capture ? 'chevron_right' : 'expand_more' }}</i>Capture</div>
+            <div class="ps-grid" v-show="!folded.capture">
+              <div class="ps-btn ps-big ps-wide" :class="{ 'ps-off': s.shooting }" @click="run('pose_studio_capture')"><i class="material-icons">photo_camera</i><span>Capture Screenshot</span></div>
+              <div class="ps-btn ps-big ps-wide" :class="{ 'ps-off': s.shooting }" @click="run('pose_studio_capture_entities')"><i class="material-icons">person_outline</i><span>{{ s.shooting ? 'Shooting…' : 'Capture Entities Only' }}</span></div>
+              <div class="ps-btn ps-wide" @click="run('pose_studio_entity_shot_options')"><i class="material-icons">tune</i><span>Entity Shot Options…</span></div>
+            </div>
+
+            <div class="ps-head" @click="fold('structure')"><i class="material-icons">{{ folded.structure ? 'chevron_right' : 'expand_more' }}</i>Move Structure</div>
+            <div class="ps-grid" v-show="!folded.structure">
+              <div class="ps-btn" @click="run('pose_studio_struct_corner1')" title="The block you're standing in"><i class="material-icons">looks_one</i><span>Corner 1: Here</span></div>
+              <div class="ps-btn" @click="run('pose_studio_struct_corner2')" title="The block you're standing in"><i class="material-icons">looks_two</i><span>Corner 2: Here</span></div>
+              <div class="ps-btn" @click="run('pose_studio_struct_look1')" title="The block you're looking at"><i class="material-icons">looks_one</i><span>Corner 1: Look</span></div>
+              <div class="ps-btn" @click="run('pose_studio_struct_look2')" title="The block you're looking at"><i class="material-icons">looks_two</i><span>Corner 2: Look</span></div>
+              <div class="ps-btn ps-wide" @click="run('pose_studio_struct_get')"><i class="material-icons">select_all</i><span>Get Selection</span></div>
+              <div class="ps-btn ps-wide" :class="{ 'ps-off': !s.structure }" @click="run('pose_studio_struct_apply')"><i class="material-icons">open_with</i><span>Apply Move</span></div>
+              <div class="ps-btn" @click="run('pose_studio_struct_undo')"><i class="material-icons">undo</i><span>Undo Move</span></div>
+              <div class="ps-btn" @click="run('pose_studio_struct_redo')"><i class="material-icons">redo</i><span>Redo Move</span></div>
+              <div class="ps-btn ps-wide" @click="run('pose_studio_struct_clear')"><i class="material-icons">deselect</i><span>Clear Selection</span></div>
+            </div>
+          </div>`,
+      },
+    });
+    // what it shows follows what's true (a few times a second; cheap, and only assigned when it changed)
+    let last = '';
+    posePanelTimer = setInterval(() => {
+      if (!vm) return;
+      const next = panelState();
+      const text = JSON.stringify(next);
+      if (text !== last) {
+        last = text;
+        vm.s = next;
+      }
+    }, 400);
+  }
+
+  function removePosePanel() {
+    if (posePanelTimer) clearInterval(posePanelTimer);
+    posePanelTimer = null;
+    if (posePanel && posePanel.delete) posePanel.delete();
+    posePanel = null;
+    if (posePanelCss && posePanelCss.delete) posePanelCss.delete();
+    posePanelCss = null;
+  }
+
+  // Pose Studio ▸ Show Panel: unfolds it, or puts it back in the sidebar if it was hidden.
+  function showPosePanel() {
+    if (!posePanel) setupPosePanel();
+    if (!posePanel) return;
+    try {
+      if (posePanel.slot === 'hidden' && posePanel.moveTo) posePanel.moveTo('right_bar');
+      if (posePanel.folded && posePanel.fold) posePanel.fold(false);
+      if (typeof updateInterfacePanels === 'function') updateInterfacePanels();
+    } catch (e) {
+      console.warn('[Pose Studio] panel', e);
+    }
   }
 
   // ---- Stream Deck link ---------------------------------------------------------------------------
@@ -9709,6 +9931,16 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // <changelog>
   const CHANGELOG = [
     {
+      "version": "0.56.0",
+      "date": "2026-10-05",
+      "changes": [
+        "New: the Pose Studio panel. The everyday things are now buttons in a panel in the right sidebar (movable, foldable and floatable like Blockbench's own panels): connecting, adding players, entities and cameras, importing and expanding the world, capturing, and moving structures.",
+        "The panel shows what's true: the Connect button turns amber while waiting for Minecraft (with the /connect command to copy) and green when connected, with the world's name. Sync Game Camera and POV View light up while on. The scene's cameras are listed: click one to make it the active camera.",
+        "The Selected section only shows what applies to what you've selected: a player (Skin & Equipment, Animation, Drop to Ground, Ride), a mob (Variant, Equipment, Animation, Drop to Ground) or a camera (FOV, Look Through).",
+        "The Pose Studio menu is much shorter: Show Panel, Connect, Locations, Camera Settings, Stream Deck, Compare with Game, Skin Library, Recenter, Remove Mannequins, and Setup (folders, packs, Check for Updates, Debug Info). Every action still exists, so keyboard shortcuts and Stream Deck keys work as before."
+      ]
+    },
+    {
       "version": "0.55.0",
       "date": "2026-10-05",
       "changes": [
@@ -10550,7 +10782,7 @@ ${PLUGIN_URL}`,
 
   // for the plugin's own tests only (they set this flag); nothing happens otherwise
   if (typeof globalThis !== 'undefined' && globalThis.__POSE_STUDIO_TEST) {
-    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo };
+    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS };
   }
 
   Plugin.register('pose_studio', {
@@ -10722,6 +10954,18 @@ ${PLUGIN_URL}`,
         structlook1: new Action('pose_studio_struct_look1', { name: 'Corner 1: Block I Look At', icon: 'looks_one', click: () => structureCorner('look1') }),
         structlook2: new Action('pose_studio_struct_look2', { name: 'Corner 2: Block I Look At', icon: 'looks_two', click: () => structureCorner('look2') }),
         structclear: new Action('pose_studio_struct_clear', { name: 'Clear Selection', icon: 'deselect', click: () => structureCorner('clear') }),
+        showpanel: new Action('pose_studio_show_panel', {
+          name: 'Show Panel', icon: 'dock_to_left', click: showPosePanel,
+          description: 'Shows the Pose Studio panel (the buttons for everyday things) if it was hidden or folded.',
+        }),
+        checkupdates: new Action('pose_studio_check_updates_now', {
+          name: 'Check for Updates', icon: 'update', click: () => checkForUpdates(true),
+          description: 'Updates this plugin and installs or updates the Pose Studio Minecraft packs.',
+        }),
+        debuginfo: new Action('pose_studio_debug', {
+          name: 'Debug Info', icon: 'bug_report', click: showDebug,
+          description: 'What Blockbench is sending to Minecraft, for troubleshooting.',
+        }),
         comparegame: new Action('pose_studio_compare_game', {
           name: 'Compare with Game', icon: 'compare',
           click: () => captureEntities(true),
@@ -10806,37 +11050,32 @@ ${PLUGIN_URL}`,
         self.changelog = pluginPageChangelog();
       }
 
+      // The everyday things are buttons on the Pose Studio panel; the menu has the rest. (Every action
+      // still exists whether it's listed here or not: shortcuts and Stream Deck keys use them.)
       menu = new BarMenu('pose_studio', [
+        a.showpanel,
         a.link,
+        '_',
         { name: 'Locations', id: 'pose_studio_scene_menu', icon: 'place', children: [a.savescene, a.newlocation, a.locations, '_', a.refreshloc, a.realign, a.unlinkscene, '_', a.pickworld] },
-        '_',
-        a.add,
-        a.outfit,
-        a.entity,
-        a.equipment,
-        a.variant,
-        a.animation,
-        a.drop,
         {
-          name: 'Structure', id: 'pose_studio_structure_menu', icon: 'view_in_ar',
-          children: [a.structcorner1, a.structcorner2, a.structlook1, a.structlook2, '_', a.structget, a.structapply, '_', a.structundo, a.structredo, '_', a.structclear],
+          name: 'Camera Settings', id: 'pose_studio_camera_menu', icon: 'photo_camera_front',
+          children: [{ name: 'Aspect Ratio', id: 'pose_studio_aspect', icon: 'aspect_ratio', children: aspectMenuItems }, a.timeweather, a.follow],
         },
-        a.ride,
-        { name: 'Add Camera', id: 'pose_studio_add_camera', icon: 'videocam', children: [a.grabcam, a.savecam] },
-        {
-          name: 'Camera', id: 'pose_studio_camera_menu', icon: 'photo_camera_front',
-          children: [a.pov, a.camera, '_', a.fov, { name: 'Aspect Ratio', id: 'pose_studio_aspect', icon: 'aspect_ratio', children: aspectMenuItems }, a.timeweather, '_', a.lookcam, a.follow],
-        },
+        { name: 'Stream Deck', id: 'pose_studio_deck_menu', icon: 'grid_view', children: [a.deck, a.deckplugin] },
         '_',
-        a.scan,
-        a.scanmore,
-        a.capture,
-        a.entityshot,
-        a.entityshotoptions,
+        a.comparegame,
+        a.skin,
+        a.anchor,
+        a.clear,
         '_',
-        { name: 'More', id: 'pose_studio_more', icon: 'more_horiz', children: [a.folders, a.installpacks, '_', a.deck, a.deckplugin, '_', a.comparegame, a.anchor, a.skin, a.reloadpacks, a.clear] },
+        { name: 'Setup', id: 'pose_studio_more', icon: 'settings', children: [a.folders, a.installpacks, a.reloadpacks, '_', a.checkupdates, a.debuginfo] },
       ], { name: 'Pose Studio' });
       MenuBar.addMenu(menu, 'tools');
+      try {
+        setupPosePanel();
+      } catch (e) {
+        console.warn('[Pose Studio] panel', e);
+      }
       startupTimer = setTimeout(() => {
         startupTimer = null;
         showWhatsNewOnce();
@@ -10858,6 +11097,7 @@ ${PLUGIN_URL}`,
       if (Blockbench.removeListener) Blockbench.removeListener('undo', onBlockbenchUndo);
       if (Blockbench.removeListener) Blockbench.removeListener('redo', onBlockbenchRedo);
       deck.stop();
+      removePosePanel();
       if (startupTimer) clearTimeout(startupTimer);
       startupTimer = null;
       if (tickTimer) clearInterval(tickTimer);

@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.56.0",
+    "date": "2026-10-05",
+    "changes": [
+      "New: the Pose Studio panel. The everyday things are now buttons in a panel in the right sidebar (movable, foldable and floatable like Blockbench's own panels): connecting, adding players, entities and cameras, importing and expanding the world, capturing, and moving structures.",
+      "The panel shows what's true: the Connect button turns amber while waiting for Minecraft (with the /connect command to copy) and green when connected, with the world's name. Sync Game Camera and POV View light up while on. The scene's cameras are listed: click one to make it the active camera.",
+      "The Selected section only shows what applies to what you've selected: a player (Skin & Equipment, Animation, Drop to Ground, Ride), a mob (Variant, Equipment, Animation, Drop to Ground) or a camera (FOV, Look Through).",
+      "The Pose Studio menu is much shorter: Show Panel, Connect, Locations, Camera Settings, Stream Deck, Compare with Game, Skin Library, Recenter, Remove Mannequins, and Setup (folders, packs, Check for Updates, Debug Info). Every action still exists, so keyboard shortcuts and Stream Deck keys work as before."
+    ]
+  },
+  {
     "version": "0.55.0",
     "date": "2026-10-05",
     "changes": [
