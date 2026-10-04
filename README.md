@@ -114,6 +114,23 @@ Cameras, their FOVs and the scan are saved with your Blockbench project. Turning
 
 After editing files in `packs/`, bump the `version` in both manifests and run `node build-mcaddon.js` before re-importing, or copy the folders into `development_behavior_packs` and `development_resource_packs` so changes load without version bumps.
 
+## Moving structures
+
+Select a box of blocks in Minecraft, move it in Blockbench, and Minecraft moves the blocks.
+
+1. **Select** two opposite corners in Minecraft. In chat (or from **Pose Studio ▸ Structure**, or a Stream Deck key):
+   - `/scriptevent pose:corner 1` and `/scriptevent pose:corner 2`: the block you're standing in
+   - `/scriptevent pose:corner look1` and `look2`: the block you're looking at
+   - `/scriptevent pose:corner clear`: no selection
+
+   Green particles outline the selection.
+2. **Structure ▸ Get Selection**: it appears in Blockbench as one piece called `structure`, where it is in the world.
+3. **Move it** with the move tool. Turn it in quarter turns around the vertical axis (Y rotation 0, 90, 180 or 270). Blue particles in Minecraft outline where it would land.
+4. **Structure ▸ Apply Move**: the blocks are lifted out of the old place and put down in the new one, chests and signs with their contents. Whatever was there is replaced.
+5. **Structure ▸ Undo Last Move** puts both places back (it still works after reopening the world, until the next move).
+
+Mobs aren't moved. Up to 600,000 blocks at a time; above 40,000 visible blocks the piece is drawn as a plain box. Positions snap to whole blocks. After a move, Import World again if you use the terrain mesh.
+
 ## Stream Deck
 
 Pose Studio has a plugin for Elgato Stream Deck (Stream Deck 6.5 or newer, Windows).

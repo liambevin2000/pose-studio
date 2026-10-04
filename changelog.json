@@ -1,5 +1,16 @@
 [
   {
+    "version": "0.53.0",
+    "date": "2026-10-04",
+    "changes": [
+      "New: move structures. Select a box of blocks in Minecraft, move it in Blockbench, and Minecraft moves the blocks. Select two corners in the game with /scriptevent pose:corner 1 and 2 (the block you stand in) or look1 and look2 (the block you look at), or from the new Structure menu; green particles outline the selection.",
+      "Structure > Get Selection brings it into Blockbench as one piece. Move it with the move tool and turn it in quarter turns around the vertical axis; blue particles in Minecraft show where it would land. Structure > Apply Move moves the blocks, chests and signs with their contents.",
+      "Structure > Undo Last Move puts back both the blocks and what they landed on. Both are saved in the world before anything changes, so it still works after reopening the world, until the next move. If the area can't be loaded, nothing is changed.",
+      "Mobs aren't moved. Up to 600,000 blocks at a time. The Stream Deck plugin (1.4) has a structure-block sprite for these actions on Run Action keys.",
+      "Update the Minecraft packs (Check for Updates, then reopen the world)."
+    ]
+  },
+  {
     "version": "0.52.3",
     "date": "2026-10-04",
     "changes": [

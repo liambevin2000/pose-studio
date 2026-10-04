@@ -42,6 +42,8 @@ const sprites = {
   sun_cloud: { colours: { y: '#f5c518', w: '#fff3a0', c: W, s: '#c9d9e6' }, rows: ['..........', '.yyyyy....', '.ywwwy....', '.ywwwy....', '.ywwwy.cc.', '.yyyyycccc', '...ccccccc', '..cccccccc', '..ssssssss', '..........'] },
   // a crafting table (Blockbench: the bench)
   bench: { colours: { k: '#3f2710', l: '#c8964a', m: '#a8763a', b: '#8a5a2a', s: '#d8d8d8', d: '#5a3a1a' }, rows: ['..........', '.kkkkkkkk.', '.klmllmlk.', '.kmllmllk.', '.kkkkkkkk.', '.kbsbbdbk.', '.kbsbbdbk.', '.kbbbbbbk.', '.kkkkkkkk.', '..........'] },
+  // a structure block
+  structure: { colours: { k: '#2a1a33', p: '#8a5aa8', l: '#c9a0e0', w: '#f1e6f8' }, rows: ['..........', '.kkkkkkkk.', '.kpllllpk.', '.klkkkklk.', '.klkwwklk.', '.klkwwklk.', '.klkkkklk.', '.kpllllpk.', '.kkkkkkkk.', '..........'] },
   // the menu's actions
   command: { colours: { k: '#4a2f1f', o: '#d98a4b', l: '#f3c692', y: '#b86a2e', e: '#1d1410' }, rows: ['..........', '.kkkkkkkk.', '.kolooook.', '.koeeeeyk.', '.koelleyk.', '.koelleyk.', '.koeeeeyk.', '.kyyyyyyk.', '.kkkkkkkk.', '..........'] },
   drop: { colours: { w: W, g: '#5d9b3a', d: '#7a5230' }, rows: ['....ww....', '....ww....', '....ww....', '..wwwwww..', '...wwww...', '....ww....', '..........', 'gggggggggg', 'dddddddddd', 'dddddddddd'] },
@@ -170,7 +172,7 @@ if (previewAt > 0) {
     ['sunrise', 'dusk'], ['day', 'sky'], ['noon', 'sky'], ['sunset', 'dusk'], ['night', 'night'], ['rain', 'storm'],
     ['thunder', 'storm'], ['rain', 'night'], ['sun_cloud', 'sky'], ['command', 'stone'], ['drop', 'stone'], ['compare', 'stone'],
     ['creeper', 'stone'], ['plus', 'stone'], ['armour', 'stone'], ['film', 'stone'], ['saddle', 'stone'], ['grass', 'stone'],
-    ['bench', 'stone'], ['grass', 'grass'], ['clock', 'stone'], ['barrier', 'stone'], ['target', 'stone'], ['chest', 'stone'], ['lever', 'stone'], ['grid', 'stone'],
+    ['bench', 'stone'], ['grass', 'grass'], ['structure', 'stone'], ['clock', 'stone'], ['barrier', 'stone'], ['target', 'stone'], ['chest', 'stone'], ['lever', 'stone'], ['grid', 'stone'],
   ];
   const perRow = 6;
   const sheet = [];

@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.52.3'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.53.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -1601,6 +1601,8 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
       lastSent.delete(id);
     }
 
+    sendStructureTarget();
+
     if (cameraSync && !shooting && link.inFlight < MAX_IN_FLIGHT) {
       const cam = cameraMessage();
       if (cam && cam !== lastCamera) {
@@ -2785,6 +2787,212 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     } catch (e) {
       Blockbench.showMessageBox({ title: 'Capture Entities Only failed', message: String(e.message || e) });
     }
+  }
+
+  // ---- Moving structures ---------------------------------------------------------------------------
+  // Pose Studio ▸ Structure: select a box of blocks in the game (two corners, by command or from
+  // this menu), Get Selection brings it into Blockbench as one piece ("structure"), you move it
+  // with the move tool and turn it in quarter turns around the vertical axis, and Apply Move makes
+  // Minecraft move the blocks. Minecraft outlines the selection in green and, while you move it,
+  // where it would land in blue. Undo Last Move puts both places back as they were.
+  const STRUCTURE_NAME = 'structure';
+  const STRUCTURE_TEXTURE = 'pose_structure';
+  let structure = null; // { uuid, min: [x, y, z], size: [x, y, z] } in blocks from the anchor's block
+  let lastTarget = '';
+
+  function structureMesh() {
+    if (!structure || typeof Project === 'undefined' || !Project) return null;
+    return (Project.elements || []).find((el) => el.uuid === structure.uuid) || null;
+  }
+
+  // Where the piece is now: { to: lowest corner (blocks from the anchor's block), size, rot
+  // (Minecraft's: clockwise seen from above) }. Throws when it's turned some other way.
+  function structureTarget() {
+    const mesh = structureMesh();
+    if (!mesh) throw new Error('Get the selection first (Pose Studio ▸ Structure ▸ Get Selection).');
+    const r = (mesh.rotation || [0, 0, 0]).map((v) => ((v % 360) + 360) % 360);
+    const quarter = Math.round(r[1] / 90) * 90;
+    const off = (v) => Math.min(v, 360 - v);
+    if (off(r[0]) > 0.5 || off(r[2]) > 0.5 || Math.abs(r[1] - quarter) > 0.5) {
+      throw new Error('Blocks can only be turned in quarter turns around the vertical axis: set the structure\'s rotation to 0, 90, 180 or 270 on Y (and 0 on X and Z).');
+    }
+    const turn = quarter % 360;
+    const [sx, sy, sz] = structure.size;
+    const size = turn === 90 || turn === 270 ? [sz, sy, sx] : [sx, sy, sz];
+    const o = mesh.origin;
+    // the piece's origin is the middle of its bottom; see buildStructure for the mapping
+    const to = [Math.round(0.5 - o[0] / 16 - size[0] / 2), Math.round(o[1] / 16), Math.round(0.5 - o[2] / 16 - size[2] / 2)];
+    // Blockbench turns anticlockwise seen from above for a positive Y; Minecraft counts clockwise
+    return { to, size, rot: (360 - turn) % 360 };
+  }
+
+  function removeStructureMesh() {
+    const old = (typeof Project !== 'undefined' && Project ? Project.elements || [] : []).filter((el) => el.name === STRUCTURE_NAME && el instanceof Mesh);
+    for (const el of old) el.remove();
+    const texture = Texture.all.find((t) => t.name === STRUCTURE_TEXTURE);
+    if (texture) texture.remove(true);
+    structure = null;
+  }
+
+  // The selection as one mesh whose origin is the middle of its bottom face.
+  function buildStructure(min, size, palette, blocks) {
+    removeStructureMesh();
+    const canvas = document.createElement('canvas');
+    canvas.width = canvas.height = 16;
+    const ctx = canvas.getContext('2d');
+    palette.forEach((type, i) => {
+      ctx.fillStyle = blockColor(type || '');
+      ctx.fillRect(i % 16, Math.floor(i / 16) % 16, 1, 1);
+    });
+    let quads;
+    if (blocks.length) quads = greedyQuads(blocks);
+    else {
+      // too big to draw block by block (or empty): a plain box the size of the selection
+      ctx.fillStyle = '#9aa7b8';
+      ctx.fillRect(0, 0, 1, 1);
+      const [x0, y0, z0] = min;
+      const [x1, y1, z1] = min.map((v, i) => v + size[i]);
+      const face = (corners) => ({ corners, p: 0 });
+      quads = [
+        face([[x0, y1, z0], [x0, y1, z1], [x1, y1, z1], [x1, y1, z0]]), face([[x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1]]),
+        face([[x0, y0, z0], [x0, y1, z0], [x1, y1, z0], [x1, y0, z0]]), face([[x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]]),
+        face([[x0, y0, z0], [x0, y0, z1], [x0, y1, z1], [x0, y1, z0]]), face([[x1, y0, z0], [x1, y1, z0], [x1, y1, z1], [x1, y0, z1]]),
+      ];
+    }
+    const texture = new Texture({ name: STRUCTURE_TEXTURE }).fromDataURL(canvas.toDataURL('image/png'));
+    texture.add(false);
+    texture.uv_width = 16;
+    texture.uv_height = 16;
+
+    // grid corner (blocks from the anchor's block) -> Blockbench model space, as the world scan has it
+    const model = (c) => [-(c[0] - 0.5) * 16, c[1] * 16, -(c[2] - 0.5) * 16];
+    const origin = model([min[0] + size[0] / 2, min[1], min[2] + size[2] / 2]);
+    const mesh = new Mesh({ name: STRUCTURE_NAME, origin, rotation: [0, 0, 0], vertices: {} });
+    for (const key of Object.keys(mesh.vertices)) delete mesh.vertices[key];
+    for (const key of Object.keys(mesh.faces)) delete mesh.faces[key];
+    const vertexKeys = new Map();
+    const vertex = (c) => {
+      const id = c.join(',');
+      let key = vertexKeys.get(id);
+      if (!key) {
+        const at = model(c);
+        [key] = mesh.addVertices([at[0] - origin[0], at[1] - origin[1], at[2] - origin[2]]);
+        vertexKeys.set(id, key);
+      }
+      return key;
+    };
+    for (const { corners, p } of quads) {
+      const u = p % 16;
+      const v = Math.floor(p / 16) % 16;
+      const keys = corners.map(vertex);
+      const cellUV = [[u + 0.25, v + 0.25], [u + 0.75, v + 0.25], [u + 0.75, v + 0.75], [u + 0.25, v + 0.75]];
+      const uv = {};
+      keys.forEach((k, i) => (uv[k] = cellUV[i]));
+      mesh.addFaces(new MeshFace(mesh, { vertices: keys, uv, texture: texture.uuid }));
+    }
+    mesh.init();
+    structure = { uuid: mesh.uuid, min: min.slice(), size: size.slice() };
+    lastTarget = '';
+    Canvas.updateAll();
+    try {
+      if (typeof unselectAllElements === 'function') unselectAllElements();
+      if (typeof mesh.select === 'function') mesh.select();
+    } catch (e) {
+      // it's in the outliner either way
+    }
+    return mesh;
+  }
+
+  async function getStructureSelection(quiet) {
+    if (!requireConnection()) return null;
+    if (typeof Project === 'undefined' || !Project) newProject(Formats.free);
+    let items;
+    try {
+      items = await runGameQuery('pose:selinfo', {}, 'Reading the selection');
+    } catch (e) {
+      Blockbench.showMessageBox({ title: 'Pose Studio: structure', message: String(e.message || e) });
+      return null;
+    }
+    const head = (items.find((i) => i.startsWith('S|')) || '').split('|');
+    if (head.length < 9) {
+      Blockbench.showMessageBox({ title: 'Pose Studio: structure', message: "Minecraft didn't send a selection. Update the Minecraft packs (Check for Updates, then reopen the world)." });
+      return null;
+    }
+    const min = head.slice(2, 5).map(Number);
+    const size = head.slice(5, 8).map(Number);
+    const { palette, blocks } = parseScanItems(items);
+    const mesh = buildStructure(min, size, palette, blocks);
+    if (!quiet) {
+      Blockbench.showQuickMessage(
+        Number(head[8]) < 0 ? `Structure: ${size.join('×')} blocks (too many to draw one by one: shown as a box)` : `Structure: ${size.join('×')} blocks. Move it, then Structure ▸ Apply Move`,
+        4000
+      );
+    }
+    return mesh;
+  }
+
+  // While it's being moved: Minecraft outlines where it would land.
+  function sendStructureTarget() {
+    if (!structure || !link.connected) return;
+    if (!structureMesh()) {
+      structure = null;
+      if (lastTarget) send('scriptevent pose:target {}');
+      lastTarget = '';
+      return;
+    }
+    let message = '{}';
+    try {
+      const t = structureTarget();
+      const moved = t.rot !== 0 || t.to.some((v, i) => v !== structure.min[i]);
+      if (moved) message = JSON.stringify({ min: t.to, size: t.size });
+    } catch (e) {
+      message = '{}'; // turned some other way: no outline until it's a quarter turn
+    }
+    if (message === lastTarget || link.inFlight >= MAX_IN_FLIGHT) return;
+    send(`scriptevent pose:target ${message}`);
+    lastTarget = message;
+  }
+
+  async function applyStructureMove() {
+    if (!requireConnection()) return;
+    let target;
+    try {
+      target = structureTarget();
+    } catch (e) {
+      Blockbench.showMessageBox({ title: 'Pose Studio: structure', message: e.message });
+      return;
+    }
+    if (target.rot === 0 && target.to.every((v, i) => v === structure.min[i])) {
+      Blockbench.showQuickMessage('The structure is where it was: move it first', 2500);
+      return;
+    }
+    try {
+      await runGameQuery('pose:move', { to: target.to, rot: target.rot }, 'Moving the blocks');
+    } catch (e) {
+      Blockbench.showMessageBox({ title: 'Pose Studio: structure', message: `Minecraft couldn't move it: ${e.message || e}\n\nNothing was changed.` });
+      return;
+    }
+    // the selection is now where the blocks are: fetched again, as Minecraft has it
+    await getStructureSelection(true);
+    Blockbench.showQuickMessage('Moved. Structure ▸ Undo Last Move puts it back', 4000);
+  }
+
+  async function undoStructureMove() {
+    if (!requireConnection()) return;
+    try {
+      await runGameQuery('pose:moveundo', {}, 'Putting the blocks back');
+    } catch (e) {
+      Blockbench.showMessageBox({ title: 'Pose Studio: structure', message: String(e.message || e) });
+      return;
+    }
+    await getStructureSelection(true);
+    Blockbench.showQuickMessage('The last move was undone', 3000);
+  }
+
+  function structureCorner(which) {
+    if (!requireConnection()) return;
+    send(`scriptevent pose:corner ${which}`);
+    if (which === 'clear') removeStructureMesh();
   }
 
   // ---- Stream Deck link ---------------------------------------------------------------------------
@@ -8663,7 +8871,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     return { id: idItem.slice(2), name: scene.world || '', anchor: point('A|'), player: point('P|'), locations, removed: scene.removed || [], protocol: version ? Number(version.slice(2)) : 0 };
   }
 
-  const EXPECTED_PACK_PROTOCOL = 17; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
+  const EXPECTED_PACK_PROTOCOL = 18; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
   let warnedOldPack = false;
 
   // Scene files in the scenes folders that belong to a world (their pose_world says so), as
@@ -9439,6 +9647,17 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.53.0",
+      "date": "2026-10-04",
+      "changes": [
+        "New: move structures. Select a box of blocks in Minecraft, move it in Blockbench, and Minecraft moves the blocks. Select two corners in the game with /scriptevent pose:corner 1 and 2 (the block you stand in) or look1 and look2 (the block you look at), or from the new Structure menu; green particles outline the selection.",
+        "Structure > Get Selection brings it into Blockbench as one piece. Move it with the move tool and turn it in quarter turns around the vertical axis; blue particles in Minecraft show where it would land. Structure > Apply Move moves the blocks, chests and signs with their contents.",
+        "Structure > Undo Last Move puts back both the blocks and what they landed on. Both are saved in the world before anything changes, so it still works after reopening the world, until the next move. If the area can't be loaded, nothing is changed.",
+        "Mobs aren't moved. Up to 600,000 blocks at a time. The Stream Deck plugin (1.4) has a structure-block sprite for these actions on Run Action keys.",
+        "Update the Minecraft packs (Check for Updates, then reopen the world)."
+      ]
+    },
     {
       "version": "0.52.3",
       "date": "2026-10-04",
@@ -10252,7 +10471,7 @@ ${PLUGIN_URL}`,
 
   // for the plugin's own tests only (they set this flag); nothing happens otherwise
   if (typeof globalThis !== 'undefined' && globalThis.__POSE_STUDIO_TEST) {
-    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun };
+    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove };
   }
 
   Plugin.register('pose_studio', {
@@ -10399,6 +10618,23 @@ ${PLUGIN_URL}`,
           },
           description: 'Downloads the Pose Studio plugin for Elgato Stream Deck: keys for captures, cameras, toggles, time and weather.',
         }),
+        structget: new Action('pose_studio_struct_get', {
+          name: 'Get Selection', icon: 'select_all', click: () => getStructureSelection(),
+          description: 'Brings the box of blocks selected in Minecraft into Blockbench as one piece you can move.',
+        }),
+        structapply: new Action('pose_studio_struct_apply', {
+          name: 'Apply Move', icon: 'open_with', click: () => applyStructureMove(),
+          description: 'Moves the selected blocks in Minecraft to where the structure is in Blockbench (quarter turns around the vertical axis too).',
+        }),
+        structundo: new Action('pose_studio_struct_undo', {
+          name: 'Undo Last Move', icon: 'undo', click: () => undoStructureMove(),
+          description: 'Puts the blocks of the last move back, and what they landed on.',
+        }),
+        structcorner1: new Action('pose_studio_struct_corner1', { name: 'Corner 1: Where I Stand', icon: 'looks_one', click: () => structureCorner('1') }),
+        structcorner2: new Action('pose_studio_struct_corner2', { name: 'Corner 2: Where I Stand', icon: 'looks_two', click: () => structureCorner('2') }),
+        structlook1: new Action('pose_studio_struct_look1', { name: 'Corner 1: Block I Look At', icon: 'looks_one', click: () => structureCorner('look1') }),
+        structlook2: new Action('pose_studio_struct_look2', { name: 'Corner 2: Block I Look At', icon: 'looks_two', click: () => structureCorner('look2') }),
+        structclear: new Action('pose_studio_struct_clear', { name: 'Clear Selection', icon: 'deselect', click: () => structureCorner('clear') }),
         comparegame: new Action('pose_studio_compare_game', {
           name: 'Compare with Game', icon: 'compare',
           click: () => captureEntities(true),
@@ -10494,6 +10730,10 @@ ${PLUGIN_URL}`,
         a.variant,
         a.animation,
         a.drop,
+        {
+          name: 'Structure', id: 'pose_studio_structure_menu', icon: 'view_in_ar',
+          children: [a.structcorner1, a.structcorner2, a.structlook1, a.structlook2, '_', a.structget, a.structapply, a.structundo, '_', a.structclear],
+        },
         a.ride,
         { name: 'Add Camera', id: 'pose_studio_add_camera', icon: 'videocam', children: [a.grabcam, a.savecam] },
         {

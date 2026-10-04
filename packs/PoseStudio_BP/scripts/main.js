@@ -2,7 +2,7 @@
 // The Blockbench plugin runs commands through the /connect websocket as the player,
 // e.g. `/scriptevent pose:set {"id":"mq_1","p":[x,y,z],"b":[...21 angles]}`.
 // Positions arrive as block offsets from the anchor; angles are already in Bedrock convention.
-import { world, system, BlockVolume, StructureSaveMode } from "@minecraft/server";
+import { world, system, BlockVolume, StructureSaveMode, StructureRotation } from "@minecraft/server";
 
 const TYPE = "pose:mannequin";
 const TAG_PREFIX = "pose_id.";
@@ -603,7 +603,7 @@ function debug(player) {
 // Every name looks like `PSD[op|page|item]`; page 0 always carries
 // `M|ready|<pages>|<items>|<items per page>` or `M|busy|<percent>`.
 // What this script understands; Blockbench warns when the world runs an older one.
-const PACK_PROTOCOL = 17;
+const PACK_PROTOCOL = 18;
 const IO_OBJECTIVE = "pose_io";
 const ITEMS_PER_PAGE = 30;
 const MAX_PAGES_PER_BATCH = 16;
@@ -886,8 +886,384 @@ function* scanJob(dimension, eye, anchor, { radius, rays, dist }) {
   finishResult(items);
 }
 
+// ---- Moving structures --------------------------------------------------------------------------
+// Select a box of blocks in the game, move it in Blockbench, and it's moved here.
+//   /scriptevent pose:corner 1        corner 1 is the block you're standing in   (2 for the other)
+//   /scriptevent pose:corner look1    corner 1 is the block you're looking at    (look2)
+//   /scriptevent pose:corner clear    no selection
+// `pose:selinfo {op}` reports the selection to Blockbench (its box, and the blocks on its outside,
+// for the preview); `pose:target {"min":[..],"size":[..]}` outlines where it would land;
+// `pose:move {"to":[x,y,z],"rot":0|90|180|270,op}` moves it (to: the new lowest corner, in blocks
+// from the anchor's block; rot: clockwise seen from above); `pose:moveundo {op}` puts the last move
+// back. A move saves both what it lifts and what it lands on (in the world, so undo still works
+// after reopening it), clears the old place and puts the blocks down in the new one, contents
+// (chests, signs) included. Mobs aren't moved.
+const SELECTION_PROPERTY = "pose:selection"; // { dim, a:[x,y,z], b:[x,y,z] } (world blocks)
+const LAST_MOVE_PROPERTY = "pose:lastmove";
+const MAX_SELECTION = 600000; // blocks
+const MAX_PREVIEW_BLOCKS = 40000;
+const STRUCTURE_XZ = 64; // the most one saved structure can span sideways
+let targetBox = null; // { dim, min, size } where Blockbench has the selection now
+
+function getSelection() {
+  const raw = world.getDynamicProperty(SELECTION_PROPERTY);
+  if (typeof raw !== "string") return null;
+  try {
+    const s = JSON.parse(raw);
+    if (!s.a || !s.b) return s;
+    const min = { x: Math.min(s.a[0], s.b[0]), y: Math.min(s.a[1], s.b[1]), z: Math.min(s.a[2], s.b[2]) };
+    const max = { x: Math.max(s.a[0], s.b[0]), y: Math.max(s.a[1], s.b[1]), z: Math.max(s.a[2], s.b[2]) };
+    return Object.assign(s, { min, max, size: { x: max.x - min.x + 1, y: max.y - min.y + 1, z: max.z - min.z + 1 } });
+  } catch {
+    return null;
+  }
+}
+
+function setCorner(player, text) {
+  if (!player) return;
+  const word = String(text || "").trim().toLowerCase();
+  if (word === "clear") {
+    world.setDynamicProperty(SELECTION_PROPERTY, undefined);
+    targetBox = null;
+    player.sendMessage("§b[Pose Studio]§r Selection cleared");
+    return;
+  }
+  const m = word.match(/^(look)?\s*([12])$/);
+  if (!m) {
+    player.sendMessage("§b[Pose Studio]§r /scriptevent pose:corner 1 or 2 (the block you stand in), look1 or look2 (the block you look at), or clear");
+    return;
+  }
+  let at;
+  if (m[1]) {
+    const hit = player.getBlockFromViewDirection({ maxDistance: 128 });
+    if (!hit || !hit.block) {
+      player.sendMessage("§c[Pose Studio]§r You aren't looking at a block (within 128 blocks)");
+      return;
+    }
+    at = hit.block.location;
+  } else {
+    at = { x: Math.floor(player.location.x), y: Math.floor(player.location.y), z: Math.floor(player.location.z) };
+  }
+  const here = [at.x, at.y, at.z];
+  const old = getSelection();
+  const next = old && old.dim === player.dimension.id ? { dim: old.dim, a: old.a, b: old.b } : { dim: player.dimension.id };
+  next[m[2] === "1" ? "a" : "b"] = here;
+  world.setDynamicProperty(SELECTION_PROPERTY, JSON.stringify(next));
+  targetBox = null;
+  const s = getSelection();
+  const size = s && s.size ? ` — ${s.size.x}×${s.size.y}×${s.size.z} (${s.size.x * s.size.y * s.size.z} blocks)` : "";
+  player.sendMessage(`§b[Pose Studio]§r Corner ${m[2]} at ${here.join(" ")}${size}`);
+  if (s && s.size && s.size.x * s.size.y * s.size.z > MAX_SELECTION) player.sendMessage(`§e[Pose Studio]§r That's more than Pose Studio moves at once (${MAX_SELECTION} blocks)`);
+}
+
+function requireSelection() {
+  const s = getSelection();
+  if (!s || !s.size) throw new Error("Select two corners first: /scriptevent pose:corner 1 and /scriptevent pose:corner 2");
+  if (s.size.x * s.size.y * s.size.z > MAX_SELECTION) throw new Error(`The selection is too big (${s.size.x * s.size.y * s.size.z} blocks; at most ${MAX_SELECTION})`);
+  return s;
+}
+
+// The selection for Blockbench: `S|dim|x|y|z|sx|sy|sz|blocks sent` (x, y, z in blocks from the
+// anchor's block), then the palette and the blocks that have a side showing (the inside of a solid
+// selection isn't needed to draw it).
+function* selectionJob(dim, anchor, s) {
+  const base = { x: Math.floor(anchor.x), y: Math.floor(anchor.y), z: Math.floor(anchor.z) };
+  const types = new Map(); // "x.y.z" (world) -> type, non-air only
+  const total = s.size.x * s.size.y * s.size.z;
+  let done = 0;
+  for (let x = s.min.x; x <= s.max.x; x++) {
+    for (let z = s.min.z; z <= s.max.z; z++) {
+      for (let y = s.min.y; y <= s.max.y; y++) {
+        let block;
+        try {
+          block = dim.getBlock({ x, y, z });
+        } catch (e) {
+          failResult(isUnloaded(e) ? "Part of the selection isn't loaded. Stand closer to it." : e);
+          return;
+        }
+        if (block && !block.isAir) types.set(`${x}.${y}.${z}`, block.typeId);
+        if (++done % 2000 === 0) {
+          result.progress = 0.9 * (done / total);
+          yield;
+        }
+      }
+    }
+  }
+  const palette = new Map();
+  const blocks = new Map();
+  const solid = (x, y, z) => types.has(`${x}.${y}.${z}`);
+  for (const [key, type] of types) {
+    const [x, y, z] = key.split(".").map(Number);
+    if (solid(x + 1, y, z) && solid(x - 1, y, z) && solid(x, y + 1, z) && solid(x, y - 1, z) && solid(x, y, z + 1) && solid(x, y, z - 1)) continue;
+    if (!palette.has(type)) palette.set(type, palette.size);
+    blocks.set(`${x - base.x}.${y - base.y}.${z - base.z}`, palette.get(type));
+    if (blocks.size > MAX_PREVIEW_BLOCKS) break;
+  }
+  const tooMany = blocks.size > MAX_PREVIEW_BLOCKS;
+  const items = [`S|${dim.id}|${s.min.x - base.x}|${s.min.y - base.y}|${s.min.z - base.z}|${s.size.x}|${s.size.y}|${s.size.z}|${tooMany ? -1 : blocks.size}`];
+  if (!tooMany) {
+    for (const [type, index] of palette) items.push(`P|${index}|${type}`);
+    items.push(...packBlocks(blocks));
+  }
+  finishResult(items);
+}
+
+function reportSelection(player, data) {
+  beginResult(data.op);
+  const anchor = requireAnchor(player);
+  const s = requireSelection();
+  if (s.dim !== anchor.dim) throw new Error("The selection is in another dimension than the scene");
+  system.runJob(selectionJob(world.getDimension(s.dim), anchor, s));
+}
+
+function setTarget(data) {
+  const anchor = getAnchor();
+  const s = getSelection();
+  if (!anchor || !s || !finite(data.min) || !finite(data.size)) {
+    targetBox = null;
+    return;
+  }
+  const base = { x: Math.floor(anchor.x), y: Math.floor(anchor.y), z: Math.floor(anchor.z) };
+  targetBox = {
+    dim: s.dim,
+    min: { x: base.x + Number(data.min[0]), y: base.y + Number(data.min[1]), z: base.z + Number(data.min[2]) },
+    size: { x: Number(data.size[0]), y: Number(data.size[1]), z: Number(data.size[2]) },
+  };
+}
+
+// A box as { at (lowest corner), size } pieces no bigger than `span` sideways and `tall` high.
+function boxPieces(min, size, span, tall) {
+  const pieces = [];
+  for (let x = 0; x < size.x; x += span) {
+    for (let z = 0; z < size.z; z += span) {
+      for (let y = 0; y < size.y; y += tall) {
+        pieces.push({ off: { x, y, z }, size: { x: Math.min(span, size.x - x), y: Math.min(tall, size.y - y), z: Math.min(span, size.z - z) } });
+      }
+    }
+  }
+  return pieces.map((p) => Object.assign(p, { at: { x: min.x + p.off.x, y: min.y + p.off.y, z: min.z + p.off.z } }));
+}
+
+const cornerOf = (p) => ({ x: p.at.x + p.size.x - 1, y: p.at.y + p.size.y - 1, z: p.at.z + p.size.z - 1 });
+
+function saveBox(dim, min, size, prefix) {
+  const saved = [];
+  try {
+    for (const piece of boxPieces(min, size, STRUCTURE_XZ, 384)) {
+      const id = `${prefix}_${saved.length}`;
+      world.structureManager.createFromWorld(id, dim, piece.at, cornerOf(piece), { includeBlocks: true, includeEntities: false, saveMode: StructureSaveMode.World });
+      saved.push({ id, off: piece.off, size: piece.size });
+    }
+  } catch (e) {
+    forgetStructures(saved);
+    throw e;
+  }
+  return saved;
+}
+
+function forgetStructures(list) {
+  for (const s of list || []) {
+    try {
+      world.structureManager.delete(s.id);
+    } catch {
+      // already gone
+    }
+  }
+}
+
+function clearArea(dim, min, size) {
+  for (const piece of boxPieces(min, size, 32, 32)) dim.fillBlocks(new BlockVolume(piece.at, cornerOf(piece)), "minecraft:air");
+}
+
+// Where a piece of a box (whole size `size`) lands when the box is turned clockwise, seen from
+// above, about its lowest corner and kept in the positive quarter: its new offset.
+function turnedOffset(off, pieceSize, size, rot) {
+  if (rot === 90) return { x: size.z - off.z - pieceSize.z, y: off.y, z: off.x };
+  if (rot === 180) return { x: size.x - off.x - pieceSize.x, y: off.y, z: size.z - off.z - pieceSize.z };
+  if (rot === 270) return { x: off.z, y: off.y, z: size.x - off.x - pieceSize.x };
+  return { x: off.x, y: off.y, z: off.z };
+}
+
+const ROTATIONS = { 0: StructureRotation.None, 90: StructureRotation.Rotate90, 180: StructureRotation.Rotate180, 270: StructureRotation.Rotate270 };
+const MOVE_AREAS = ["pose_move_from", "pose_move_to"];
+
+function loadAreas(dim, boxes) {
+  boxes.forEach((box, i) => {
+    try {
+      dim.runCommand(`tickingarea remove ${MOVE_AREAS[i]}`);
+    } catch {
+      // none there
+    }
+    try {
+      dim.runCommand(`tickingarea add ${box.min.x} ${box.min.y} ${box.min.z} ${box.min.x + box.size.x - 1} ${box.min.y + box.size.y - 1} ${box.min.z + box.size.z - 1} ${MOVE_AREAS[i]} true`);
+    } catch {
+      // the world has its 10: the chunks may be loaded anyway
+    }
+  });
+}
+
+function unloadAreas(dim) {
+  for (const name of MOVE_AREAS) {
+    try {
+      dim.runCommand(`tickingarea remove ${name}`);
+    } catch {
+      // none there
+    }
+  }
+}
+
+// Runs `work` now, and again every quarter second for up to 15 seconds while chunks aren't loaded.
+function whenLoaded(dim, boxes, work, unloadedMessage) {
+  loadAreas(dim, boxes);
+  let tries = 0;
+  const attempt = () => {
+    try {
+      finishResult(work());
+    } catch (e) {
+      if (isUnloaded(e) && ++tries < 60) return false;
+      failResult(isUnloaded(e) ? unloadedMessage : e);
+    }
+    unloadAreas(dim);
+    return true;
+  };
+  if (attempt()) return;
+  const run = system.runInterval(() => {
+    if (attempt()) system.clearRun(run);
+  }, 5);
+}
+
+function withoutDrops(work) {
+  let drops;
+  try {
+    drops = world.gameRules.doTileDrops;
+    world.gameRules.doTileDrops = false; // a torch losing its wall drops nothing
+  } catch {
+    // older versions
+  }
+  try {
+    return work();
+  } finally {
+    if (drops !== undefined) world.gameRules.doTileDrops = drops;
+  }
+}
+
+function lastMove() {
+  const raw = world.getDynamicProperty(LAST_MOVE_PROPERTY);
+  if (typeof raw !== "string") return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+function forgetLastMove() {
+  const last = lastMove();
+  if (last) forgetStructures([].concat(last.from.saved, last.to.saved));
+  world.setDynamicProperty(LAST_MOVE_PROPERTY, undefined);
+}
+
+function moveSelection(player, data) {
+  beginResult(data.op);
+  const anchor = requireAnchor(player);
+  const s = requireSelection();
+  if (!finite(data.to)) throw new Error("move needs to:[x,y,z]");
+  const rot = [0, 90, 180, 270].includes(Number(data.rot)) ? Number(data.rot) : 0;
+  const dim = world.getDimension(s.dim);
+  const size = s.size;
+  const turned = rot === 90 || rot === 270 ? { x: size.z, y: size.y, z: size.x } : size;
+  const to = { x: Math.floor(anchor.x) + Math.round(Number(data.to[0])), y: Math.floor(anchor.y) + Math.round(Number(data.to[1])), z: Math.floor(anchor.z) + Math.round(Number(data.to[2])) };
+  const range = dim.heightRange;
+  if (range && (to.y < range.min || to.y + size.y > range.max)) throw new Error("That's above or below the world");
+  if (rot === 0 && to.x === s.min.x && to.y === s.min.y && to.z === s.min.z) throw new Error("It's already there: move it in Blockbench first");
+
+  whenLoaded(dim, [{ min: s.min, size }, { min: to, size: turned }], () => {
+    const stamp = Date.now().toString(36);
+    // saved first, both of them; nothing is changed if either can't be
+    const lifted = saveBox(dim, s.min, size, `pose:move_${stamp}_a`);
+    let covered;
+    try {
+      covered = saveBox(dim, to, turned, `pose:move_${stamp}_b`);
+    } catch (e) {
+      forgetStructures(lifted);
+      throw e;
+    }
+    forgetLastMove();
+    world.setDynamicProperty(LAST_MOVE_PROPERTY, JSON.stringify({ dim: s.dim, rot, from: { min: s.min, size, saved: lifted }, to: { min: to, size: turned, saved: covered } }));
+    withoutDrops(() => {
+      clearArea(dim, s.min, size);
+      for (const piece of lifted) {
+        const off = turnedOffset(piece.off, piece.size, size, rot);
+        world.structureManager.place(piece.id, dim, { x: to.x + off.x, y: to.y + off.y, z: to.z + off.z }, { includeEntities: false, rotation: ROTATIONS[rot] });
+      }
+    });
+    // the selection is where the blocks are now
+    world.setDynamicProperty(SELECTION_PROPERTY, JSON.stringify({ dim: s.dim, a: [to.x, to.y, to.z], b: [to.x + turned.x - 1, to.y + turned.y - 1, to.z + turned.z - 1] }));
+    targetBox = null;
+    return ["ok"];
+  }, "The place it's moving from or to wouldn't load. Stand closer and try again.");
+}
+
+function undoMove(player, data) {
+  beginResult(data.op);
+  const last = lastMove();
+  if (!last) throw new Error("There's no move to undo");
+  const dim = world.getDimension(last.dim);
+  whenLoaded(dim, [{ min: last.from.min, size: last.from.size }, { min: last.to.min, size: last.to.size }], () => {
+    withoutDrops(() => {
+      // what it landed on comes back, then the blocks go back where they were
+      for (const piece of last.to.saved) world.structureManager.place(piece.id, dim, { x: last.to.min.x + piece.off.x, y: last.to.min.y + piece.off.y, z: last.to.min.z + piece.off.z }, { includeEntities: false });
+      for (const piece of last.from.saved) world.structureManager.place(piece.id, dim, { x: last.from.min.x + piece.off.x, y: last.from.min.y + piece.off.y, z: last.from.min.z + piece.off.z }, { includeEntities: false });
+    });
+    const f = last.from;
+    world.setDynamicProperty(SELECTION_PROPERTY, JSON.stringify({ dim: last.dim, a: [f.min.x, f.min.y, f.min.z], b: [f.min.x + f.size.x - 1, f.min.y + f.size.y - 1, f.min.z + f.size.z - 1] }));
+    forgetLastMove();
+    targetBox = null;
+    return ["ok"];
+  }, "The places of the last move wouldn't load. Stand closer and try again.");
+}
+
+// The selection's edges (green) and where Blockbench has it now (blue), as particles.
+function outlineBox(dim, min, size, particle) {
+  const max = { x: min.x + size.x, y: min.y + size.y, z: min.z + size.z };
+  const longest = Math.max(size.x, size.y, size.z);
+  const step = Math.max(0.5, longest / 24);
+  const line = (from, axis, length) => {
+    for (let d = 0; d <= length + 1e-6; d += step) {
+      const at = Object.assign({}, from);
+      at[axis] += Math.min(d, length);
+      try {
+        dim.spawnParticle(particle, at);
+      } catch {
+        return; // not loaded, or not a particle this version has
+      }
+    }
+  };
+  for (const y of [min.y, max.y]) {
+    for (const z of [min.z, max.z]) line({ x: min.x, y, z }, "x", size.x);
+    for (const x of [min.x, max.x]) line({ x, y, z: min.z }, "z", size.z);
+  }
+  for (const x of [min.x, max.x]) for (const z of [min.z, max.z]) line({ x, y: min.y, z }, "y", size.y);
+}
+
+system.runInterval(() => {
+  const s = getSelection();
+  if (!s) return;
+  let dim;
+  try {
+    dim = world.getDimension(s.dim);
+  } catch {
+    return;
+  }
+  if (s.size) outlineBox(dim, s.min, s.size, "minecraft:villager_happy");
+  else if (s.a || s.b) outlineBox(dim, { x: (s.a || s.b)[0], y: (s.a || s.b)[1], z: (s.a || s.b)[2] }, { x: 1, y: 1, z: 1 }, "minecraft:villager_happy");
+  if (targetBox && targetBox.dim === s.dim) outlineBox(dim, targetBox.min, targetBox.size, "minecraft:blue_flame_particle");
+}, 20);
+
 function handle(ev) {
   const player = ev.sourceEntity?.typeId === "minecraft:player" ? ev.sourceEntity : undefined;
+  // typed by hand, not JSON: /scriptevent pose:corner 1
+  if (ev.id === "pose:corner") return setCorner(player, ev.message);
   const data = ev.message ? JSON.parse(ev.message) : {};
 
   switch (ev.id) {
@@ -923,6 +1299,14 @@ function handle(ev) {
       return setCamera(player, data);
     case "pose:shothide":
       return setShotHidden(data);
+    case "pose:selinfo":
+      return reportSelection(player, data);
+    case "pose:target":
+      return setTarget(data);
+    case "pose:move":
+      return moveSelection(player, data);
+    case "pose:moveundo":
+      return undoMove(player, data);
     case "pose:backdrop":
       return setBackdrop(player, data);
     case "pose:camclear":
@@ -1040,7 +1424,7 @@ system.afterEvents.scriptEventReceive.subscribe(
         waitForChunk(ev, e);
         return;
       }
-      if (ev.id === "pose:scan" || ev.id === "pose:grabcam" || ev.id === "pose:scene" || ev.id === "pose:backdrop") failResult(e);
+      if (ev.id === "pose:scan" || ev.id === "pose:grabcam" || ev.id === "pose:scene" || ev.id === "pose:backdrop" || ev.id === "pose:selinfo" || ev.id === "pose:move" || ev.id === "pose:moveundo") failResult(e);
       const msg = `${ev.id} failed: ${e}`;
       console.warn(`[Pose Studio] ${msg}`);
       if (!reportedErrors.has(msg) && ev.sourceEntity?.typeId === "minecraft:player") {
