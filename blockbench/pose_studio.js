@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.54.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.55.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -3496,24 +3496,30 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
 
   const CODE_ALPHABET = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-_';
 
-  function scanWorldDialog() {
+  // Import World… replaces the terrain; Expand World… (expand) adds what's around you now to it.
+  function scanWorldDialog(expand = false) {
     if (!requireConnection()) return;
     new Dialog({
-      id: 'pose_studio_scan',
-      title: 'Import World Around Player',
+      id: expand ? 'pose_studio_scan_expand' : 'pose_studio_scan',
+      title: expand ? 'Expand World Around Player' : 'Import World Around Player',
       form: {
-        info: { type: 'info', text: 'Traces the ground from above in a circle around you, then casts rays from your eyes to pick up trunks, walls and overhangs. Every block found becomes a coloured cube.' },
+        info: {
+          type: 'info',
+          text: expand
+            ? "Adds the terrain around where you're standing now to the terrain already imported (go somewhere else in Minecraft first). What's already there is kept."
+            : 'Traces the ground from above in a circle around you, then casts rays from your eyes to pick up trunks, walls and overhangs. Every block found becomes a coloured cube.',
+        },
         radius: { label: 'Terrain radius (blocks, 0 = off)', type: 'number', value: 48, min: 0, max: 128, step: 8 },
         rays: { label: 'Eye rays (0 = off)', type: 'number', value: 20000, min: 0, max: 200000, step: 1000 },
         dist: { label: 'Eye ray distance (blocks)', type: 'number', value: 64, min: 8, max: 256, step: 8 },
       },
       onConfirm(form) {
-        scanWorld(form.radius, form.rays, form.dist);
+        scanWorld(form.radius, form.rays, form.dist, expand);
       },
     }).show();
   }
 
-  async function scanWorld(radius, rays, dist) {
+  async function scanWorld(radius, rays, dist, expand = false) {
     let items;
     try {
       await autoAnchor();
@@ -3523,7 +3529,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
       return;
     }
     const { palette, blocks } = parseScanItems(items);
-    await buildWorld(palette, blocks);
+    await buildWorld(palette, blocks, expand);
   }
 
   function parseScanItems(items) {
@@ -3547,8 +3553,9 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
   // Builds the scan as ONE mesh element. Neighbouring faces that share a direction and block
   // type are merged into larger rectangles (greedy meshing), so thousands of blocks become a
   // few thousand quads in a single object instead of thousands of cubes.
-  function greedyQuads(blocks) {
+  function greedyQuads(blocks, alsoThere = null) {
     const occupied = new Map(blocks.map((b) => [`${b[0]},${b[1]},${b[2]}`, b[3]]));
+    if (alsoThere) for (const key of alsoThere) if (!occupied.has(key)) occupied.set(key, -1);
     const quads = [];
     // For each axis a, (u, v) are the other two axes in cyclic order, so u × v points along +a.
     const AXES = [[0, 1, 2], [1, 2, 0], [2, 0, 1]];
@@ -3607,8 +3614,23 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     return old;
   }
 
-  async function buildWorld(palette, blocks) {
+  // The blocks each scene's terrain is made of ("x,y,z"), so an expansion only adds new ones.
+  // Kept while Blockbench is open: after a restart an expansion still works, it just may draw the
+  // blocks both imports share twice (which looks the same).
+  const scannedBlocks = new Map(); // project uuid -> Set
+
+  async function buildWorld(palette, blocks, expand = false) {
     if (typeof Project === 'undefined' || !Project) newProject(Formats.free);
+    const hasTerrain = (Project.elements || []).some((el) => el.name === WORLD_GROUP);
+    if (expand && !hasTerrain) expand = false; // nothing to add to: a first import
+    let known = scannedBlocks.get(Project.uuid);
+    if (!expand || !known) scannedBlocks.set(Project.uuid, (known = new Set()));
+    const found = blocks.length;
+    if (expand) blocks = blocks.filter((b) => !known.has(`${b[0]},${b[1]},${b[2]}`));
+    if (expand && !blocks.length) {
+      Blockbench.showQuickMessage("Pose Studio: everything around you is already imported", 3000);
+      return;
+    }
 
     // One 16x16 texture with a 1px colour cell per block type.
     const canvas = document.createElement('canvas');
@@ -3619,14 +3641,16 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
       ctx.fillRect(i % 16, Math.floor(i / 16) % 16, 1, 1);
     });
 
-    const quads = greedyQuads(blocks);
+    const quads = greedyQuads(blocks, expand ? known : null);
+    for (const b of blocks) known.add(`${b[0]},${b[1]},${b[2]}`);
 
-    const old = removeOldScans();
+    // a fresh import replaces the terrain (every piece of it); an expansion adds a piece
+    const old = expand ? [] : removeOldScans();
     const oldElements = old.filter((n) => !(n instanceof Group));
-    const oldTexture = Texture.all.find((t) => t.name === WORLD_TEXTURE);
-    Undo.initEdit({ outliner: true, elements: oldElements, textures: oldTexture ? [oldTexture] : [] });
+    const oldTextures = expand ? [] : Texture.all.filter((t) => t.name === WORLD_TEXTURE);
+    Undo.initEdit({ outliner: true, elements: oldElements, textures: oldTextures });
     for (const node of old) node.remove();
-    if (oldTexture) oldTexture.remove(true);
+    for (const texture of oldTextures) texture.remove(true);
 
     const texture = new Texture({ name: WORLD_TEXTURE }).fromDataURL(canvas.toDataURL('image/png'));
     texture.add(false);
@@ -3659,10 +3683,10 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     }
     mesh.init();
 
-    Undo.finishEdit('Pose Studio world scan', { outliner: true, elements: [mesh], textures: [texture] });
+    Undo.finishEdit(expand ? 'Pose Studio expand world' : 'Pose Studio world scan', { outliner: true, elements: [mesh], textures: [texture] });
     Canvas.updateAll();
     disableWorldPicking();
-    Blockbench.showQuickMessage(`Pose Studio: ${blocks.length} blocks → ${quads.length} faces`, 3000);
+    Blockbench.showQuickMessage(expand ? `Pose Studio: added ${blocks.length} new blocks (${found - blocks.length} were already there)` : `Pose Studio: ${blocks.length} blocks → ${quads.length} faces`, 3000);
   }
 
   // The scan can't be clicked in the viewport (select or delete it from the outliner instead).
@@ -9685,6 +9709,14 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // <changelog>
   const CHANGELOG = [
     {
+      "version": "0.55.0",
+      "date": "2026-10-05",
+      "changes": [
+        "New: Expand World… (under Import World…). Go somewhere else in Minecraft and it adds the terrain around you to the terrain already imported, instead of replacing it. Only blocks that aren't there yet are added, and you can expand as often as you like.",
+        "Import World… still starts over: it replaces all the imported terrain, expansions included. Drop to Ground uses the expanded terrain too."
+      ]
+    },
+    {
       "version": "0.54.0",
       "date": "2026-10-04",
       "changes": [
@@ -10641,8 +10673,10 @@ ${PLUGIN_URL}`,
           name: 'Sync Game Camera', icon: 'videocam', value: false, onChange: setCameraSync,
           description: 'The Minecraft camera follows the active camera, or the viewport if there is none.',
         })),
-        scan: new Action('pose_studio_scan', { name: 'Import World…', icon: 'travel_explore', click: scanWorldDialog,
-          description: 'Brings the terrain around you in Minecraft into Blockbench as one mesh.' }),
+        scan: new Action('pose_studio_scan', { name: 'Import World…', icon: 'travel_explore', click: () => scanWorldDialog(false),
+          description: 'Brings the terrain around you in Minecraft into Blockbench as one mesh (replacing terrain imported before).' }),
+        scanmore: new Action('pose_studio_scan_expand', { name: 'Expand World…', icon: 'add_location_alt', click: () => scanWorldDialog(true),
+          description: "Adds the terrain around where you're standing now to the terrain already imported." }),
         capture: new Action('pose_studio_capture', { name: 'Capture Screenshot', icon: 'photo_camera', click: capture }),
         entityshot: new Action('pose_studio_capture_entities', {
           name: 'Capture Entities Only', icon: 'person_outline', click: () => captureEntities(),
@@ -10795,6 +10829,7 @@ ${PLUGIN_URL}`,
         },
         '_',
         a.scan,
+        a.scanmore,
         a.capture,
         a.entityshot,
         a.entityshotoptions,

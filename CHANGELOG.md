@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.55.0 (2026-10-05)
+
+- New: Expand World… (under Import World…). Go somewhere else in Minecraft and it adds the terrain around you to the terrain already imported, instead of replacing it. Only blocks that aren't there yet are added, and you can expand as often as you like.
+- Import World… still starts over: it replaces all the imported terrain, expansions included. Drop to Ground uses the expanded terrain too.
+
 ## 0.54.0 (2026-10-04)
 
 - Structure moves have real undo now. The last 10 moves can be undone one after another, and an undone move can be redone (Structure > Undo Move and Redo Move).
