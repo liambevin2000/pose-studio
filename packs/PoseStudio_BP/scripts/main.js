@@ -603,7 +603,7 @@ function debug(player) {
 // Every name looks like `PSD[op|page|item]`; page 0 always carries
 // `M|ready|<pages>|<items>|<items per page>` or `M|busy|<percent>`.
 // What this script understands; Blockbench warns when the world runs an older one.
-const PACK_PROTOCOL = 18;
+const PACK_PROTOCOL = 19;
 const IO_OBJECTIVE = "pose_io";
 const ITEMS_PER_PAGE = 30;
 const MAX_PAGES_PER_BATCH = 16;
@@ -895,7 +895,7 @@ function* scanJob(dimension, eye, anchor, { radius, rays, dist }) {
 // for the preview); `pose:target {"min":[..],"size":[..]}` outlines where it would land;
 // `pose:move {"to":[x,y,z],"rot":0|90|180|270,op}` moves it (to: the new lowest corner, in blocks
 // from the anchor's block; rot: clockwise seen from above); `pose:moveundo {op}` puts the last move
-// back. A move saves both what it lifts and what it lands on (in the world, so undo still works
+// back (the last 10 can be, one by one) and `pose:moveredo {op}` does an undone one again. A move saves both what it lifts and what it lands on (in the world, so undo still works
 // after reopening it), clears the old place and puts the blocks down in the new one, contents
 // (chests, signs) included. Mobs aren't moved.
 const SELECTION_PROPERTY = "pose:selection"; // { dim, a:[x,y,z], b:[x,y,z] } (world blocks)
@@ -1147,20 +1147,64 @@ function withoutDrops(work) {
   }
 }
 
-function lastMove() {
-  const raw = world.getDynamicProperty(LAST_MOVE_PROPERTY);
-  if (typeof raw !== "string") return null;
+// The moves that can be undone (the newest last) and the undone ones that can be redone. Each move
+// kept its two saved boxes in the world, so undo works after reopening it. The oldest is forgotten
+// past MAX_UNDO; a new move forgets the redo list.
+const MAX_UNDO = 10;
+const REDO_PROPERTY = "pose:redomoves";
+
+function readList(property) {
+  const raw = world.getDynamicProperty(property);
+  if (typeof raw !== "string") return [];
   try {
-    return JSON.parse(raw);
+    const list = JSON.parse(raw);
+    return Array.isArray(list) ? list : list && list.from ? [list] : []; // (one move, as 0.53.0 stored it)
   } catch {
-    return null;
+    return [];
   }
 }
 
-function forgetLastMove() {
-  const last = lastMove();
-  if (last) forgetStructures([].concat(last.from.saved, last.to.saved));
-  world.setDynamicProperty(LAST_MOVE_PROPERTY, undefined);
+function writeList(property, list) {
+  world.setDynamicProperty(property, list.length ? JSON.stringify(list) : undefined);
+}
+
+function selectBox(dim, min, size) {
+  world.setDynamicProperty(SELECTION_PROPERTY, JSON.stringify({ dim, a: [min.x, min.y, min.z], b: [min.x + size.x - 1, min.y + size.y - 1, min.z + size.z - 1] }));
+  targetBox = null;
+}
+
+// Moves the box at `from` (min, size) so its lowest corner is at `to`, turned `rot`. Runs inside
+// whenLoaded: throws if a chunk isn't loaded, before anything is changed.
+function doMove(dimId, from, to, rot) {
+  const dim = world.getDimension(dimId);
+  const size = from.size;
+  const turned = rot === 90 || rot === 270 ? { x: size.z, y: size.y, z: size.x } : size;
+  const stamp = Date.now().toString(36);
+  // saved first, both of them; nothing is changed if either can't be
+  const lifted = saveBox(dim, from.min, size, `pose:move_${stamp}_a`);
+  let covered;
+  try {
+    covered = saveBox(dim, to, turned, `pose:move_${stamp}_b`);
+  } catch (e) {
+    forgetStructures(lifted);
+    throw e;
+  }
+  const history = readList(LAST_MOVE_PROPERTY);
+  history.push({ dim: dimId, rot, from: { min: from.min, size, saved: lifted }, to: { min: to, size: turned, saved: covered } });
+  while (history.length > MAX_UNDO) {
+    const old = history.shift();
+    forgetStructures([].concat(old.from.saved, old.to.saved));
+  }
+  writeList(LAST_MOVE_PROPERTY, history);
+  withoutDrops(() => {
+    clearArea(dim, from.min, size);
+    for (const piece of lifted) {
+      const off = turnedOffset(piece.off, piece.size, size, rot);
+      world.structureManager.place(piece.id, dim, { x: to.x + off.x, y: to.y + off.y, z: to.z + off.z }, { includeEntities: false, rotation: ROTATIONS[rot] });
+    }
+  });
+  // the selection is where the blocks are now
+  selectBox(dimId, to, turned);
 }
 
 function moveSelection(player, data) {
@@ -1178,36 +1222,17 @@ function moveSelection(player, data) {
   if (rot === 0 && to.x === s.min.x && to.y === s.min.y && to.z === s.min.z) throw new Error("It's already there: move it in Blockbench first");
 
   whenLoaded(dim, [{ min: s.min, size }, { min: to, size: turned }], () => {
-    const stamp = Date.now().toString(36);
-    // saved first, both of them; nothing is changed if either can't be
-    const lifted = saveBox(dim, s.min, size, `pose:move_${stamp}_a`);
-    let covered;
-    try {
-      covered = saveBox(dim, to, turned, `pose:move_${stamp}_b`);
-    } catch (e) {
-      forgetStructures(lifted);
-      throw e;
-    }
-    forgetLastMove();
-    world.setDynamicProperty(LAST_MOVE_PROPERTY, JSON.stringify({ dim: s.dim, rot, from: { min: s.min, size, saved: lifted }, to: { min: to, size: turned, saved: covered } }));
-    withoutDrops(() => {
-      clearArea(dim, s.min, size);
-      for (const piece of lifted) {
-        const off = turnedOffset(piece.off, piece.size, size, rot);
-        world.structureManager.place(piece.id, dim, { x: to.x + off.x, y: to.y + off.y, z: to.z + off.z }, { includeEntities: false, rotation: ROTATIONS[rot] });
-      }
-    });
-    // the selection is where the blocks are now
-    world.setDynamicProperty(SELECTION_PROPERTY, JSON.stringify({ dim: s.dim, a: [to.x, to.y, to.z], b: [to.x + turned.x - 1, to.y + turned.y - 1, to.z + turned.z - 1] }));
-    targetBox = null;
-    return ["ok"];
+    doMove(s.dim, { min: s.min, size }, to, rot);
+    writeList(REDO_PROPERTY, []); // a new move: nothing to redo any more
+    return [`ok|${readList(LAST_MOVE_PROPERTY).length}|0`];
   }, "The place it's moving from or to wouldn't load. Stand closer and try again.");
 }
 
 function undoMove(player, data) {
   beginResult(data.op);
-  const last = lastMove();
-  if (!last) throw new Error("There's no move to undo");
+  const history = readList(LAST_MOVE_PROPERTY);
+  const last = history[history.length - 1];
+  if (!last) return failResult("There's no move to undo");
   const dim = world.getDimension(last.dim);
   whenLoaded(dim, [{ min: last.from.min, size: last.from.size }, { min: last.to.min, size: last.to.size }], () => {
     withoutDrops(() => {
@@ -1215,12 +1240,31 @@ function undoMove(player, data) {
       for (const piece of last.to.saved) world.structureManager.place(piece.id, dim, { x: last.to.min.x + piece.off.x, y: last.to.min.y + piece.off.y, z: last.to.min.z + piece.off.z }, { includeEntities: false });
       for (const piece of last.from.saved) world.structureManager.place(piece.id, dim, { x: last.from.min.x + piece.off.x, y: last.from.min.y + piece.off.y, z: last.from.min.z + piece.off.z }, { includeEntities: false });
     });
-    const f = last.from;
-    world.setDynamicProperty(SELECTION_PROPERTY, JSON.stringify({ dim: last.dim, a: [f.min.x, f.min.y, f.min.z], b: [f.min.x + f.size.x - 1, f.min.y + f.size.y - 1, f.min.z + f.size.z - 1] }));
-    forgetLastMove();
-    targetBox = null;
-    return ["ok"];
-  }, "The places of the last move wouldn't load. Stand closer and try again.");
+    selectBox(last.dim, last.from.min, last.from.size);
+    history.pop();
+    writeList(LAST_MOVE_PROPERTY, history);
+    forgetStructures([].concat(last.from.saved, last.to.saved));
+    // how to do it again: the same box, to the same place, turned the same way
+    const redo = readList(REDO_PROPERTY);
+    redo.push({ dim: last.dim, rot: last.rot, from: { min: last.from.min, size: last.from.size }, to: last.to.min });
+    writeList(REDO_PROPERTY, redo.slice(-MAX_UNDO));
+    return [`ok|${history.length}|${Math.min(redo.length, MAX_UNDO)}`];
+  }, "The places of that move wouldn't load. Stand closer and try again.");
+}
+
+function redoMove(player, data) {
+  beginResult(data.op);
+  const redo = readList(REDO_PROPERTY);
+  const next = redo[redo.length - 1];
+  if (!next) return failResult("There's no move to redo");
+  const dim = world.getDimension(next.dim);
+  const turned = next.rot === 90 || next.rot === 270 ? { x: next.from.size.z, y: next.from.size.y, z: next.from.size.x } : next.from.size;
+  whenLoaded(dim, [{ min: next.from.min, size: next.from.size }, { min: next.to, size: turned }], () => {
+    doMove(next.dim, next.from, next.to, next.rot);
+    redo.pop();
+    writeList(REDO_PROPERTY, redo);
+    return [`ok|${readList(LAST_MOVE_PROPERTY).length}|${redo.length}`];
+  }, "The places of that move wouldn't load. Stand closer and try again.");
 }
 
 // The selection's edges (green) and where Blockbench has it now (blue), as particles.
@@ -1307,6 +1351,8 @@ function handle(ev) {
       return moveSelection(player, data);
     case "pose:moveundo":
       return undoMove(player, data);
+    case "pose:moveredo":
+      return redoMove(player, data);
     case "pose:backdrop":
       return setBackdrop(player, data);
     case "pose:camclear":
@@ -1424,7 +1470,7 @@ system.afterEvents.scriptEventReceive.subscribe(
         waitForChunk(ev, e);
         return;
       }
-      if (ev.id === "pose:scan" || ev.id === "pose:grabcam" || ev.id === "pose:scene" || ev.id === "pose:backdrop" || ev.id === "pose:selinfo" || ev.id === "pose:move" || ev.id === "pose:moveundo") failResult(e);
+      if (ev.id === "pose:scan" || ev.id === "pose:grabcam" || ev.id === "pose:scene" || ev.id === "pose:backdrop" || ev.id === "pose:selinfo" || ev.id === "pose:move" || ev.id === "pose:moveundo" || ev.id === "pose:moveredo") failResult(e);
       const msg = `${ev.id} failed: ${e}`;
       console.warn(`[Pose Studio] ${msg}`);
       if (!reportedErrors.has(msg) && ev.sourceEntity?.typeId === "minecraft:player") {

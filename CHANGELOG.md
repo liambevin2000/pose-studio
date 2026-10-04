@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.54.0 (2026-10-04)
+
+- Structure moves have real undo now. The last 10 moves can be undone one after another, and an undone move can be redone (Structure > Undo Move and Redo Move).
+- Ctrl+Z and Ctrl+Y work too: each move is a step in Blockbench's own history, and undoing or redoing that step undoes or redoes the move in Minecraft.
+- Connect to Minecraft now unticks itself when a working connection is lost (the world closed, Minecraft quit), so the menu shows what's true. Tick it again to reconnect. If Minecraft drops the connection straight away (the encrypted websockets setting), it stays on so you can fix the setting and run /connect again.
+- Update the Minecraft packs (Check for Updates, then reopen the world).
+
 ## 0.53.0 (2026-10-04)
 
 - New: move structures. Select a box of blocks in Minecraft, move it in Blockbench, and Minecraft moves the blocks. Select two corners in the game with /scriptevent pose:corner 1 and 2 (the block you stand in) or look1 and look2 (the block you look at), or from the new Structure menu; green particles outline the selection.

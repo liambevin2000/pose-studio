@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.53.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.54.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -266,7 +266,13 @@
               'In Minecraft: Settings > General > turn Require Encrypted Websockets OFF, then run /connect again.\n\n' +
               'Still failing? Check that cheats are on in this world.',
           });
-        } else Blockbench.showQuickMessage('Pose Studio: Minecraft disconnected', 2000);
+        } else {
+          // a connection that was working is gone (the world closed, Minecraft quit): Connect to
+          // Minecraft unticks itself, so the menu shows what's true. (Dropped straight away, above,
+          // it stays on: you fix the setting and run /connect again.)
+          if (linkToggle && linkToggle.value) linkToggle.set(false);
+          Blockbench.showQuickMessage('Pose Studio: Minecraft disconnected. Connect to Minecraft is off again', 3000);
+        }
       });
       Blockbench.showQuickMessage('Pose Studio: Minecraft connected', 2000);
       if (this.onConnect) this.onConnect();
@@ -2058,6 +2064,8 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
     if (playerHidden && link.connected) await link.command('scriptevent pose:hideplayer {"hide":false}').catch(logFailure);
     if (cameraSync && link.connected) await link.command('scriptevent pose:camclear').catch(logFailure);
     await unfreezeWorldClock().catch(() => {});
+    // ticked again while that was going on (straight after a disconnect unticked it): it stays up
+    if (linkToggle && linkToggle.value) return;
     if (tickTimer) clearInterval(tickTimer);
     tickTimer = null;
     link.onConnect = null;
@@ -2794,7 +2802,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
   // this menu), Get Selection brings it into Blockbench as one piece ("structure"), you move it
   // with the move tool and turn it in quarter turns around the vertical axis, and Apply Move makes
   // Minecraft move the blocks. Minecraft outlines the selection in green and, while you move it,
-  // where it would land in blue. Undo Last Move puts both places back as they were.
+  // where it would land in blue. Undo Move (or Ctrl+Z) puts both places back as they were, up to 10 moves back.
   const STRUCTURE_NAME = 'structure';
   const STRUCTURE_TEXTURE = 'pose_structure';
   let structure = null; // { uuid, min: [x, y, z], size: [x, y, z] } in blocks from the anchor's block
@@ -2974,19 +2982,48 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     }
     // the selection is now where the blocks are: fetched again, as Minecraft has it
     await getStructureSelection(true);
-    Blockbench.showQuickMessage('Moved. Structure ▸ Undo Last Move puts it back', 4000);
+    // a step in Blockbench's own history, so Ctrl+Z / Ctrl+Y undo and redo the move in Minecraft
+    try {
+      Undo.initEdit({});
+      Undo.finishEdit(STRUCTURE_UNDO);
+    } catch (e) {
+      // the Structure menu's Undo Move still works
+    }
+    Blockbench.showQuickMessage('Moved. Ctrl+Z (or Structure ▸ Undo Move) puts it back', 4000);
   }
 
-  async function undoStructureMove() {
-    if (!requireConnection()) return;
-    try {
-      await runGameQuery('pose:moveundo', {}, 'Putting the blocks back');
-    } catch (e) {
-      Blockbench.showMessageBox({ title: 'Pose Studio: structure', message: String(e.message || e) });
+  // Undo / redo of structure moves: the last 10 moves, one at a time. `quiet`: asked by Ctrl+Z /
+  // Ctrl+Y, where "nothing to undo" isn't worth a dialog.
+  const STRUCTURE_UNDO = 'Pose Studio: move structure in Minecraft';
+  let structureBusy = false;
+  async function stepStructureMove(event, label, done, quiet) {
+    if (structureBusy) return;
+    if (!link.connected) {
+      if (!quiet) requireConnection();
       return;
     }
-    await getStructureSelection(true);
-    Blockbench.showQuickMessage('The last move was undone', 3000);
+    structureBusy = true;
+    try {
+      const items = await runGameQuery(event, {}, label);
+      const counts = (items.find((i) => i.startsWith('ok|')) || 'ok|0|0').split('|');
+      await getStructureSelection(true);
+      Blockbench.showQuickMessage(`${done} (${counts[1]} more to undo, ${counts[2]} to redo)`, 3000);
+    } catch (e) {
+      if (quiet) Blockbench.showQuickMessage(`Pose Studio: ${e.message || e}`, 3000);
+      else Blockbench.showMessageBox({ title: 'Pose Studio: structure', message: String(e.message || e) });
+    } finally {
+      structureBusy = false;
+    }
+  }
+  const undoStructureMove = (quiet) => stepStructureMove('pose:moveundo', 'Putting the blocks back', 'Move undone', quiet === true);
+  const redoStructureMove = (quiet) => stepStructureMove('pose:moveredo', 'Moving the blocks again', 'Move redone', quiet === true);
+
+  // Blockbench's undo and redo reaching one of those steps
+  function onBlockbenchUndo(data) {
+    if (data && data.entry && data.entry.action === STRUCTURE_UNDO) undoStructureMove(true);
+  }
+  function onBlockbenchRedo(data) {
+    if (data && data.entry && data.entry.action === STRUCTURE_UNDO) redoStructureMove(true);
   }
 
   function structureCorner(which) {
@@ -8871,7 +8908,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     return { id: idItem.slice(2), name: scene.world || '', anchor: point('A|'), player: point('P|'), locations, removed: scene.removed || [], protocol: version ? Number(version.slice(2)) : 0 };
   }
 
-  const EXPECTED_PACK_PROTOCOL = 18; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
+  const EXPECTED_PACK_PROTOCOL = 19; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
   let warnedOldPack = false;
 
   // Scene files in the scenes folders that belong to a world (their pose_world says so), as
@@ -9647,6 +9684,16 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.54.0",
+      "date": "2026-10-04",
+      "changes": [
+        "Structure moves have real undo now. The last 10 moves can be undone one after another, and an undone move can be redone (Structure > Undo Move and Redo Move).",
+        "Ctrl+Z and Ctrl+Y work too: each move is a step in Blockbench's own history, and undoing or redoing that step undoes or redoes the move in Minecraft.",
+        "Connect to Minecraft now unticks itself when a working connection is lost (the world closed, Minecraft quit), so the menu shows what's true. Tick it again to reconnect. If Minecraft drops the connection straight away (the encrypted websockets setting), it stays on so you can fix the setting and run /connect again.",
+        "Update the Minecraft packs (Check for Updates, then reopen the world)."
+      ]
+    },
     {
       "version": "0.53.0",
       "date": "2026-10-04",
@@ -10471,7 +10518,7 @@ ${PLUGIN_URL}`,
 
   // for the plugin's own tests only (they set this flag); nothing happens otherwise
   if (typeof globalThis !== 'undefined' && globalThis.__POSE_STUDIO_TEST) {
-    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove };
+    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo };
   }
 
   Plugin.register('pose_studio', {
@@ -10503,6 +10550,8 @@ ${PLUGIN_URL}`,
       startGroupSpin();
       if (Blockbench.on) Blockbench.on('select_project', onProjectSelected);
       if (Blockbench.on) Blockbench.on('load_project', refreshOnLoad);
+      if (Blockbench.on) Blockbench.on('undo', onBlockbenchUndo);
+      if (Blockbench.on) Blockbench.on('redo', onBlockbenchRedo);
 
       const a = {
         link: (linkToggle = new Toggle('pose_studio_link', {
@@ -10627,8 +10676,12 @@ ${PLUGIN_URL}`,
           description: 'Moves the selected blocks in Minecraft to where the structure is in Blockbench (quarter turns around the vertical axis too).',
         }),
         structundo: new Action('pose_studio_struct_undo', {
-          name: 'Undo Last Move', icon: 'undo', click: () => undoStructureMove(),
-          description: 'Puts the blocks of the last move back, and what they landed on.',
+          name: 'Undo Move', icon: 'undo', click: () => undoStructureMove(),
+          description: 'Puts the blocks of the last move back, and what they landed on. The last 10 moves can be undone, one at a time (Ctrl+Z does the same).',
+        }),
+        structredo: new Action('pose_studio_struct_redo', {
+          name: 'Redo Move', icon: 'redo', click: () => redoStructureMove(),
+          description: 'Does the move you just undid again (Ctrl+Y does the same).',
         }),
         structcorner1: new Action('pose_studio_struct_corner1', { name: 'Corner 1: Where I Stand', icon: 'looks_one', click: () => structureCorner('1') }),
         structcorner2: new Action('pose_studio_struct_corner2', { name: 'Corner 2: Where I Stand', icon: 'looks_two', click: () => structureCorner('2') }),
@@ -10732,7 +10785,7 @@ ${PLUGIN_URL}`,
         a.drop,
         {
           name: 'Structure', id: 'pose_studio_structure_menu', icon: 'view_in_ar',
-          children: [a.structcorner1, a.structcorner2, a.structlook1, a.structlook2, '_', a.structget, a.structapply, a.structundo, '_', a.structclear],
+          children: [a.structcorner1, a.structcorner2, a.structlook1, a.structlook2, '_', a.structget, a.structapply, '_', a.structundo, a.structredo, '_', a.structclear],
         },
         a.ride,
         { name: 'Add Camera', id: 'pose_studio_add_camera', icon: 'videocam', children: [a.grabcam, a.savecam] },
@@ -10767,6 +10820,8 @@ ${PLUGIN_URL}`,
       stopGroupSpin();
       if (Blockbench.removeListener) Blockbench.removeListener('select_project', onProjectSelected);
       if (Blockbench.removeListener) Blockbench.removeListener('load_project', refreshOnLoad);
+      if (Blockbench.removeListener) Blockbench.removeListener('undo', onBlockbenchUndo);
+      if (Blockbench.removeListener) Blockbench.removeListener('redo', onBlockbenchRedo);
       deck.stop();
       if (startupTimer) clearTimeout(startupTimer);
       startupTimer = null;

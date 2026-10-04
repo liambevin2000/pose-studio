@@ -127,7 +127,7 @@ Select a box of blocks in Minecraft, move it in Blockbench, and Minecraft moves 
 2. **Structure ▸ Get Selection**: it appears in Blockbench as one piece called `structure`, where it is in the world.
 3. **Move it** with the move tool. Turn it in quarter turns around the vertical axis (Y rotation 0, 90, 180 or 270). Blue particles in Minecraft outline where it would land.
 4. **Structure ▸ Apply Move**: the blocks are lifted out of the old place and put down in the new one, chests and signs with their contents. Whatever was there is replaced.
-5. **Structure ▸ Undo Last Move** puts both places back (it still works after reopening the world, until the next move).
+5. **Structure ▸ Undo Move** (or Ctrl+Z) puts both places back; **Redo Move** (Ctrl+Y) does it again. The last 10 moves can be undone, and it still works after reopening the world.
 
 Mobs aren't moved. Up to 600,000 blocks at a time; above 40,000 visible blocks the piece is drawn as a plain box. Positions snap to whole blocks. After a move, Import World again if you use the terrain mesh.
 

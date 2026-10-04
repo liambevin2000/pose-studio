@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.54.0",
+    "date": "2026-10-04",
+    "changes": [
+      "Structure moves have real undo now. The last 10 moves can be undone one after another, and an undone move can be redone (Structure > Undo Move and Redo Move).",
+      "Ctrl+Z and Ctrl+Y work too: each move is a step in Blockbench's own history, and undoing or redoing that step undoes or redoes the move in Minecraft.",
+      "Connect to Minecraft now unticks itself when a working connection is lost (the world closed, Minecraft quit), so the menu shows what's true. Tick it again to reconnect. If Minecraft drops the connection straight away (the encrypted websockets setting), it stays on so you can fix the setting and run /connect again.",
+      "Update the Minecraft packs (Check for Updates, then reopen the world)."
+    ]
+  },
+  {
     "version": "0.53.0",
     "date": "2026-10-04",
     "changes": [
