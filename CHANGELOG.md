@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.52.1 (2026-10-04)
+
+- Stream Deck plugin 1.1: the keys are pixel art now, Minecraft style. Each is a stone button with a bevel and a sprite: a camera, the classic face, a film camera, a redstone lamp (lit, on a grass button, while a toggle is on), the square sun with a cloud, and a command block. The active camera's key turns grass green. Get it again with More > Get the Stream Deck Plugin and double-click the download.
+
 ## 0.52.0 (2026-10-04)
 
 - New: a Stream Deck plugin. Keys for Capture Screenshot, Capture Entities Only, cameras (next, previous or a numbered one: the key shows the camera's name and lights up while it's the active one), toggles (Sync Game Camera, Camera POV Viewport, Connect to Minecraft: lit while on), time and weather presets, and any other action of the Pose Studio menu. The keys work whichever window is in front, Minecraft included.

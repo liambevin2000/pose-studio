@@ -1,5 +1,12 @@
 [
   {
+    "version": "0.52.1",
+    "date": "2026-10-04",
+    "changes": [
+      "Stream Deck plugin 1.1: the keys are pixel art now, Minecraft style. Each is a stone button with a bevel and a sprite: a camera, the classic face, a film camera, a redstone lamp (lit, on a grass button, while a toggle is on), the square sun with a cloud, and a command block. The active camera's key turns grass green. Get it again with More > Get the Stream Deck Plugin and double-click the download."
+    ]
+  },
+  {
     "version": "0.52.0",
     "date": "2026-10-04",
     "changes": [

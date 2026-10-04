@@ -1,6 +1,6 @@
 {
   "Name": "Pose Studio",
-  "Version": "1.0.0.0",
+  "Version": "1.1.0.0",
   "Author": "Pose Studio",
   "Description": "Run Pose Studio (the Blockbench plugin for posing Minecraft Bedrock screenshots) from your Stream Deck: captures, cameras, toggles, time and weather. Turn on Pose Studio ▸ More ▸ Stream Deck Link in Blockbench.",
   "Category": "Pose Studio",
@@ -11,64 +11,119 @@
   "CodePath": "plugin.html",
   "PropertyInspectorPath": "pi.html",
   "SDKVersion": 2,
-  "Software": { "MinimumVersion": "6.5" },
-  "OS": [{ "Platform": "windows", "MinimumVersion": "10" }],
+  "Software": {
+    "MinimumVersion": "6.5"
+  },
+  "OS": [
+    {
+      "Platform": "windows",
+      "MinimumVersion": "10"
+    }
+  ],
   "Actions": [
     {
       "Name": "Capture Screenshot",
       "UUID": "com.posestudio.deck.capture",
-      "Icon": "images/capture",
+      "Icon": "images/capture_icon",
       "Tooltip": "Hides the interface and saves the Minecraft window to the Pose Studio folder in Pictures.",
-      "Controllers": ["Keypad"],
-      "States": [{ "Image": "images/capture" }]
+      "Controllers": [
+        "Keypad"
+      ],
+      "States": [
+        {
+          "Image": "images/capture"
+        }
+      ]
     },
     {
       "Name": "Capture Entities Only",
       "UUID": "com.posestudio.deck.entities",
-      "Icon": "images/entities",
+      "Icon": "images/entities_icon",
       "Tooltip": "Saves the players and mobs on their own (and the passes picked in Entity Shot Options).",
-      "Controllers": ["Keypad"],
-      "States": [{ "Image": "images/entities" }]
+      "Controllers": [
+        "Keypad"
+      ],
+      "States": [
+        {
+          "Image": "images/entities"
+        }
+      ]
     },
     {
       "Name": "Camera",
       "UUID": "com.posestudio.deck.camera",
-      "Icon": "images/camera",
+      "Icon": "images/camera_icon",
       "Tooltip": "Switches to the next, the previous or a numbered camera. The key shows the camera's name and lights up while it's the active one.",
-      "Controllers": ["Keypad"],
+      "Controllers": [
+        "Keypad"
+      ],
       "DisableAutomaticStates": true,
       "States": [
-        { "Image": "images/camera", "TitleAlignment": "bottom", "FontSize": 11 },
-        { "Image": "images/camera_on", "TitleAlignment": "bottom", "FontSize": 11 }
+        {
+          "Image": "images/camera",
+          "TitleAlignment": "bottom",
+          "FontSize": 11
+        },
+        {
+          "Image": "images/camera_on",
+          "TitleAlignment": "bottom",
+          "FontSize": 11
+        }
       ]
     },
     {
       "Name": "Toggle",
       "UUID": "com.posestudio.deck.toggle",
-      "Icon": "images/toggle",
+      "Icon": "images/toggle_icon",
       "Tooltip": "Sync Game Camera, the Camera POV view, or the Minecraft connection. The key is lit while it's on.",
-      "Controllers": ["Keypad"],
+      "Controllers": [
+        "Keypad"
+      ],
       "DisableAutomaticStates": true,
       "States": [
-        { "Image": "images/toggle", "TitleAlignment": "bottom", "FontSize": 11 },
-        { "Image": "images/toggle_on", "TitleAlignment": "bottom", "FontSize": 11 }
+        {
+          "Image": "images/toggle",
+          "TitleAlignment": "bottom",
+          "FontSize": 11
+        },
+        {
+          "Image": "images/toggle_on",
+          "TitleAlignment": "bottom",
+          "FontSize": 11
+        }
       ]
     },
     {
       "Name": "Time & Weather",
       "UUID": "com.posestudio.deck.env",
-      "Icon": "images/env",
+      "Icon": "images/env_icon",
       "Tooltip": "Sets the scene's time of day and weather.",
-      "Controllers": ["Keypad"],
-      "States": [{ "Image": "images/env", "TitleAlignment": "bottom", "FontSize": 11 }]
+      "Controllers": [
+        "Keypad"
+      ],
+      "States": [
+        {
+          "Image": "images/env",
+          "TitleAlignment": "bottom",
+          "FontSize": 11
+        }
+      ]
     },
     {
       "Name": "Run Action",
       "UUID": "com.posestudio.deck.run",
-      "Icon": "images/run",
+      "Icon": "images/run_icon",
       "Tooltip": "Runs anything from the Pose Studio menu: Drop to Ground, Compare with Game, Add Camera…",
-      "Controllers": ["Keypad"],
-      "States": [{ "Image": "images/run", "TitleAlignment": "bottom", "FontSize": 11 }]
+      "Controllers": [
+        "Keypad"
+      ],
+      "States": [
+        {
+          "Image": "images/run",
+          "TitleAlignment": "bottom",
+          "FontSize": 11
+        }
+      ]
     }
   ]
 }

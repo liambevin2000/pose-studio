@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.52.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.52.1'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -9411,6 +9411,13 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.52.1",
+      "date": "2026-10-04",
+      "changes": [
+        "Stream Deck plugin 1.1: the keys are pixel art now, Minecraft style. Each is a stone button with a bevel and a sprite: a camera, the classic face, a film camera, a redstone lamp (lit, on a grass button, while a toggle is on), the square sun with a cloud, and a command block. The active camera's key turns grass green. Get it again with More > Get the Stream Deck Plugin and double-click the download."
+      ]
+    },
     {
       "version": "0.52.0",
       "date": "2026-10-04",
