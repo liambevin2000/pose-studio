@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.52.2'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.52.3'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -2851,9 +2851,37 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     return cam.name;
   }
 
+  // Brings a window to the front from a Stream Deck key. Windows doesn't let a program in the
+  // background take the foreground just by asking, so: Blockbench's window is put on top for a
+  // moment (which Windows allows) and then focused; Minecraft's gets a tap of Alt first (the
+  // foreground lock opens for whoever sent the last key).
+  const FOCUS_MINECRAFT_PS1 = CAPTURE_PS1
+    .replace(/^[\s\S]*?Add-Type -AssemblyName/, 'Add-Type -AssemblyName')
+    .replace(/\[PoseStudioWin\]::SetForegroundWindow\(\$hwnd\)[\s\S]*$/, () => String.raw`[PoseStudioWin]::keybd_event(0x12, 0, 0, [UIntPtr]::Zero)
+[PoseStudioWin]::SetForegroundWindow($hwnd) | Out-Null
+[PoseStudioWin]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero)
+`);
+
+  function focusWindow(which) {
+    if (which === 'minecraft') {
+      runPowerShell(FOCUS_MINECRAFT_PS1, '', 'bring the Minecraft window to the front').catch((e) => console.warn('[Pose Studio] focus Minecraft', e));
+      return 'Minecraft';
+    }
+    const win = typeof currentwindow !== 'undefined' ? currentwindow : null;
+    if (!win) throw new Error("Blockbench's window isn't available");
+    if (win.isMinimized && win.isMinimized()) win.restore();
+    if (win.setAlwaysOnTop) win.setAlwaysOnTop(true);
+    if (win.show) win.show();
+    if (win.moveTop) win.moveTop();
+    win.focus();
+    if (win.setAlwaysOnTop) win.setAlwaysOnTop(false);
+    return 'Blockbench';
+  }
+
   function deckRun(q) {
     const id = String(q.id || '');
     const value = String(q.value === undefined ? '' : q.value);
+    if (id === 'focus') return { ok: true, message: focusWindow(value === 'minecraft' ? 'minecraft' : 'blockbench') };
     if (id === 'camera') return { ok: true, message: deckCamera(value || 'next') };
     if (id === 'time') {
       if (!Number.isFinite(Number(value))) throw new Error('time needs a number of ticks');
@@ -9411,6 +9439,14 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.52.3",
+      "date": "2026-10-04",
+      "changes": [
+        "Stream Deck plugin 1.3: a new Switch To key brings Blockbench to the front (a crafting table on the key), or Minecraft if you set it to (a grass block). It works from any window.",
+        "Update both: Check for Updates here, and More > Get the Stream Deck Plugin (double-click the download)."
+      ]
+    },
     {
       "version": "0.52.2",
       "date": "2026-10-04",

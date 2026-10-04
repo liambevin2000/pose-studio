@@ -40,6 +40,8 @@ const sprites = {
   rain: { colours: { c: W, s: '#c9d9e6', d: '#4aa3ff' }, rows: cloud.concat(['..........', '.d..d..d..', '..d..d..d.', '.d..d..d..', '..........']) },
   thunder: { colours: { c: '#9aa3ad', s: '#6f7882', y: '#ffd83d' }, rows: cloud.concat(['....yy....', '...yy.....', '..yyyy....', '....yy....', '...y......']) },
   sun_cloud: { colours: { y: '#f5c518', w: '#fff3a0', c: W, s: '#c9d9e6' }, rows: ['..........', '.yyyyy....', '.ywwwy....', '.ywwwy....', '.ywwwy.cc.', '.yyyyycccc', '...ccccccc', '..cccccccc', '..ssssssss', '..........'] },
+  // a crafting table (Blockbench: the bench)
+  bench: { colours: { k: '#3f2710', l: '#c8964a', m: '#a8763a', b: '#8a5a2a', s: '#d8d8d8', d: '#5a3a1a' }, rows: ['..........', '.kkkkkkkk.', '.klmllmlk.', '.kmllmllk.', '.kkkkkkkk.', '.kbsbbdbk.', '.kbsbbdbk.', '.kbbbbbbk.', '.kkkkkkkk.', '..........'] },
   // the menu's actions
   command: { colours: { k: '#4a2f1f', o: '#d98a4b', l: '#f3c692', y: '#b86a2e', e: '#1d1410' }, rows: ['..........', '.kkkkkkkk.', '.kolooook.', '.koeeeeyk.', '.koelleyk.', '.koelleyk.', '.koeeeeyk.', '.kyyyyyyk.', '.kkkkkkkk.', '..........'] },
   drop: { colours: { w: W, g: '#5d9b3a', d: '#7a5230' }, rows: ['....ww....', '....ww....', '....ww....', '..wwwwww..', '...wwww...', '....ww....', '..........', 'gggggggggg', 'dddddddddd', 'dddddddddd'] },
@@ -137,7 +139,7 @@ const fixed = {
   capture: ['capture', 'stone'], entities: ['face', 'stone'],
   camera: ['camera', 'stone'], camera_on: ['camera', 'grass'],
   toggle: ['lamp_off', 'stone'], toggle_on: ['lamp_on', 'grass'],
-  env: ['sun_cloud', 'sky'], run: ['command', 'stone'],
+  env: ['sun_cloud', 'sky'], run: ['command', 'stone'], focus: ['bench', 'stone'],
 };
 for (const [name, [sprite, button]] of Object.entries(fixed)) {
   fs.writeFileSync(dir + 'images/' + name + '.svg', svg(pixels(sprite, button)) + '\n');
@@ -168,7 +170,7 @@ if (previewAt > 0) {
     ['sunrise', 'dusk'], ['day', 'sky'], ['noon', 'sky'], ['sunset', 'dusk'], ['night', 'night'], ['rain', 'storm'],
     ['thunder', 'storm'], ['rain', 'night'], ['sun_cloud', 'sky'], ['command', 'stone'], ['drop', 'stone'], ['compare', 'stone'],
     ['creeper', 'stone'], ['plus', 'stone'], ['armour', 'stone'], ['film', 'stone'], ['saddle', 'stone'], ['grass', 'stone'],
-    ['clock', 'stone'], ['barrier', 'stone'], ['target', 'stone'], ['chest', 'stone'], ['lever', 'stone'], ['grid', 'stone'],
+    ['bench', 'stone'], ['grass', 'grass'], ['clock', 'stone'], ['barrier', 'stone'], ['target', 'stone'], ['chest', 'stone'], ['lever', 'stone'], ['grid', 'stone'],
   ];
   const perRow = 6;
   const sheet = [];

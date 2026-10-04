@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.52.3 (2026-10-04)
+
+- Stream Deck plugin 1.3: a new Switch To key brings Blockbench to the front (a crafting table on the key), or Minecraft if you set it to (a grass block). It works from any window.
+- Update both: Check for Updates here, and More > Get the Stream Deck Plugin (double-click the download).
+
 ## 0.52.2 (2026-10-04)
 
 - Stream Deck plugin 1.2: each key's picture now follows what the key is set to. Time & Weather keys show a sunrise, the sun, a sunset, the moon and stars, rain or a thundercloud, on a button the colour of that time of day. Toggle keys show what they toggle: arrows for Sync Game Camera, an eye for the Camera POV view, connection bars for the Minecraft link. Camera keys show an arrow for next and previous, a film camera for a numbered camera.

@@ -104,6 +104,7 @@ function look(key) {
   }
   if (kind === 'run') return { title: s.label || '', state: 0, art: [actionArt(s.id), 'stone'] };
   if (kind === 'entities') return { title: '', state: 0, art: ['face', 'stone'] };
+  if (kind === 'focus') return s.window === 'minecraft' ? { title: 'Minecraft', state: 0, art: ['grass', 'grass'] } : { title: 'Blockbench', state: 0, art: ['bench', 'stone'] };
   return { title: '', state: 0, art: ['capture', 'stone'] };
 }
 
@@ -146,6 +147,7 @@ function requests(key) {
     if (s.weather) list.push(`/run?id=weather&value=${encodeURIComponent(s.weather)}`);
     return list;
   }
+  if (kind === 'focus') return [`/run?id=focus&value=${s.window === 'minecraft' ? 'minecraft' : 'blockbench'}`];
   if (kind === 'run') return s.id ? [`/run?id=${encodeURIComponent(s.id)}`] : [];
   return [];
 }

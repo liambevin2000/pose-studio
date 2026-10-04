@@ -104,6 +104,8 @@
           const time = select('time', [['', "Don't change"], ['sunrise', 'Sunrise'], ['day', 'Morning'], ['noon', 'Noon'], ['sunset', 'Sunset'], ['night', 'Night'], ['midnight', 'Midnight'], ['custom', 'Custom…']], 'noon', (el) => ticks.forEach((n) => (n.hidden = el.value !== 'custom')));
           form.append(...row('Time', time), ...ticks, ...row('Weather', select('weather', [['', "Don't change"], ['clear', 'Clear'], ['rain', 'Rain'], ['thunder', 'Thunder']], '')));
           ticks.forEach((n) => (n.hidden = settings.time !== 'custom'));
+        } else if (kind === 'focus') {
+          form.append(...row('Bring to front', select('window', [['blockbench', 'Blockbench'], ['minecraft', 'Minecraft']], 'blockbench')));
         } else if (kind === 'run') {
           const actions = (answer && answer.actions) || [];
           if (actions.length) {

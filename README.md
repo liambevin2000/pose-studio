@@ -129,6 +129,7 @@ Pose Studio has a plugin for Elgato Stream Deck (Stream Deck 6.5 or newer, Windo
 | **Camera** | Next, previous, or a numbered camera. A numbered key shows that camera's name and lights up while it's the active one. |
 | **Toggle** | Sync Game Camera, Camera POV Viewport, or Connect to Minecraft. Lit while on. |
 | **Time & Weather** | A time of day (sunrise, noon, sunset, night… or ticks) and/or a weather. |
+| **Switch To** | Brings Blockbench (or Minecraft) to the front. |
 | **Run Action** | Anything else from the Pose Studio menu (Drop to Ground, Compare with Game, Add Camera…). |
 
 The link only listens on this computer (127.0.0.1:19132) and refuses requests from web pages. A key shows a warning triangle when Pose Studio isn't answering (Blockbench closed, or the link off).
