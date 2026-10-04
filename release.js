@@ -75,4 +75,7 @@ fs.writeFileSync(path.join(root, 'packs.json'), JSON.stringify({ version, revisi
 // ---- .mcaddon
 execFileSync(process.execPath, [path.join(root, 'build-mcaddon.js')], { stdio: 'inherit' });
 
+// ---- the Stream Deck plugin
+execFileSync(process.execPath, [path.join(root, 'build-streamdeck.js')], { stdio: 'inherit' });
+
 console.log(`Release ${version} ready (packs revision ${revision}, ${list.length} files). Commit and push to publish it.`);

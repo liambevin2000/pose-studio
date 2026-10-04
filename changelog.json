@@ -1,5 +1,13 @@
 [
   {
+    "version": "0.52.0",
+    "date": "2026-10-04",
+    "changes": [
+      "New: a Stream Deck plugin. Keys for Capture Screenshot, Capture Entities Only, cameras (next, previous or a numbered one: the key shows the camera's name and lights up while it's the active one), toggles (Sync Game Camera, Camera POV Viewport, Connect to Minecraft: lit while on), time and weather presets, and any other action of the Pose Studio menu. The keys work whichever window is in front, Minecraft included.",
+      "To set it up: More > Get the Stream Deck Plugin (double-click the download to add it to Stream Deck), then turn on More > Stream Deck Link. The link only listens on your own computer and refuses requests from web pages."
+    ]
+  },
+  {
     "version": "0.51.3",
     "date": "2026-10-03",
     "changes": [

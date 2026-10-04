@@ -1,0 +1,142 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Pose Studio</title>
+    <style>
+      body { margin: 0; padding: 10px 12px; background: #2d2d2d; color: #d8d8d8; font: 12px/1.4 "Segoe UI", Arial, sans-serif; }
+      .row { display: flex; align-items: center; margin: 0 0 8px; }
+      .row > label { flex: 0 0 94px; text-align: right; padding-right: 10px; color: #969696; }
+      select, input { flex: 1; min-width: 0; background: #3d3d3d; color: #d8d8d8; border: 1px solid #505050; border-radius: 3px; padding: 5px 6px; font: inherit; }
+      .note { margin: 4px 0 0 104px; color: #969696; }
+      .warn { margin: 0 0 10px; padding: 7px 9px; border-radius: 3px; background: #4a3a1c; color: #f0d9a8; }
+      [hidden] { display: none !important; }
+    </style>
+  </head>
+  <body>
+    <div id="offline" class="warn" hidden>Pose Studio isn't answering. In Blockbench, turn on Pose Studio ▸ More ▸ Stream Deck Link.</div>
+    <div id="form"></div>
+    <script>
+      const POSE_STUDIO = 'http://127.0.0.1:19132';
+      let deck = null;
+      let uuid = '';
+      let settings = {};
+
+      function save() {
+        if (deck && deck.readyState === 1) deck.send(JSON.stringify({ event: 'setSettings', context: uuid, payload: settings }));
+      }
+
+      function row(label, control, note) {
+        const div = document.createElement('div');
+        div.className = 'row';
+        const l = document.createElement('label');
+        l.textContent = label;
+        div.append(l, control);
+        const out = [div];
+        if (note) {
+          const n = document.createElement('div');
+          n.className = 'note';
+          n.textContent = note;
+          out.push(n);
+        }
+        return out;
+      }
+
+      function select(key, options, fallback, onChange) {
+        const el = document.createElement('select');
+        for (const [value, text] of options) {
+          const o = document.createElement('option');
+          o.value = value;
+          o.textContent = text;
+          el.append(o);
+        }
+        if (settings[key] === undefined) settings[key] = fallback;
+        el.value = settings[key];
+        if (el.value !== String(settings[key])) {
+          // a value that isn't in the list (an action from a newer Pose Studio): kept, shown as itself
+          const o = document.createElement('option');
+          o.value = settings[key];
+          o.textContent = settings[key];
+          el.append(o);
+          el.value = settings[key];
+        }
+        el.onchange = () => {
+          settings[key] = el.value;
+          if (onChange) onChange(el);
+          save();
+        };
+        return el;
+      }
+
+      function input(key, type, fallback) {
+        const el = document.createElement('input');
+        el.type = type;
+        if (settings[key] === undefined) settings[key] = fallback;
+        el.value = settings[key];
+        el.oninput = () => {
+          settings[key] = type === 'number' ? Number(el.value) : el.value;
+          save();
+        };
+        return el;
+      }
+
+      async function build(action) {
+        const form = document.getElementById('form');
+        form.textContent = '';
+        const kind = action.split('.').pop();
+        let answer = null;
+        try {
+          answer = await (await fetch(POSE_STUDIO + '/state?actions=1', { cache: 'no-store' })).json();
+        } catch (e) {
+          answer = null;
+        }
+        document.getElementById('offline').hidden = !!answer;
+
+        if (kind === 'camera') {
+          const number = row('Camera number', input('number', 'number', 1), answer && answer.cameras.length ? `This scene: ${answer.cameras.map((c, i) => `${i + 1} ${c}`).join(', ')}` : '');
+          const mode = select('mode', [['next', 'Next camera'], ['prev', 'Previous camera'], ['number', 'A numbered camera']], 'next', (el) => number.forEach((n) => (n.hidden = el.value !== 'number')));
+          form.append(...row('Switch to', mode), ...number);
+          number.forEach((n) => (n.hidden = settings.mode !== 'number'));
+        } else if (kind === 'toggle') {
+          form.append(...row('Toggle', select('which', [['sync', 'Sync Game Camera'], ['pov', 'Camera POV Viewport'], ['link', 'Connect to Minecraft']], 'sync')));
+        } else if (kind === 'env') {
+          const ticks = row('Ticks', input('ticks', 'number', 6000), '0 is 6 am, 6000 noon, 12000 6 pm, 18000 midnight');
+          const time = select('time', [['', "Don't change"], ['sunrise', 'Sunrise'], ['day', 'Morning'], ['noon', 'Noon'], ['sunset', 'Sunset'], ['night', 'Night'], ['midnight', 'Midnight'], ['custom', 'Custom…']], 'noon', (el) => ticks.forEach((n) => (n.hidden = el.value !== 'custom')));
+          form.append(...row('Time', time), ...ticks, ...row('Weather', select('weather', [['', "Don't change"], ['clear', 'Clear'], ['rain', 'Rain'], ['thunder', 'Thunder']], '')));
+          ticks.forEach((n) => (n.hidden = settings.time !== 'custom'));
+        } else if (kind === 'run') {
+          const actions = (answer && answer.actions) || [];
+          if (actions.length) {
+            const options = actions.map((a) => [a.id, a.name.replace(/…$/, '')]).sort((a, b) => a[1].localeCompare(b[1]));
+            const el = select('id', options, 'pose_studio_drop', (s) => {
+              settings.label = s.options[s.selectedIndex].textContent;
+            });
+            if (!settings.label) settings.label = el.options[el.selectedIndex].textContent;
+            form.append(...row('Action', el, 'Actions that open a window open it in Blockbench.'));
+          } else {
+            form.append(...row('Action id', input('id', 'text', 'pose_studio_drop'), 'Turn on Stream Deck Link to pick from a list.'));
+          }
+        } else {
+          const p = document.createElement('div');
+          p.className = 'note';
+          p.style.margin = '0';
+          p.textContent = kind === 'entities' ? 'What it saves is set in Pose Studio ▸ Entity Shot Options. Needs Sync Game Camera.' : 'Nothing to set up.';
+          form.append(p);
+        }
+        save();
+      }
+
+      // Stream Deck calls this when it opens the settings of a key.
+      function connectElgatoStreamDeckSocket(port, inUuid, registerEvent, info, actionInfo) {
+        uuid = inUuid;
+        const about = JSON.parse(actionInfo);
+        settings = (about.payload && about.payload.settings) || {};
+        deck = new WebSocket(`ws://127.0.0.1:${port}`);
+        deck.onopen = () => {
+          deck.send(JSON.stringify({ event: registerEvent, uuid }));
+          build(about.action);
+        };
+      }
+    </script>
+  </body>
+</html>

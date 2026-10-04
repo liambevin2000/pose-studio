@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.51.3'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.52.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -2784,6 +2784,190 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
       Blockbench.showQuickMessage(`Saved ${paths.length} shot${paths.length === 1 ? '' : 's'} in ${paths[0] ? paths[0].replace(/[\\/][^\\/]*$/, '') : 'Pictures\\Pose Studio'}`, 4000);
     } catch (e) {
       Blockbench.showMessageBox({ title: 'Capture Entities Only failed', message: String(e.message || e) });
+    }
+  }
+
+  // ---- Stream Deck link ---------------------------------------------------------------------------
+  // Pose Studio ▸ More ▸ Stream Deck Link: a small control link on this machine only (127.0.0.1),
+  // for the Pose Studio Stream Deck plugin. It answers two things: GET /state (what's open, which
+  // cameras there are, what's switched on) and GET /run?id=… (do something: an action of the Pose
+  // Studio menu, a camera, a toggle, the time or the weather). Like the Minecraft link it's plain
+  // HTTP read by hand on a 'net' socket ('http' isn't a module Blockbench lets plugins use).
+  // Web pages can't use it: requests that come from a website (an http/https Origin) are refused.
+  const DECK_PORT = 19132;
+  const DECK_KEY = 'pose_studio_deck_link';
+  let deckToggle = null;
+  let deckMessage = ''; // the last thing Pose Studio said (shown on a key that asks for it)
+
+  function deckActions() {
+    if (typeof BarItems === 'undefined') return [];
+    return Object.keys(BarItems)
+      .filter((id) => /^pose_studio_/.test(id) && BarItems[id] && typeof BarItems[id].trigger === 'function' && id !== 'pose_studio_deck')
+      .map((id) => ({ id, name: String(BarItems[id].name || id), toggle: typeof BarItems[id].set === 'function' && typeof BarItems[id].value === 'boolean' }));
+  }
+
+  function deckState() {
+    const hasProject = typeof Project !== 'undefined' && !!Project;
+    const cams = hasProject ? cameraRoots() : [];
+    const active = hasProject ? activeCamera() : null;
+    const env = projectEnv() || {};
+    return {
+      app: 'pose-studio',
+      version: PLUGIN_VERSION,
+      scene: hasProject ? String(Project.name || '') : '',
+      connected: !!link.connected,
+      link: !!(linkToggle && linkToggle.value),
+      sync: !!cameraSync,
+      pov: !!(povToggle && povToggle.value),
+      shooting: !!shooting,
+      cameras: cams.map((c) => c.name),
+      camera: active ? active.name : '',
+      players: hasProject ? mannequinRoots().length : 0,
+      mobs: hasProject ? entityRoots().length : 0,
+      time: Number.isFinite(env.time) ? env.time : null,
+      weather: env.weather || '',
+    };
+  }
+
+  // Makes a camera the active one (and selects it, as clicking it does).
+  function deckCamera(which) {
+    const cams = cameraRoots();
+    if (!cams.length) throw new Error('This scene has no cameras');
+    const at = cams.indexOf(activeCamera());
+    let cam = null;
+    if (which === 'next') cam = cams[(at + 1 + cams.length) % cams.length];
+    else if (which === 'prev') cam = cams[(at - 1 + cams.length * 2) % cams.length];
+    else if (/^\d+$/.test(String(which))) cam = cams[Number(which) - 1];
+    else cam = cams.find((c) => c.name.toLowerCase() === String(which).toLowerCase());
+    if (!cam) throw new Error(`No camera ${which}`);
+    try {
+      if (typeof unselectAllElements === 'function') unselectAllElements();
+      if (typeof cam.select === 'function') cam.select();
+    } catch (e) {
+      // the active camera is set either way
+    }
+    activeCam = cam;
+    lastCamera = null;
+    return cam.name;
+  }
+
+  function deckRun(q) {
+    const id = String(q.id || '');
+    const value = String(q.value === undefined ? '' : q.value);
+    if (id === 'camera') return { ok: true, message: deckCamera(value || 'next') };
+    if (id === 'time') {
+      if (!Number.isFinite(Number(value))) throw new Error('time needs a number of ticks');
+      setTimeOfDay(Number(value));
+      return { ok: true, message: `time ${value}` };
+    }
+    if (id === 'weather') {
+      if (!WEATHERS.some((w) => w.id === value)) throw new Error(`No weather ${value}`);
+      setWeather(value);
+      return { ok: true, message: value };
+    }
+    const item = typeof BarItems !== 'undefined' && /^pose_studio_/.test(id) ? BarItems[id] : null;
+    if (!item || typeof item.trigger !== 'function') throw new Error(`No Pose Studio action ${id}`);
+    const isToggle = typeof item.set === 'function' && typeof item.value === 'boolean';
+    if (isToggle && (value === 'on' || value === 'off')) {
+      if (item.value !== (value === 'on')) item.trigger();
+    } else {
+      // long ones (a capture) keep going after the answer
+      Promise.resolve()
+        .then(() => item.trigger())
+        .catch((e) => console.warn('[Pose Studio] Stream Deck', id, e));
+    }
+    return { ok: true, message: String(item.name || id) };
+  }
+
+  const deck = {
+    server: null,
+    start() {
+      if (this.server) return;
+      const net = nodeRequire('net', 'let the Stream Deck plugin on this computer talk to Pose Studio (127.0.0.1 only)');
+      if (!net) throw new Error('Network permission was denied');
+      const server = net.createServer((socket) => this.serve(socket));
+      server.on('error', (e) => {
+        this.server = null;
+        Blockbench.showMessageBox({ title: 'Pose Studio', message: `The Stream Deck link could not listen on port ${DECK_PORT}: ${e.message}` });
+        if (deckToggle && deckToggle.value) deckToggle.set(false);
+      });
+      server.listen(DECK_PORT, '127.0.0.1');
+      this.server = server;
+    },
+    stop() {
+      if (this.server) this.server.close();
+      this.server = null;
+    },
+    serve(socket) {
+      const B = bufferClass();
+      let head = B.alloc(0);
+      socket.on('error', () => {});
+      const onData = (chunk) => {
+        head = B.concat([head, chunk]);
+        const end = head.indexOf('\r\n\r\n');
+        if (end < 0) {
+          if (head.length > 16384) socket.destroy();
+          return;
+        }
+        socket.removeListener('data', onData);
+        const lines = head.subarray(0, end).toString('latin1').split('\r\n');
+        const [method, target] = lines[0].split(' ');
+        const headers = {};
+        for (const line of lines.slice(1)) {
+          const i = line.indexOf(':');
+          if (i > 0) headers[line.slice(0, i).trim().toLowerCase()] = line.slice(i + 1).trim();
+        }
+        const origin = headers.origin || '';
+        // a website's page (http/https origin) is refused; the Stream Deck plugin is a local file
+        const allowed = !origin || origin === 'null' || /^file:/i.test(origin);
+        const reply = (status, body) => {
+          const text = JSON.stringify(body);
+          socket.end(
+            `HTTP/1.1 ${status}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: ${B.byteLength(text)}\r\n` +
+              (allowed ? `Access-Control-Allow-Origin: ${origin || '*'}\r\nAccess-Control-Allow-Private-Network: true\r\nAccess-Control-Allow-Headers: *\r\n` : '') +
+              'Cache-Control: no-store\r\nConnection: close\r\n\r\n' + text
+          );
+        };
+        if (!allowed) return reply('403 Forbidden', { ok: false, message: 'Only the Stream Deck plugin on this computer can use this.' });
+        if (method === 'OPTIONS') return reply('200 OK', { ok: true });
+        const [path, query = ''] = String(target || '/').split('?');
+        const q = {};
+        for (const part of query.split('&')) {
+          if (!part) continue;
+          const [k, v = ''] = part.split('=');
+          try {
+            q[decodeURIComponent(k)] = decodeURIComponent(v.replace(/\+/g, ' '));
+          } catch (e) {
+            // not a valid value: left out
+          }
+        }
+        try {
+          if (path === '/state') return reply('200 OK', Object.assign({ ok: true }, deckState(), q.actions ? { actions: deckActions() } : {}));
+          if (path === '/run') {
+            const result = deckRun(q);
+            deckMessage = result.message;
+            return reply('200 OK', Object.assign(result, { state: deckState() }));
+          }
+          return reply('404 Not Found', { ok: false, message: 'Pose Studio: /state or /run?id=…' });
+        } catch (e) {
+          return reply('200 OK', { ok: false, message: String((e && e.message) || e) });
+        }
+      };
+      socket.on('data', onData);
+    },
+  };
+
+  function setDeckLink(on) {
+    try {
+      localStorage.setItem(DECK_KEY, on ? '1' : '0');
+    } catch (e) {
+      // not remembered
+    }
+    if (!on) return deck.stop();
+    try {
+      deck.start();
+    } catch (e) {
+      Blockbench.showMessageBox({ title: 'Pose Studio', message: `The Stream Deck link couldn't start: ${e.message || e}` });
     }
   }
 
@@ -9228,6 +9412,14 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // <changelog>
   const CHANGELOG = [
     {
+      "version": "0.52.0",
+      "date": "2026-10-04",
+      "changes": [
+        "New: a Stream Deck plugin. Keys for Capture Screenshot, Capture Entities Only, cameras (next, previous or a numbered one: the key shows the camera's name and lights up while it's the active one), toggles (Sync Game Camera, Camera POV Viewport, Connect to Minecraft: lit while on), time and weather presets, and any other action of the Pose Studio menu. The keys work whichever window is in front, Minecraft included.",
+        "To set it up: More > Get the Stream Deck Plugin (double-click the download to add it to Stream Deck), then turn on More > Stream Deck Link. The link only listens on your own computer and refuses requests from web pages."
+      ]
+    },
+    {
       "version": "0.51.3",
       "date": "2026-10-03",
       "changes": [
@@ -10008,7 +10200,7 @@ ${PLUGIN_URL}`,
 
   // for the plugin's own tests only (they set this flag); nothing happens otherwise
   if (typeof globalThis !== 'undefined' && globalThis.__POSE_STUDIO_TEST) {
-    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks };
+    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun };
   }
 
   Plugin.register('pose_studio', {
@@ -10136,6 +10328,25 @@ ${PLUGIN_URL}`,
           name: 'Capture Entities Only', icon: 'person_outline', click: () => captureEntities(),
           description: 'Shoots the players and mobs on their own from the game camera, without the world (transparent, or on the sky), in the light of the scene.',
         }),
+        deck: (deckToggle = new Toggle('pose_studio_deck', {
+          name: 'Stream Deck Link', icon: 'grid_view', onChange: setDeckLink,
+          value: (() => {
+            try {
+              return localStorage.getItem(DECK_KEY) === '1';
+            } catch (e) {
+              return false;
+            }
+          })(),
+          description: 'Lets the Pose Studio Stream Deck plugin on this computer run Pose Studio (captures, cameras, toggles, time and weather).',
+        })),
+        deckplugin: new Action('pose_studio_deck_plugin', {
+          name: 'Get the Stream Deck Plugin', icon: 'download',
+          click: () => {
+            Blockbench.openLink('https://github.com/liambevin2000/pose-studio/raw/main/dist/PoseStudio.streamDeckPlugin');
+            Blockbench.showMessageBox({ title: 'Pose Studio for Stream Deck', message: 'Your browser is downloading PoseStudio.streamDeckPlugin. Double-click it to add it to Stream Deck, then turn on Pose Studio ▸ More ▸ Stream Deck Link here.' });
+          },
+          description: 'Downloads the Pose Studio plugin for Elgato Stream Deck: keys for captures, cameras, toggles, time and weather.',
+        }),
         comparegame: new Action('pose_studio_compare_game', {
           name: 'Compare with Game', icon: 'compare',
           click: () => captureEntities(true),
@@ -10243,7 +10454,7 @@ ${PLUGIN_URL}`,
         a.entityshot,
         a.entityshotoptions,
         '_',
-        { name: 'More', id: 'pose_studio_more', icon: 'more_horiz', children: [a.folders, a.installpacks, '_', a.comparegame, a.anchor, a.skin, a.reloadpacks, a.clear] },
+        { name: 'More', id: 'pose_studio_more', icon: 'more_horiz', children: [a.folders, a.installpacks, '_', a.deck, a.deckplugin, '_', a.comparegame, a.anchor, a.skin, a.reloadpacks, a.clear] },
       ], { name: 'Pose Studio' });
       MenuBar.addMenu(menu, 'tools');
       startupTimer = setTimeout(() => {
@@ -10251,6 +10462,7 @@ ${PLUGIN_URL}`,
         showWhatsNewOnce();
         checkForUpdates(false).catch(() => {});
         removeSunTiltLighting();
+        if (deckToggle && deckToggle.value) setDeckLink(true);
         try {
           if (typeof Project !== 'undefined' && Project) refreshOldEquipment();
         } catch (e) {
@@ -10263,6 +10475,7 @@ ${PLUGIN_URL}`,
       stopGroupSpin();
       if (Blockbench.removeListener) Blockbench.removeListener('select_project', onProjectSelected);
       if (Blockbench.removeListener) Blockbench.removeListener('load_project', refreshOnLoad);
+      deck.stop();
       if (startupTimer) clearTimeout(startupTimer);
       startupTimer = null;
       if (tickTimer) clearInterval(tickTimer);

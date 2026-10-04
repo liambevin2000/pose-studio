@@ -113,3 +113,24 @@ Cameras, their FOVs and the scan are saved with your Blockbench project. Turning
 ## Editing the packs
 
 After editing files in `packs/`, bump the `version` in both manifests and run `node build-mcaddon.js` before re-importing, or copy the folders into `development_behavior_packs` and `development_resource_packs` so changes load without version bumps.
+
+## Stream Deck
+
+Pose Studio has a plugin for Elgato Stream Deck (Stream Deck 6.5 or newer, Windows).
+
+1. In Blockbench: **Pose Studio ▸ More ▸ Get the Stream Deck Plugin**, then double-click the downloaded `PoseStudio.streamDeckPlugin`.
+2. In Blockbench: turn on **Pose Studio ▸ More ▸ Stream Deck Link** (it stays on).
+3. In Stream Deck, drag keys from the **Pose Studio** category:
+
+| Key | What it does |
+| --- | --- |
+| **Capture Screenshot** | Same as the menu's. |
+| **Capture Entities Only** | Same as the menu's (what it saves is in Entity Shot Options). |
+| **Camera** | Next, previous, or a numbered camera. A numbered key shows that camera's name and lights up while it's the active one. |
+| **Toggle** | Sync Game Camera, Camera POV Viewport, or Connect to Minecraft. Lit while on. |
+| **Time & Weather** | A time of day (sunrise, noon, sunset, night… or ticks) and/or a weather. |
+| **Run Action** | Anything else from the Pose Studio menu (Drop to Ground, Compare with Game, Add Camera…). |
+
+The link only listens on this computer (127.0.0.1:19132) and refuses requests from web pages. A key shows a warning triangle when Pose Studio isn't answering (Blockbench closed, or the link off).
+
+The plugin's source is in `streamdeck/`; `node build-streamdeck.js` packs it into `dist/`.

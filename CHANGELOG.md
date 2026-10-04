@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.52.0 (2026-10-04)
+
+- New: a Stream Deck plugin. Keys for Capture Screenshot, Capture Entities Only, cameras (next, previous or a numbered one: the key shows the camera's name and lights up while it's the active one), toggles (Sync Game Camera, Camera POV Viewport, Connect to Minecraft: lit while on), time and weather presets, and any other action of the Pose Studio menu. The keys work whichever window is in front, Minecraft included.
+- To set it up: More > Get the Stream Deck Plugin (double-click the download to add it to Stream Deck), then turn on More > Stream Deck Link. The link only listens on your own computer and refuses requests from web pages.
+
 ## 0.51.3 (2026-10-03)
 
 - Fixed: for people working on a pack, Blockbench could read an old copy of it. When a pack is both inside the world folder and in Minecraft's development packs folder, Minecraft runs the development one, but Pose Studio read the copy inside the world. So it could offer items, armour and mobs under names the running game no longer has ("this world has no item called spark_dc:mid_light_armor_helmet"). Pose Studio now reads the development copy when there is one, as Minecraft does.
