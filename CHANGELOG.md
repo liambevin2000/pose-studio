@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.66.0 (2026-10-05)
+
+- New (experimental): players and mobs have an Animation track on the timeline. Keyframe which animation plays when.
+- Play Animation in Minecraft now plays players and mobs too.
+- The animation actions are in a new Animate menu.
+- Update the Minecraft packs.
+
 ## 0.65.1 (2026-10-05)
 
 - Shorter, simpler changelog.

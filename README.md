@@ -116,19 +116,26 @@ Cameras, their FOVs and the scan are saved with your Blockbench project. Turning
 
 After editing files in `packs/`, bump the `version` in both manifests and run `node build-mcaddon.js` before re-importing, or copy the folders into `development_behavior_packs` and `development_resource_packs` so changes load without version bumps.
 
-## Camera animation (experimental)
+## Animation (experimental)
 
-Animate a camera on Blockbench's timeline and have the game fly it, for recording. Turn it on in **File ▸ Preferences ▸ Settings ▸ Pose Studio: Camera Animation (experimental)**.
+Animate the camera, players and mobs on Blockbench's timeline and have the game play it, for recording. Turn it on in **File ▸ Preferences ▸ Settings ▸ Pose Studio: Animation (experimental)**. Everything is in the **Animate** menu.
 
-With a camera active, **Camera ▸ Animate Camera (Timeline)** opens Blockbench's Animate tab with that camera selected in a `camera_shot` animation.
+**The camera.** With a camera active, **Animate Camera (Timeline)** opens Blockbench's Animate tab with that camera selected in a `camera_shot` animation.
 
 - Move the playhead, move or turn the camera, and add a Position or Rotation keyframe. Set the animation's length in its properties.
 - For ramps, set keyframes to Bezier (or Smooth) and shape the curves in the timeline's graph editor.
 - Scale the camera to zoom: scale 2 is twice the zoom.
-- The camera view at the bottom follows the playhead; with Sync Game Camera on, so does Minecraft.
-- **Play Animation in Minecraft** samples the animation every game tick and the game flies it. **Stop Animation in Minecraft** ends it.
 
-Minecraft's camera can't roll, so the game shows direction but no tilt.
+**Players and mobs.** Each has an **Animation** track on the timeline.
+
+- Select a player or mob, put the playhead where an animation should start, and choose **Add Animation Keyframe…**. Pick the animation (the same list as Animation…), its speed, whether it loops, and how long it blends in from what was playing before.
+- The keyframe is a normal timeline keyframe: drag it to change when the animation starts, copy it, delete it. Run Add Animation Keyframe… with it selected (or the playhead on it) to change it. "None" goes back to the pose from the Edit tab.
+- Move and turn the player or mob itself with Blockbench's own Position and Rotation keyframes on it. Rotation keyframes on single bones add to the animation.
+- The pose you made in the Edit tab is not changed by any of this.
+
+**Watching it.** The camera view follows the playhead, and with Minecraft connected so do the game's players and mobs (and the camera, with Sync Game Camera on). **Play Animation in Minecraft** sends the whole animation first and the game plays it a frame every tick; **Stop Animation in Minecraft** ends it.
+
+Limits: Minecraft's camera can't roll. Bones in the game update 20 times a second. Items held by mobs follow the playhead but not Play Animation in Minecraft. Position keyframes on single bones are not sent to the game.
 
 ## Moving structures
 

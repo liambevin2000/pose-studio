@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.65.1'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.66.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -1519,12 +1519,12 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
   function poseMessage(root) {
     ensureRig(root);
     const bones = Object.fromEntries(mannequinBones(root));
-    const turns = toBedrockRot(root.rotation);
+    const turns = toBedrockRot(liveRotation(root));
     const moves = [];
     for (const key of SENT_TURNS) {
       const g = bones[key.toLowerCase()];
-      turns.push(...(g ? toBedrockRot(g.rotation) : [0, 0, 0]));
-      const o = g ? boneOffset(root, key) : [0, 0, 0];
+      turns.push(...(g ? toBedrockRot(liveRotation(g)) : [0, 0, 0]));
+      const o = g ? liveOffset(root, key, () => boneOffset(root, key)) : [0, 0, 0];
       moves.push(round(-o[0], 3), round(o[1], 3), round(o[2], 3));
     }
     // two characters per value keeps the command short: 12-bit turns (360/4096 steps) then moves
@@ -1532,7 +1532,7 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
     const vars = ownerVariables(root);
     const extra = OWNER_VARIABLES.map((name) => encodeAngle12(Math.max(-180, Math.min(180, Number(vars[name]) || 0))));
     const code = turns.map(encodeAngle12).concat(moves.map(encodeOffset12)).map(code12).join('') + extra.map(code12).join('');
-    return JSON.stringify({ id: mannequinId(root.name), p: toWorld(root.origin), q: code, s: root.pose_skin_slot || 0, sl: root.pose_slim ? 1 : 0 });
+    return JSON.stringify({ id: mannequinId(root.name), p: toWorld(liveOrigin(root)), q: code, s: root.pose_skin_slot || 0, sl: root.pose_slim ? 1 : 0 });
   }
 
   // The game camera follows the selected cam_ group, or the Blockbench viewport if none is selected.
@@ -1560,6 +1560,7 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
   }
 
   function tick() {
+    if (!animating() && clipStates.size) clipStates.clear(); // poses can change in the Edit tab
     if (!link.connected || typeof Project === 'undefined' || !Project) return;
 
     // Switching tabs shouldn't delete the other project's mannequins from the world.
@@ -1578,6 +1579,7 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
       if (l && connectedWorld && l.id === connectedWorld.id) holdUpdates(10000);
     }
     if (Date.now() < holdUntil) return;
+    if (pathPlaying) return; // the game is playing the animation it was sent
 
     const seen = new Set();
     for (const root of mannequinRoots()) {
@@ -3084,7 +3086,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
   const blockbenchAnimation = () => (typeof BBAnimation !== 'undefined' ? BBAnimation : typeof Animation !== 'undefined' && Animation.all ? Animation : null);
 
   // ---- animating a camera like any animation software ----
-  // Camera ▸ Animate Camera: the Animate tab opens with the active camera selected, in an
+  // Animate ▸ Animate Camera: the Animate tab opens with the active camera selected, in an
   // animation of its own. Keyframe its position and rotation on the timeline (and its scale, to
   // zoom), set the keyframes' interpolation to bezier and shape the curves in Blockbench's graph
   // editor. The camera view and the game follow the playhead. Play Animation in Minecraft samples
@@ -3106,14 +3108,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
       povToggle.set(true);
       await sleep(400);
     }
-    // an animation of ours unless you're already working in one
-    let anim = Anim.selected || (Anim.all || []).find((a) => a.name === CAMERA_ANIMATION);
-    if (!anim) {
-      anim = new Anim({ name: CAMERA_ANIMATION, loop: 'once', length: 5, snapping: 20 });
-      anim.add(false);
-    }
-    Modes.options.animate.select();
-    if (anim.select) anim.select();
+    const anim = shotAnimation(Anim); // ours unless you're already working in one
     try {
       if (typeof unselectAllElements === 'function') unselectAllElements();
       if (cam.select) cam.select(); // its channels show in the timeline
@@ -3128,71 +3123,432 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
         "• For smooth ramps, select keyframes and set their interpolation to Bezier (or Smooth), then shape the curves in the timeline's graph editor.\n" +
         '• Scale the camera to zoom: scale 2 is twice the zoom.\n' +
         '• The camera view at the bottom, and Minecraft with Sync Game Camera on, follow the playhead.\n\n' +
-        'When it looks right: Camera ▸ Play Animation in Minecraft.',
+        'When it looks right: Animate ▸ Play Animation in Minecraft.',
     });
   }
 
-  // The camera's animation, sampled every game tick: [{ p, dir, f }] in the game's terms.
-  function sampleCameraAnimation(cam, anim) {
+  // ---- animating players and mobs on the timeline ----
+  // Every player and mob has an "Animation" track on Blockbench's timeline. A keyframe on it says
+  // "from here, play this animation" (one of the animations Animation… lists), at a speed, looping
+  // or not, blended in over a moment from what was playing before. The track poses the model's
+  // bones as the playhead moves, on top of the pose it has in the Edit tab; rotation keyframes of
+  // your own on single bones add to that, and the player or mob itself is moved and turned with
+  // Blockbench's own Position and Rotation keyframes. Nothing of the scene's pose is changed: this
+  // is what the timeline shows, and what Minecraft is sent while the Animate tab is open.
+  const onDefaultPose = () => clipOffsets.clear(); // Blockbench starts drawing a frame
+  const CLIP_CHANNEL = 'pose_anim';
+  let clipProperties = [];
+  let clipChannelOn = false;
+  let clipContentAsked = false;
+  const clipStates = new Map(); // root uuid -> { content, sig, state }
+  const clipOffsets = new Map(); // "<root uuid>|<bone>" -> where the timeline has that bone moved to
+  const animating = () => typeof Modes !== 'undefined' && !!Modes.animate;
+  const isClipRoot = (g) => g instanceof Group && g.parent === 'root' && (MANNEQUIN_PREFIX.test(g.name) || (ENTITY_PREFIX.test(g.name) && !!g.pose_entity));
+  const AXES = ['x', 'y', 'z'];
+
+  // A group's rotation, origin and bone offset as the timeline has them (the Animate tab), else as posed.
+  function liveRotation(group) {
+    const m = animating() && group.mesh;
+    if (!m || !m.fix_rotation || !m.rotation) return group.rotation;
+    return AXES.map((a) => round(m.rotation[a] / DEG, 3));
+  }
+  function liveOrigin(group) {
+    const m = animating() && group.mesh;
+    if (!m || !m.fix_position || !m.position) return group.origin;
+    return group.origin.map((v, i) => round(v + m.position[AXES[i]] - m.fix_position[AXES[i]], 4));
+  }
+  function liveOffset(root, key, posed) {
+    return (animating() && clipOffsets.get(`${root.uuid}|${String(key).toLowerCase()}`)) || posed();
+  }
+
+  function eachAnimator(cb) {
+    const seen = new Set();
+    const lists = [];
+    if (typeof ModelProject !== 'undefined' && ModelProject.all) for (const p of ModelProject.all) lists.push(p.animations || []);
+    const Anim = blockbenchAnimation();
+    if (Anim && Anim.all) lists.push(Anim.all);
+    for (const list of lists) {
+      for (const anim of list) {
+        for (const animator of Object.values((anim && anim.animators) || {})) {
+          if (animator && !seen.has(animator)) {
+            seen.add(animator);
+            cb(animator);
+          }
+        }
+      }
+    }
+  }
+
+  function setupClipChannel() {
+    if (clipChannelOn || typeof BoneAnimator === 'undefined' || typeof BoneAnimator.addChannel !== 'function') return clipChannelOn;
+    try {
+      if (typeof KeyframeDataPoint !== 'undefined') {
+        const here = (point) => !!point && !!point.keyframe && point.keyframe.channel === CLIP_CHANNEL;
+        clipProperties = [
+          new Property(KeyframeDataPoint, 'string', 'pose_anim', { label: 'Animation', condition: here }),
+          new Property(KeyframeDataPoint, 'number', 'pose_speed', { default: 1, exposed: false, condition: here }),
+          new Property(KeyframeDataPoint, 'boolean', 'pose_loop', { default: true, exposed: false, condition: here }),
+          new Property(KeyframeDataPoint, 'number', 'pose_blend', { default: 0.2, exposed: false, condition: here }),
+        ];
+      }
+    } catch (e) {
+      console.warn('[Pose Studio] animation keyframe properties', e);
+    }
+    try {
+      BoneAnimator.addChannel(CLIP_CHANNEL, {
+        name: 'Animation', mutable: true, transform: false, max_data_points: 1,
+        condition: (animator) => {
+          const g = animator && animator.getGroup ? animator.getGroup() : null;
+          return !!g && isClipRoot(g);
+        },
+        displayFrame: (animator) => {
+          try {
+            displayClips(animator);
+          } catch (e) {
+            console.warn('[Pose Studio] animation track', e);
+          }
+        },
+      });
+    } catch (e) {
+      // Blockbench's own bookkeeping after adding it can fail; the channel is checked below
+    }
+    if (!BoneAnimator.prototype.channels || !BoneAnimator.prototype.channels[CLIP_CHANNEL]) return false;
+    // animations opened before the track existed
+    eachAnimator((animator) => {
+      if (!(animator instanceof BoneAnimator)) return;
+      const set = (object, key, value) => (typeof Vue !== 'undefined' && Vue.set ? Vue.set(object, key, value) : (object[key] = value));
+      if (!animator[CLIP_CHANNEL]) set(animator, CLIP_CHANNEL, []);
+      if (animator.muted && animator.muted[CLIP_CHANNEL] === undefined) set(animator.muted, CLIP_CHANNEL, false);
+    });
+    clipChannelOn = true;
+    return true;
+  }
+
+  function removeClipChannel() {
+    for (const p of clipProperties) if (p && p.delete) p.delete();
+    clipProperties = [];
+    if (clipChannelOn && typeof BoneAnimator !== 'undefined' && BoneAnimator.prototype.channels) delete BoneAnimator.prototype.channels[CLIP_CHANNEL];
+    clipChannelOn = false;
+    clipStates.clear();
+    clipOffsets.clear();
+  }
+
+  // The keyframes of a player's or mob's Animation track, in order.
+  function clipKeys(animator) {
+    return (animator[CLIP_CHANNEL] || []).map((kf) => {
+      const d = (kf.data_points && kf.data_points[0]) || {};
+      return { time: Number(kf.time) || 0, id: String(d.pose_anim || ''), speed: Number(d.pose_speed) > 0 ? Number(d.pose_speed) : 1, loop: d.pose_loop !== false, blend: Math.max(0, Number(d.pose_blend) || 0) };
+    }).sort((a, b) => a.time - b.time);
+  }
+
+  // What the animations are added to: the model's pose in the Edit tab without the frames picked
+  // in Animation… (a weapon's holding pose stays).
+  function clipState(root, content) {
+    const sig = JSON.stringify(root.pose_animation || null);
+    const had = clipStates.get(root.uuid);
+    if (had && had.content === content && had.sig === sig) return had.state;
+    const s = poseState(root, content);
+    const state = { target: s.target, byId: s.byId, base: s.base, current: s.current, held: s.savedLayers.filter((l) => l.hold).map((l) => ({ anim: s.byId.get(l.id), frame: l.frame })) };
+    clipStates.set(root.uuid, { content, sig, state });
+    return state;
+  }
+
+  // The pose the Animation track gives at `time`: null before its first keyframe.
+  function clipPose(state, content, keys, time) {
+    let n = -1;
+    for (let i = 0; i < keys.length; i++) if (keys[i].time <= time + 1e-6) n = i;
+    if (n < 0) return null;
+    const poseOf = (key) => {
+      const anim = key.id ? state.byId.get(key.id) : null;
+      if (!anim) return state.current; // "None": as posed
+      let t = Math.max(0, (time - key.time) * key.speed);
+      // walk cycles and the like run on for as long as they play; keyframed ones repeat or hold
+      if (anim.keyframed) t = key.loop ? t % anim.length : Math.min(t, anim.length);
+      else if (!key.loop) t = Math.min(t, anim.length);
+      return composePose(state.target, content, state.base, state.held.concat([{ anim, frame: t * ANIM_FPS }]));
+    };
+    const key = keys[n];
+    const pose = poseOf(key);
+    const f = key.blend > 0 ? (time - key.time) / key.blend : 1;
+    if (f >= 1) return pose;
+    const from = n > 0 ? poseOf(keys[n - 1]) : state.current;
+    const s = f * f * (3 - 2 * f);
+    const out = new Map();
+    for (const [k, r] of pose) {
+      const a = from.get(k) || state.current.get(k) || r;
+      out.set(k, r.map((v, i) => (k.endsWith('@p') ? a[i] + (v - a[i]) * s : a[i] + wrap(v - a[i]) * s)));
+    }
+    return out;
+  }
+
+  // Blockbench showing a frame: the Animation track of this player or mob poses its bones.
+  function displayClips(animator) {
+    const root = animator.getGroup ? animator.getGroup() : animator.group;
+    if (!root || !isClipRoot(root) || (animator.muted && animator.muted[CLIP_CHANNEL])) return;
+    const keys = clipKeys(animator);
+    if (!keys.length) return;
+    const content = contentCache && contentCache.content;
+    if (!content) {
+      // the world's animations aren't read yet (a scene just opened): read them, then show the frame
+      if (!clipContentAsked) {
+        clipContentAsked = true;
+        previewContent().then(() => typeof Animator !== 'undefined' && animating() && Animator.preview()).catch(() => {});
+      }
+      return;
+    }
+    const state = clipState(root, content);
+    const pose = clipPose(state, content, keys, typeof Timeline !== 'undefined' ? Number(Timeline.time) || 0 : 0);
+    if (!pose) return;
+    for (const [key, group] of state.target.groups) {
+      const r = pose.get(key);
+      const now = state.current.get(key);
+      const m = group.mesh;
+      if (!r || !now || !m || !m.rotation) continue;
+      AXES.forEach((a, i) => (m.rotation[a] += (r[i] - now[i]) * DEG));
+    }
+    for (const key of state.target.movable ? state.target.movable.keys() : []) {
+      const want = pose.get(`${key}@p`);
+      const now = state.current.get(`${key}@p`);
+      if (!want || !now) continue;
+      clipOffsets.set(`${root.uuid}|${key}`, want.slice());
+      const group = state.target.groups.get(key);
+      const m = group && group.mesh;
+      if (m && m.position) AXES.forEach((a, i) => (m.position[a] += want[i] - now[i]));
+    }
+  }
+
+  // The animation everything is keyframed in: yours if one is open, else camera_shot. Opens the Animate tab.
+  function shotAnimation(Anim) {
+    let anim = Anim.selected || (Anim.all || []).find((a) => a.name === CAMERA_ANIMATION);
+    if (!anim) {
+      anim = new Anim({ name: CAMERA_ANIMATION, loop: 'once', length: 5, snapping: 20 });
+      anim.add(false);
+    }
+    Modes.options.animate.select();
+    if (anim.select) anim.select();
+    return anim;
+  }
+
+  // Animate ▸ Add Animation Keyframe…: for the selected player or mob, at the playhead. With one of
+  // its Animation keyframes selected (or one already at the playhead), that keyframe is edited.
+  async function addAnimationKey() {
+    const root = selectedPoseRoot();
+    const Anim = blockbenchAnimation();
+    if (!root) {
+      Blockbench.showQuickMessage('Select a player (Player_) or mob (ent_) first', 2500);
+      return null;
+    }
+    if (!Anim || typeof Modes === 'undefined' || !Modes.options || !Modes.options.animate || !setupClipChannel()) {
+      Blockbench.showMessageBox({ title: 'Pose Studio: animation keyframe', message: "This Blockbench doesn't offer the Animate tab for this project, or can't add an Animation track to it." });
+      return null;
+    }
+    let content;
+    try {
+      content = await previewContent();
+    } catch (e) {
+      showError('Pose Studio: animations', e);
+      return null;
+    }
+    ensureRig(root);
+    const { animations } = poseState(root, content);
+    const anim = shotAnimation(Anim);
+    try {
+      if (root.select) root.select();
+    } catch (e) {
+      // select it in the outliner
+    }
+    const animator = anim.getBoneAnimator(root);
+    if (!animator) return null;
+    if (!animator[CLIP_CHANNEL]) animator[CLIP_CHANNEL] = [];
+    const playhead = typeof Timeline !== 'undefined' ? Number(Timeline.time) || 0 : 0;
+    const picked = typeof Timeline !== 'undefined' && Array.isArray(Timeline.selected) ? Timeline.selected.find((kf) => kf.channel === CLIP_CHANNEL && kf.animator === animator) : null;
+    const existing = picked || animator[CLIP_CHANNEL].find((kf) => Math.abs(kf.time - playhead) < 0.026) || null;
+    const time = existing ? existing.time : playhead;
+    const had = (existing && existing.data_points && existing.data_points[0]) || {};
+    const apply = (values) => {
+      const data = { pose_anim: String(values.pick || ''), pose_speed: Math.max(0.05, Number(values.speed) || 1), pose_loop: !!values.loop, pose_blend: Math.max(0, Number(values.blend) || 0) };
+      let kf = existing;
+      try {
+        Undo.initEdit({ keyframes: kf ? [kf] : [] });
+      } catch (e) {
+        // not undoable in this Blockbench
+      }
+      if (!kf) kf = animator.createKeyframe(data, time, CLIP_CHANNEL, false, false);
+      if (kf) {
+        if (!kf.data_points || !kf.data_points[0]) kf.data_points = [{}];
+        Object.assign(kf.data_points[0], data);
+      }
+      try {
+        Undo.finishEdit('Animation keyframe', { keyframes: kf ? [kf] : [] });
+      } catch (e) {
+        // as above
+      }
+      // room for the animation to play out
+      const clip = animations.find((a) => a.id === data.pose_anim);
+      const until = time + (clip && !data.pose_loop ? clip.length / data.pose_speed : 0);
+      if (Number(anim.length) < until && anim.setLength) anim.setLength(Math.ceil(until * 20) / 20);
+      clipStates.delete(root.uuid);
+      if (typeof Animator !== 'undefined' && Animator.preview) Animator.preview();
+      return kf;
+    };
+    let vm = null;
+    new Dialog({
+      id: 'pose_studio_anim_key',
+      title: `${existing ? 'Animation keyframe' : 'Add animation keyframe'}: ${root.name} at ${time.toFixed(2)} s`,
+      width: 480,
+      buttons: [existing ? 'Save' : 'Add', 'Cancel'],
+      cancelIndex: 1,
+      component: {
+        data: () => ({
+          search: '',
+          pick: String(had.pose_anim || ''),
+          speed: Number(had.pose_speed) > 0 ? Number(had.pose_speed) : 1,
+          loop: had.pose_loop !== false,
+          blend: had.pose_blend === undefined ? 0.2 : Number(had.pose_blend) || 0,
+          animations: [{ id: '', name: 'None (as posed)', length: 0 }].concat(animations.map((a) => ({ id: a.id, name: a.name, length: a.keyframed ? a.length : 0 }))),
+        }),
+        computed: {
+          shown() {
+            const q = this.search.trim().toLowerCase();
+            return q ? this.animations.filter((a) => a.name.toLowerCase().includes(q) || a.id.toLowerCase().includes(q)) : this.animations;
+          },
+        },
+        mounted() {
+          vm = this;
+        },
+        template: `
+          <div>
+            <input type="text" class="dark_bordered" v-model="search" placeholder="Search animations" style="width: 100%; margin-bottom: 6px;">
+            <div style="max-height: 300px; overflow-y: auto; border: 1px solid var(--color-border);">
+              <div v-for="a in shown" :key="a.id" @click="pick = a.id" :style="{ padding: '3px 8px', cursor: 'pointer', background: pick === a.id ? 'var(--color-accent)' : '', color: pick === a.id ? 'var(--color-accent_text)' : '' }">
+                {{ a.name }} <span style="opacity: 0.6;" v-if="a.length">{{ a.length.toFixed(2) }} s</span>
+              </div>
+            </div>
+            <div style="display: flex; gap: 14px; align-items: center; margin-top: 10px;">
+              <label>Speed <input type="number" class="dark_bordered" v-model.number="speed" min="0.05" step="0.05" style="width: 70px;"></label>
+              <label title="Seconds to ease in from what was playing before">Blend in (s) <input type="number" class="dark_bordered" v-model.number="blend" min="0" step="0.05" style="width: 70px;"></label>
+              <label><input type="checkbox" v-model="loop"> Loop</label>
+            </div>
+          </div>`,
+      },
+      onConfirm() {
+        if (vm) apply(vm);
+      },
+    }).show();
+    return { apply, existing, time }; // (used by tests)
+  }
+
+  // Whether an animation has keyframes of Blockbench's own on a group.
+  const hasOwnKeys = (anim, group) => {
+    const animator = anim && anim.animators && anim.animators[group.uuid];
+    return !!animator && ['position', 'rotation', 'scale'].some((c) => animator[c] && animator[c].length);
+  };
+
+  // The animation as the game plays it, a frame every game tick: the camera ([{ p, dir, f }], or
+  // null without one) and, for every player and mob that moves in it, the updates to send:
+  // id -> { k: 's' (player) | 'e' (mob), frames: [[tick, message]] }, only the ticks where it changes.
+  function sampleAnimation(anim, cam) {
     const step = 0.05;
     const length = Math.max(step, Number(anim.length) || 0);
     const count = Math.round(length / step) + 1;
-    const baseFov = cam.pose_fov || mainViewportFov();
+    const baseFov = cam ? cam.pose_fov || mainViewportFov() : 0;
     const was = Timeline.time;
-    const samples = [];
+    const camera = cam ? [] : null;
+    const tracks = new Map();
+    const roots = mannequinRoots().map((r) => ['s', r]).concat(entityRoots().map((r) => ['e', r]));
     try {
       for (let i = 0; i < count; i++) {
         Timeline.setTime(Math.min(i * step, length), true);
         Animator.preview();
-        const pose = cameraPose(cam);
-        samples.push({ p: toWorld(pose.pos.toArray()), dir: [-pose.forward.x, pose.forward.y, -pose.forward.z].map((v) => round(v, 4)), f: zoomedFov(baseFov, pose.zoom) });
+        if (cam) {
+          const pose = cameraPose(cam);
+          camera.push({ p: toWorld(pose.pos.toArray()), dir: [-pose.forward.x, pose.forward.y, -pose.forward.z].map((v) => round(v, 4)), f: zoomedFov(baseFov, pose.zoom) });
+        }
+        for (const [k, root] of roots) {
+          let msg = null;
+          try {
+            msg = k === 's' ? poseMessage(root) : entityMessage(root);
+          } catch (e) {
+            msg = null;
+          }
+          if (!msg) continue;
+          const id = mannequinId(root.name);
+          let track = tracks.get(id);
+          if (!track) tracks.set(id, (track = { k, frames: [], last: null }));
+          if (track.last !== msg) {
+            track.frames.push([i, msg]);
+            track.last = msg;
+          }
+        }
       }
     } finally {
       Timeline.setTime(was, true);
       Animator.preview();
     }
-    return samples;
+    for (const [id, track] of tracks) if (track.frames.length < 2) tracks.delete(id); // it doesn't move
+    return { count, camera, tracks };
   }
+  const sampleCameraAnimation = (cam, anim) => sampleAnimation(anim, cam).camera;
 
+  // Animate ▸ Play Animation in Minecraft: the camera and every animated player and mob, sent
+  // whole first, then played by the game a frame every tick.
   async function playCameraAnimation() {
     if (!requireConnection()) return false;
-    const cam = activeCamera();
     const Anim = blockbenchAnimation();
     const anim = Anim && (Anim.selected || (Anim.all || []).find((a) => a.name === CAMERA_ANIMATION));
-    if (!cam || !anim || typeof Timeline === 'undefined' || typeof Animator === 'undefined') {
-      Blockbench.showQuickMessage(!cam ? 'There is no active camera' : 'Animate the camera first (Camera ▸ Animate Camera)', 3000);
+    if (!anim || typeof Timeline === 'undefined' || typeof Animator === 'undefined') {
+      Blockbench.showQuickMessage('Nothing is animated yet: Animate ▸ Animate Camera, or Add Animation Keyframe on a player or mob', 3500);
       return false;
     }
     if (typeof Modes !== 'undefined' && !Modes.animate) {
-      Blockbench.showQuickMessage('Open the Animate tab to play the animation (Camera ▸ Animate Camera)', 3500);
+      Blockbench.showQuickMessage('Open the Animate tab to play the animation', 3500);
       return false;
     }
-    const samples = sampleCameraAnimation(cam, anim);
-    if (samples.length < 2) return false;
+    // the game camera flies the active camera when it's synced or animated; else your own view stays
+    const active = activeCamera();
+    const cam = active && (cameraSync || hasOwnKeys(anim, active)) ? active : null;
+    const { count, camera, tracks } = sampleAnimation(anim, cam);
+    if (count < 2 || (!camera && !tracks.size)) {
+      Blockbench.showQuickMessage('Nothing moves in this animation yet', 3000);
+      return false;
+    }
+    const lines = [];
+    let skipped = 0;
+    const PER = 4; // camera samples a message (a message stays well under Minecraft's command length)
+    for (let i = 0; camera && i < camera.length; i += PER) {
+      const flat = [];
+      for (const s of camera.slice(i, i + PER)) flat.push(...s.p, ...s.dir, s.f);
+      lines.push(`scriptevent pose:pathsamples ${JSON.stringify({ i, s: flat })}`);
+    }
+    for (const track of tracks.values()) {
+      for (const [i, msg] of track.frames) {
+        const line = `scriptevent pose:track {"k":"${track.k}","i":${i},"d":${msg}}`;
+        if (line.length > MAX_COMMAND) skipped++;
+        else lines.push(line);
+      }
+    }
     endPathPlay();
     pathPlaying = true;
-    Blockbench.showQuickMessage(`Sending ${samples.length} frames to Minecraft…`, 2000);
+    Blockbench.showQuickMessage(`Sending the animation to Minecraft (${lines.length} updates)…`, 2500);
     try {
-      await link.command(`scriptevent pose:path ${JSON.stringify({ n: samples.length, step: 0.05, ramp: [0, 0, 1, 1], loop: anim.loop === 'loop' ? 1 : 0, hud: 1 })}`);
-      const PER = 4; // samples a message (a message stays well under Minecraft's command length)
-      for (let i = 0; i < samples.length; i += PER) {
-        const flat = [];
-        for (const s of samples.slice(i, i + PER)) flat.push(...s.p, ...s.dir, s.f);
-        await link.command(`scriptevent pose:pathsamples ${JSON.stringify({ i, s: flat })}`);
-      }
+      await link.command(`scriptevent pose:path ${JSON.stringify({ n: count, step: 0.05, ramp: [0, 0, 1, 1], loop: anim.loop === 'loop' ? 1 : 0, hud: 1, cam: camera ? 1 : 0 })}`);
+      const TOGETHER = 6;
+      for (let i = 0; i < lines.length; i += TOGETHER) await Promise.all(lines.slice(i, i + TOGETHER).map((line) => link.command(line)));
       await link.command('scriptevent pose:pathplay {"t":0}');
     } catch (e) {
       endPathPlay();
-      Blockbench.showMessageBox({ title: 'Pose Studio: camera animation', message: `Minecraft didn't take the animation: ${e.message || e}\n\nUpdate the Minecraft packs (Check for Updates, then reopen the world).` });
+      Blockbench.showMessageBox({ title: 'Pose Studio: animation', message: `Minecraft didn't take the animation: ${e.message || e}\n\nUpdate the Minecraft packs (Check for Updates, then reopen the world).` });
       return false;
     }
-    if (anim.loop !== 'loop') pathPlayTimer = setTimeout(endPathPlay, ((samples.length - 1) * 0.05 + 1.5) * 1000);
+    if (skipped) Blockbench.showQuickMessage(`${skipped} update${skipped === 1 ? ' was' : 's were'} too long to send and left out`, 3000);
+    if (anim.loop !== 'loop') pathPlayTimer = setTimeout(endPathPlay, ((count - 1) * 0.05 + 1.5) * 1000);
     return true;
   }
 
   function endPathPlay() {
     if (pathPlayTimer) clearTimeout(pathPlayTimer);
     pathPlayTimer = null;
+    if (pathPlaying) lastSent.clear(); // the players and mobs go back to where Blockbench has them
     pathPlaying = false;
     lastCamera = null; // the game camera goes back to following the active camera
   }
@@ -3316,7 +3672,8 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
           a.link,
           '_',
           locations,
-          { name: 'Camera Settings', id: 'pose_studio_camera_menu', icon: 'photo_camera_front', children: [aspect, a.timeweather, a.follow, ...(cameraPathsOn() ? ['_', a.camanimate, a.camanimplay, a.camanimstop] : [])] },
+          { name: 'Camera Settings', id: 'pose_studio_camera_menu', icon: 'photo_camera_front', children: [aspect, a.timeweather, a.follow] },
+          ...(cameraPathsOn() ? [{ name: 'Animate (experimental)', id: 'pose_studio_animate_menu', icon: 'movie_filter', children: [a.camanimate, a.animkey, '_', a.camanimplay, a.camanimstop] }] : []),
           { name: 'Stream Deck', id: 'pose_studio_deck_menu', icon: 'grid_view', children: [a.deck, a.deckplugin] },
           '_',
           a.comparegame,
@@ -3346,7 +3703,8 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
           },
           { name: 'Add Camera', id: 'pose_studio_add_camera', icon: 'videocam', children: [a.grabcam, a.savecam] },
           { name: 'Lights', id: 'pose_studio_light_menu', icon: 'lightbulb', children: [a.addlight, a.lightlevel] },
-          { name: 'Camera', id: 'pose_studio_camera_menu', icon: 'photo_camera_front', children: [a.pov, a.camera, '_', a.fov, aspect, a.timeweather, '_', a.lookcam, a.follow, ...(cameraPathsOn() ? ['_', a.camanimate, a.camanimplay, a.camanimstop] : [])] },
+          { name: 'Camera', id: 'pose_studio_camera_menu', icon: 'photo_camera_front', children: [a.pov, a.camera, '_', a.fov, aspect, a.timeweather, '_', a.lookcam, a.follow] },
+          ...(cameraPathsOn() ? [{ name: 'Animate (experimental)', id: 'pose_studio_animate_menu', icon: 'movie_filter', children: [a.camanimate, a.animkey, '_', a.camanimplay, a.camanimstop] }] : []),
           '_',
           a.scan,
           a.scanmore,
@@ -3568,6 +3926,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
               <div class="ps-grid" v-if="s.kind === 'player'">
                 <div class="ps-btn ps-wide" @click="run('pose_studio_outfit')"><i class="material-icons">checkroom</i><span>Skin &amp; Equipment…</span></div>
                 <div class="ps-btn" @click="run('pose_studio_animation')"><i class="material-icons">animation</i><span>Animation…</span></div>
+                <div class="ps-btn" v-if="s.paths" @click="run('pose_studio_anim_key')" title="A keyframe on the timeline: from the playhead, play an animation"><i class="material-icons">movie_filter</i><span>Animation Key…</span></div>
                 <div class="ps-btn" @click="run('pose_studio_drop')"><i class="material-icons">vertical_align_bottom</i><span>Drop to Ground</span></div>
                 <div class="ps-btn" @click="run('pose_studio_ride')"><i class="material-icons">airline_seat_recline_normal</i><span>Ride</span></div>
               </div>
@@ -3575,6 +3934,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
                 <div class="ps-btn" @click="run('pose_studio_variant')"><i class="material-icons">palette</i><span>Variant…</span></div>
                 <div class="ps-btn" @click="run('pose_studio_equipment')"><i class="material-icons">shield</i><span>Equipment…</span></div>
                 <div class="ps-btn" @click="run('pose_studio_animation')"><i class="material-icons">animation</i><span>Animation…</span></div>
+                <div class="ps-btn" v-if="s.paths" @click="run('pose_studio_anim_key')" title="A keyframe on the timeline: from the playhead, play an animation"><i class="material-icons">movie_filter</i><span>Animation Key…</span></div>
                 <div class="ps-btn" @click="run('pose_studio_drop')"><i class="material-icons">vertical_align_bottom</i><span>Drop to Ground</span></div>
               </div>
               <div class="ps-grid" v-if="s.kind === 'camera'">
@@ -8098,23 +8458,23 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
       }
       return null;
     }
-    const angles = toBedrockRot(root.rotation);
+    const angles = toBedrockRot(liveRotation(root));
     for (const bone of model.bones) {
       const group = findBoneGroup(root, bone);
-      const now = group ? toBedrockRot(group.rotation) : [0, 0, 0];
+      const now = group ? toBedrockRot(liveRotation(group)) : [0, 0, 0];
       const rest = toBedrockRot((info.rest && info.rest[bone]) || [0, 0, 0]);
       angles.push(wrap(now[0] - rest[0]), wrap(now[1] - rest[1]), wrap(now[2] - rest[2]));
     }
     // the moves of the bones that can move (Bedrock: X the other way)
     const moves = [];
     for (const bone of movingBones(model.bones)) {
-      const o = entityOffset(root, bone);
+      const o = liveOffset(root, bone, () => entityOffset(root, bone));
       moves.push(round(-o[0], 3), round(o[1], 3), round(o[2], 3));
     }
     // only worn armour goes to the copy; held items are sent separately (see handMessage)
     const armour = {};
     for (const slot of ['head', 'chest', 'legs', 'feet']) if (knownEquipment(root)[slot]) armour[slot] = knownEquipment(root)[slot];
-    return JSON.stringify({ id: mannequinId(root.name), t: PROXY_TYPE, m: model.index, p: toWorld(root.origin), y: 0, q: packAngles(angles, moves).map((n) => n.toString(36)).join(','), e: armour });
+    return JSON.stringify({ id: mannequinId(root.name), t: PROXY_TYPE, m: model.index, p: toWorld(liveOrigin(root)), y: 0, q: packAngles(angles, moves).map((n) => n.toString(36)).join(','), e: armour });
   }
 
   // ---- Still items -----------------------------------------------------------------------------
@@ -9561,7 +9921,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     return { id: idItem.slice(2), name: scene.world || '', anchor: point('A|'), player: point('P|'), locations, removed: scene.removed || [], protocol: version ? Number(version.slice(2)) : 0 };
   }
 
-  const EXPECTED_PACK_PROTOCOL = 24; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
+  const EXPECTED_PACK_PROTOCOL = 25; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
   let warnedOldPack = false;
 
   // Scene files in the scenes folders that belong to a world (their pose_world says so), as
@@ -10376,6 +10736,16 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.66.0",
+      "date": "2026-10-05",
+      "changes": [
+        "New (experimental): players and mobs have an Animation track on the timeline. Keyframe which animation plays when.",
+        "Play Animation in Minecraft now plays players and mobs too.",
+        "The animation actions are in a new Animate menu.",
+        "Update the Minecraft packs."
+      ]
+    },
     {
       "version": "0.65.1",
       "date": "2026-10-05",
@@ -11237,7 +11607,7 @@ ${PLUGIN_URL}`,
 
   // for the plugin's own tests only (they set this flag); nothing happens otherwise
   if (typeof globalThis !== 'undefined' && globalThis.__POSE_STUDIO_TEST) {
-    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS, sceneSpot, addLight, lightRoots, stopPath, cameraPathsOn, cameraPose, sampleCameraAnimation, playCameraAnimation, animateCamera, zoomedFov };
+    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS, sceneSpot, addLight, lightRoots, stopPath, cameraPathsOn, cameraPose, sampleCameraAnimation, playCameraAnimation, animateCamera, zoomedFov, setupClipChannel, removeClipChannel, clipKeys, clipPose, clipState, displayClips, addAnimationKey, sampleAnimation, liveRotation, liveOrigin, poseMessage, entityMessage, setContentCache: (c) => (contentCache = c) };
   }
 
   Plugin.register('pose_studio', {
@@ -11271,6 +11641,8 @@ ${PLUGIN_URL}`,
       if (Blockbench.on) Blockbench.on('select_project', onProjectSelected);
       if (Blockbench.on) Blockbench.on('load_project', refreshOnLoad);
       if (Blockbench.on) Blockbench.on('undo', onBlockbenchUndo);
+      if (Blockbench.on) Blockbench.on('display_default_pose', onDefaultPose);
+      if (cameraPathsOn()) setupClipChannel();
       if (Blockbench.on) Blockbench.on('redo', onBlockbenchRedo);
 
       const a = {
@@ -11442,9 +11814,13 @@ ${PLUGIN_URL}`,
           name: 'Animate Camera (Timeline)', icon: 'movie_filter', click: () => animateCamera(),
           description: "Opens the Animate tab with the active camera ready to keyframe: position, rotation and zoom on Blockbench's timeline, with its graph editor for the curves.",
         }),
+        animkey: new Action('pose_studio_anim_key', {
+          name: 'Add Animation Keyframe…', icon: 'animation', click: () => addAnimationKey(),
+          description: "For the selected player or mob: a keyframe on its Animation track at the playhead, saying which animation plays from there (speed, loop, blend in). Edits the keyframe when one is there or selected.",
+        }),
         camanimplay: new Action('pose_studio_cam_anim_play', {
           name: 'Play Animation in Minecraft', icon: 'smart_display', click: () => playCameraAnimation(),
-          description: "Flies the Minecraft camera through the camera's animation (the one open in the Animate tab), a frame every game tick.",
+          description: 'Plays the animation open in the Animate tab in Minecraft, a frame every game tick: the camera, and every animated player and mob.',
         }),
         camanimstop: new Action('pose_studio_cam_anim_stop', {
           name: 'Stop Animation in Minecraft', icon: 'stop', click: () => stopPath(),
@@ -11517,14 +11893,16 @@ ${PLUGIN_URL}`,
           },
         }),
         setting('pose_studio_camera_paths', {
-          name: 'Pose Studio: Camera Animation (experimental)', type: 'toggle', value: cameraPathsOn(),
-          description: "Adds Animate Camera and Play Animation in Minecraft (the Camera menu, and the panel under Cameras): keyframe a camera on Blockbench's timeline and the game flies it.",
+          name: 'Pose Studio: Animation (experimental)', type: 'toggle', value: cameraPathsOn(),
+          description: "Adds the Animate menu: keyframe the camera, and which animation each player and mob plays when, on Blockbench's timeline; Minecraft plays it.",
           onChange: (value) => {
             try {
               localStorage.setItem(CAMERA_PATHS_KEY, value ? '1' : '0');
             } catch (e) {
               // used until Blockbench restarts
             }
+            if (value) setupClipChannel();
+            else removeClipChannel();
             applyInterface();
           },
         }),
@@ -11579,6 +11957,8 @@ ${PLUGIN_URL}`,
       if (Blockbench.removeListener) Blockbench.removeListener('select_project', onProjectSelected);
       if (Blockbench.removeListener) Blockbench.removeListener('load_project', refreshOnLoad);
       if (Blockbench.removeListener) Blockbench.removeListener('undo', onBlockbenchUndo);
+      if (Blockbench.removeListener) Blockbench.removeListener('display_default_pose', onDefaultPose);
+      removeClipChannel();
       if (Blockbench.removeListener) Blockbench.removeListener('redo', onBlockbenchRedo);
       deck.stop();
       endPathPlay();

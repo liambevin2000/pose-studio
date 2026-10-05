@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.66.0",
+    "date": "2026-10-05",
+    "changes": [
+      "New (experimental): players and mobs have an Animation track on the timeline. Keyframe which animation plays when.",
+      "Play Animation in Minecraft now plays players and mobs too.",
+      "The animation actions are in a new Animate menu.",
+      "Update the Minecraft packs."
+    ]
+  },
+  {
     "version": "0.65.1",
     "date": "2026-10-05",
     "changes": [

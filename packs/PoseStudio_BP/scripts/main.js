@@ -518,15 +518,34 @@ function stopPath() {
 function playPath(player, data) {
   if (!player) return;
   stopPath();
-  if (!cameraPath || cameraPath.keys.length < 2 || cameraPath.keys.some((k) => !k)) throw new Error("the camera path didn't arrive whole: play it again from Blockbench");
+  if (!cameraPath || cameraPath.keys.length < 2) throw new Error("the animation didn't arrive: play it again from Blockbench");
+  const flown = cameraPath.cam; // without a camera in it, only the players and mobs are played
+  if (flown && cameraPath.keys.some((k) => !k)) throw new Error("the camera's animation didn't arrive whole: play it again from Blockbench");
   const anchor = requireAnchor(player);
-  const keys = cameraPath.keys.map((k) => Object.assign({}, k, { p: [anchor.x + k.p[0], anchor.y + k.p[1], anchor.z + k.p[2]] }));
-  const total = pathLength(keys);
+  const keys = flown ? cameraPath.keys.map((k) => Object.assign({}, k, { p: [anchor.x + k.p[0], anchor.y + k.p[1], anchor.z + k.p[2]] })) : [];
+  const total = flown ? pathLength(keys) : (cameraPath.keys.length - 1) * cameraPath.step;
+  const tracks = cameraPath.tracks;
+  // the players and mobs: whatever update they have for this tick
+  const pose = () => {
+    const tick = Math.round(time / cameraPath.step);
+    for (const track of tracks.values()) {
+      const d = track.frames.get(tick);
+      if (!d) continue;
+      try {
+        if (track.k === "e") setEntity(player, d);
+        else setPose(player, d);
+      } catch {
+        // not there right now (unloaded, or removed)
+      }
+    }
+  };
   let time = Math.max(0, Number(data.t) || 0);
   let fov = null;
   pathPlayer = player;
   if (cameraPath.hud) player.runCommand("hud @s hide all");
   const step = (ease) => {
+    pose();
+    if (!flown) return;
     const s = pathAt(keys, cameraPath.ramp, time);
     const look = { x: s.p[0] + s.dir[0] * 16, y: s.p[1] + s.dir[1] * 16, z: s.p[2] + s.dir[2] * 16 };
     player.runCommand(`camera @s set minecraft:free ${ease ? "ease 0.1 linear " : ""}pos ${fmt({ x: s.p[0], y: s.p[1], z: s.p[2] })} facing ${fmt(look)}`);
@@ -563,7 +582,7 @@ function playPath(player, data) {
 function setPath(data) {
   stopPath();
   const n = Math.max(0, Math.min(6000, Number(data.n) || 0)); // 5 minutes of samples at most
-  cameraPath = { keys: new Array(n).fill(null), ramp: Array.isArray(data.ramp) ? data.ramp.map(Number) : [0, 0, 1, 1], loop: !!data.loop, hud: !!data.hud, step: Math.max(0.01, Number(data.step) || 0.05) };
+  cameraPath = { keys: new Array(n).fill(null), ramp: Array.isArray(data.ramp) ? data.ramp.map(Number) : [0, 0, 1, 1], loop: !!data.loop, hud: !!data.hud, step: Math.max(0.01, Number(data.step) || 0.05), cam: data.cam === undefined || !!data.cam, tracks: new Map() };
 }
 
 // `pose:pathsamples {"i":index,"s":[x,y,z, dx,dy,dz, fov, …]}` — an animation sampled every `step`
@@ -578,6 +597,16 @@ function setPathSamples(data) {
     const index = first + n;
     cameraPath.keys[index] = { p: v.slice(0, 3), dir: v.slice(3, 6), f: v[6], d: index ? cameraPath.step : 0, e: [0, 0, 1, 1], o: [0, 0, 0], i: [0, 0, 0] };
   }
+}
+
+// `pose:track {"k":"s"|"e","i":tick,"d":{…}}` — a player's (s: as pose:set) or mob's (e: as pose:ent)
+// update at one tick of the animation set up by pose:path. Only the ticks where it changes are sent.
+function setTrack(data) {
+  const d = data.d;
+  if (!cameraPath || !d || !d.id) return;
+  let track = cameraPath.tracks.get(d.id);
+  if (!track) cameraPath.tracks.set(d.id, (track = { k: data.k === "e" ? "e" : "s", frames: new Map() }));
+  track.frames.set(Math.max(0, Math.round(Number(data.i) || 0)), d);
 }
 
 function setPathKey(data) {
@@ -911,7 +940,7 @@ function debug(player) {
 // Every name looks like `PSD[op|page|item]`; page 0 always carries
 // `M|ready|<pages>|<items>|<items per page>` or `M|busy|<percent>`.
 // What this script understands; Blockbench warns when the world runs an older one.
-const PACK_PROTOCOL = 24;
+const PACK_PROTOCOL = 25;
 const IO_OBJECTIVE = "pose_io";
 const ITEMS_PER_PAGE = 30;
 const MAX_PAGES_PER_BATCH = 16;
@@ -1671,6 +1700,8 @@ function handle(ev) {
       return setPathKey(data);
     case "pose:pathsamples":
       return setPathSamples(data);
+    case "pose:track":
+      return setTrack(data);
     case "pose:pathplay":
       return playPath(player, data);
     case "pose:pathstop":
