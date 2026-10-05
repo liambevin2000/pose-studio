@@ -116,6 +116,16 @@ Cameras, their FOVs and the scan are saved with your Blockbench project. Turning
 
 After editing files in `packs/`, bump the `version` in both manifests and run `node build-mcaddon.js` before re-importing, or copy the folders into `development_behavior_packs` and `development_resource_packs` so changes load without version bumps.
 
+## Camera paths (experimental)
+
+Fly the game camera along a path, for recording.
+
+1. Look through a camera (or move the Blockbench view) to where the path starts: **Camera Path ▸ Add Path Key**. Do the same for each point along the way. The keys are a `path_1` group of `key_N` groups; move and turn them like cameras, drag them in the outliner to reorder. The yellow line is the path.
+2. **Camera Path ▸ Camera Path…**: the seconds to reach each key, the FOV at it, and the bezier ramp of each stretch and of the whole path (drag the curve's two handles, or pick a preset). *Set the times* fills them in for one speed.
+3. **Play in Minecraft** (the game flies the camera, a step every tick, eased between ticks), **Preview here**, **Stop**.
+
+Minecraft's camera can't roll, so paths have direction but no tilt.
+
 ## Moving structures
 
 Select a box of blocks in Minecraft, move it in Blockbench, and Minecraft moves the blocks.

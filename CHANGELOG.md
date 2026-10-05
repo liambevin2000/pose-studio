@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.61.0 (2026-10-05)
+
+- Experimental: camera paths. Add Path Key (Camera Path menu, or on the panel under Cameras) drops a key where the active camera is, or where the Blockbench view is: a point the camera flies through, with its direction and field of view. Add one for each point along the way. Keys can be moved and turned like cameras, and Blockbench draws the path as a yellow line.
+- Camera Path… sets the seconds the camera takes to reach each key and the FOV at it, or fills the times in for one speed in blocks a second. Each stretch has a bezier ramp, and so does the whole path: drag the two handles of the curve, or pick Linear, Ease in, Ease out, Ease in-out and others.
+- Play in Minecraft flies the game camera along the path. The game does the flying itself, a step every tick with easing between ticks, so it's smooth and in game time (for recording). The interface can be hidden while it plays, and it can loop. Preview here flies the Blockbench view along it. Stop ends either.
+- Minecraft's camera can't roll, so a path has direction but no tilt. The Stream Deck plugin (1.6) has sprites for the path actions.
+- Update the Minecraft packs (Check for Updates, then reopen the world).
+
 ## 0.60.1 (2026-10-05)
 
 - Light Level… is a slider now, from 0 to 15, and Minecraft follows as you drag it. 0 turns the light off: its light block is taken away and the marker stays, so you can turn it back up later. Cancel puts the level back as it was.

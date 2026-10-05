@@ -421,8 +421,152 @@ function removeAllLights() {
   writeLights({});
 }
 
+// ---- Camera paths (experimental) -------------------------------------------------------------------
+// Blockbench sends a path (keys with a position, a direction, a field of view, the seconds to reach
+// them and a bezier ramp), and the game flies the camera along it, a step every tick, each step
+// eased so it's smooth between ticks.
+//   pose:path {"n":keys,"ramp":[x1,y1,x2,y2],"loop":0|1,"hud":0|1}   a new path (empty)
+//   pose:pathkey {"i":index,"k":[x,y,z, dx,dy,dz, fov, seconds, e1,e2,e3,e4]}
+//   pose:pathplay {"t":seconds to start from}      pose:pathstop
+// A cubic-bezier ramp as in CSS / After Effects: e = [x1, y1, x2, y2], the two handles of a curve
+// from (0,0) to (1,1). Given how far through the time you are (u, 0-1), how far along you are.
+function bezierEase(e, u) {
+  if (u <= 0) return 0;
+  if (u >= 1) return 1;
+  if (!e || (e[0] === e[1] && e[2] === e[3])) return u; // a straight line
+  const x1 = Math.max(0, Math.min(1, e[0])), x2 = Math.max(0, Math.min(1, e[2]));
+  const curve = (a, b, t) => 3 * a * t * (1 - t) * (1 - t) + 3 * b * t * t * (1 - t) + t * t * t;
+  // x is monotonic for handles inside 0-1: bisect for the t that gives this u
+  let lo = 0, hi = 1, t = u;
+  for (let i = 0; i < 24; i++) {
+    const x = curve(x1, x2, t);
+    if (Math.abs(x - u) < 1e-5) break;
+    if (x < u) lo = t;
+    else hi = t;
+    t = (lo + hi) / 2;
+  }
+  return curve(e[1], e[3], t);
+}
+
+// A smooth curve through points (Catmull-Rom): between p1 and p2 at s (0-1), shaped by the
+// neighbours p0 and p3.
+function catmullRom(p0, p1, p2, p3, s) {
+  const s2 = s * s, s3 = s2 * s;
+  return p1.map((v, i) => 0.5 * (2 * v + (p2[i] - p0[i]) * s + (2 * p0[i] - 5 * v + 4 * p2[i] - p3[i]) * s2 + (3 * v - p0[i] - 3 * p2[i] + p3[i]) * s3));
+}
+
+function pathLength(keys) {
+  let total = 0;
+  for (let i = 1; i < keys.length; i++) total += Math.max(0, Number(keys[i].d) || 0);
+  return total;
+}
+
+// Where a camera path is at `time` seconds: { p: position, dir: the way it looks (unit), f: fov }.
+// keys: [{ p: [x, y, z], dir: [x, y, z], f, d: seconds from the key before, e: the ramp of that
+// stretch }], ramp: the ramp of the whole path.
+function pathAt(keys, ramp, time) {
+  const n = keys.length;
+  const state = (k) => ({ p: k.p.slice(), dir: k.dir.slice(), f: k.f });
+  if (!n) return null;
+  if (n === 1) return state(keys[0]);
+  const total = pathLength(keys);
+  if (total <= 0) return state(keys[n - 1]);
+  const at = bezierEase(ramp, Math.max(0, Math.min(1, time / total))) * total;
+  let start = 0;
+  let i = 1;
+  for (; i < n; i++) {
+    const d = Math.max(0, Number(keys[i].d) || 0);
+    if (at < start + d || i === n - 1) break;
+    start += d;
+  }
+  const d = Math.max(0, Number(keys[i].d) || 0);
+  const s = d > 0 ? bezierEase(keys[i].e, Math.max(0, Math.min(1, (at - start) / d))) : 1;
+  const k0 = keys[Math.max(0, i - 2)], k1 = keys[i - 1], k2 = keys[i], k3 = keys[Math.min(n - 1, i + 1)];
+  const p = catmullRom(k0.p, k1.p, k2.p, k3.p, s);
+  let dir = catmullRom(k0.dir, k1.dir, k2.dir, k3.dir, s);
+  const len = Math.hypot(dir[0], dir[1], dir[2]);
+  dir = len > 1e-6 ? dir.map((v) => v / len) : k2.dir.slice();
+  return { p, dir, f: k1.f + (k2.f - k1.f) * s };
+}
+
+let cameraPath = null; // { keys, ramp, loop, hud }
+let pathRun; // the interval while a path plays
+let pathPlayer = null;
+
+function stopPath() {
+  if (pathRun !== undefined) system.clearRun(pathRun);
+  pathRun = undefined;
+  if (pathPlayer && cameraPath && cameraPath.hud) {
+    try {
+      pathPlayer.runCommand("hud @s reset all");
+    } catch {
+      // gone
+    }
+  }
+  pathPlayer = null;
+}
+
+function playPath(player, data) {
+  if (!player) return;
+  stopPath();
+  if (!cameraPath || cameraPath.keys.length < 2 || cameraPath.keys.some((k) => !k)) throw new Error("the camera path didn't arrive whole: play it again from Blockbench");
+  const anchor = requireAnchor(player);
+  const keys = cameraPath.keys.map((k) => Object.assign({}, k, { p: [anchor.x + k.p[0], anchor.y + k.p[1], anchor.z + k.p[2]] }));
+  const total = pathLength(keys);
+  let time = Math.max(0, Number(data.t) || 0);
+  let fov = null;
+  pathPlayer = player;
+  if (cameraPath.hud) player.runCommand("hud @s hide all");
+  const step = (ease) => {
+    const s = pathAt(keys, cameraPath.ramp, time);
+    const look = { x: s.p[0] + s.dir[0] * 16, y: s.p[1] + s.dir[1] * 16, z: s.p[2] + s.dir[2] * 16 };
+    player.runCommand(`camera @s set minecraft:free ${ease ? "ease 0.1 linear " : ""}pos ${fmt({ x: s.p[0], y: s.p[1], z: s.p[2] })} facing ${fmt(look)}`);
+    if (Number.isFinite(s.f) && (fov === null || Math.abs(s.f - fov) > 0.02)) {
+      fov = s.f;
+      try {
+        player.runCommand(`camera @s fov_set ${fov.toFixed(2)}${ease ? " 0.1 linear" : ""}`);
+      } catch {
+        // older versions without fov support
+      }
+    }
+  };
+  step(false); // the first frame: straight there
+  pathRun = system.runInterval(() => {
+    try {
+      time += 0.05;
+      if (time >= total) {
+        if (cameraPath.loop) time -= total;
+        else {
+          time = total;
+          step(true);
+          stopPath();
+          return;
+        }
+      }
+      step(true);
+    } catch (e) {
+      console.warn(`[Pose Studio] camera path: ${e}`);
+      stopPath();
+    }
+  }, 1);
+}
+
+function setPath(data) {
+  stopPath();
+  const n = Math.max(0, Math.min(200, Number(data.n) || 0));
+  cameraPath = { keys: new Array(n).fill(null), ramp: Array.isArray(data.ramp) ? data.ramp.map(Number) : [0, 0, 1, 1], loop: !!data.loop, hud: !!data.hud };
+}
+
+function setPathKey(data) {
+  const k = data.k;
+  if (!cameraPath || !Array.isArray(k) || k.length < 12) return;
+  const v = k.map(Number);
+  cameraPath.keys[Number(data.i)] = { p: v.slice(0, 3), dir: v.slice(3, 6), f: v[6], d: v[7], e: v.slice(8, 12) };
+}
+
 function setCamera(player, data) {
   if (!player) return;
+  stopPath();
   const anchor = requireAnchor(player);
   const pos = toWorld(anchor, data.p);
   const target = toWorld(anchor, data.t);
@@ -439,6 +583,7 @@ function setCamera(player, data) {
 
 function clearCamera(player) {
   if (!player) return;
+  stopPath();
   player.runCommand("camera @s clear");
   try {
     player.runCommand("camera @s fov_clear");
@@ -742,7 +887,7 @@ function debug(player) {
 // Every name looks like `PSD[op|page|item]`; page 0 always carries
 // `M|ready|<pages>|<items>|<items per page>` or `M|busy|<percent>`.
 // What this script understands; Blockbench warns when the world runs an older one.
-const PACK_PROTOCOL = 21;
+const PACK_PROTOCOL = 22;
 const IO_OBJECTIVE = "pose_io";
 const ITEMS_PER_PAGE = 30;
 const MAX_PAGES_PER_BATCH = 16;
@@ -1496,6 +1641,14 @@ function handle(ev) {
       return clearMobs(player, data);
     case "pose:light":
       return setLight(player, data);
+    case "pose:path":
+      return setPath(data);
+    case "pose:pathkey":
+      return setPathKey(data);
+    case "pose:pathplay":
+      return playPath(player, data);
+    case "pose:pathstop":
+      return stopPath();
     case "pose:backdrop":
       return setBackdrop(player, data);
     case "pose:camclear":
