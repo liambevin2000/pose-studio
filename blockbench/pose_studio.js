@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.64.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.65.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -872,7 +872,6 @@
       applyPovAspect();
     }
     if (!povPreview || !povPreview.camera || typeof Project === 'undefined' || !Project) return;
-    if (pathPreviewing) return; // a camera path is being previewed in this view
     checkPovProjection();
     placePovGrid();
     const cam = activeCamera();
@@ -1649,7 +1648,7 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
     sendStructureTarget();
 
     if (cameraSync && !shooting && !pathPlaying && link.inFlight < MAX_IN_FLIGHT) {
-      const cam = pathScrubMessage() || cameraMessage();
+      const cam = cameraMessage();
       if (cam && cam !== lastCamera) {
         send(`scriptevent pose:cam ${cam}`);
         lastCamera = cam;
@@ -3071,90 +3070,9 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     if (which === 'clear') removeStructureMesh();
   }
 
-  // ---- Camera paths (experimental) -------------------------------------------------------------------
-  // A camera path is a path_N group of key_N groups, in outliner order. Each key is a camera
-  // position you can move and turn like a camera; it also has a field of view, the seconds the
-  // camera takes to reach it from the key before, and a bezier ramp for that stretch (how it
-  // speeds up and slows down). The path as a whole has a ramp too. Blockbench draws the path as a
-  // line; Camera Path… edits the timings and ramps, previews it here and plays it in Minecraft,
-  // where the game flies the camera itself (smooth, in game time). The maths below is the same
-  // code the behavior pack runs.
-  // A cubic-bezier ramp as in CSS / After Effects: e = [x1, y1, x2, y2], the two handles of a curve
-  // from (0,0) to (1,1). Given how far through the time you are (u, 0-1), how far along you are.
-  function bezierEase(e, u) {
-    if (u <= 0) return 0;
-    if (u >= 1) return 1;
-    if (!e || (e[0] === e[1] && e[2] === e[3])) return u; // a straight line
-    const x1 = Math.max(0, Math.min(1, e[0])), x2 = Math.max(0, Math.min(1, e[2]));
-    const curve = (a, b, t) => 3 * a * t * (1 - t) * (1 - t) + 3 * b * t * t * (1 - t) + t * t * t;
-    // x is monotonic for handles inside 0-1: bisect for the t that gives this u
-    let lo = 0, hi = 1, t = u;
-    for (let i = 0; i < 24; i++) {
-      const x = curve(x1, x2, t);
-      if (Math.abs(x - u) < 1e-5) break;
-      if (x < u) lo = t;
-      else hi = t;
-      t = (lo + hi) / 2;
-    }
-    return curve(e[1], e[3], t);
-  }
-
-  // A smooth curve through points (Catmull-Rom): between p1 and p2 at s (0-1), shaped by the
-  // neighbours p0 and p3.
-  function catmullRom(p0, p1, p2, p3, s) {
-    const s2 = s * s, s3 = s2 * s;
-    return p1.map((v, i) => 0.5 * (2 * v + (p2[i] - p0[i]) * s + (2 * p0[i] - 5 * v + 4 * p2[i] - p3[i]) * s2 + (3 * v - p0[i] - 3 * p2[i] + p3[i]) * s3));
-  }
-
-  // A point on a cubic bezier from p0 to p1 with the control points c0 and c1, at s (0-1).
-  function bezierPoint(p0, c0, c1, p1, s) {
-    const r = 1 - s;
-    return p0.map((v, i) => r * r * r * v + 3 * r * r * s * c0[i] + 3 * r * s * s * c1[i] + s * s * s * p1[i]);
-  }
-
-  function pathLength(keys) {
-    let total = 0;
-    for (let i = 1; i < keys.length; i++) total += Math.max(0, Number(keys[i].d) || 0);
-    return total;
-  }
-
-  // Where a camera path is at `time` seconds: { p: position, dir: the way it looks (unit), f: fov }.
-  // keys: [{ p: [x, y, z], dir: [x, y, z], f, d: seconds from the key before, e: the ramp of that
-  // stretch, o and i: the spline handles of the key (where the path leaves towards, and arrives
-  // from, as offsets from p) }], ramp: the ramp of the whole path. The path is a bezier through the
-  // keys shaped by their handles; the direction turns smoothly from key to key.
-  function pathAt(keys, ramp, time) {
-    const n = keys.length;
-    const state = (k) => ({ p: k.p.slice(), dir: k.dir.slice(), f: k.f });
-    if (!n) return null;
-    if (n === 1) return state(keys[0]);
-    const total = pathLength(keys);
-    if (total <= 0) return state(keys[n - 1]);
-    const at = bezierEase(ramp, Math.max(0, Math.min(1, time / total))) * total;
-    let start = 0;
-    let i = 1;
-    for (; i < n; i++) {
-      const d = Math.max(0, Number(keys[i].d) || 0);
-      if (at < start + d || i === n - 1) break;
-      start += d;
-    }
-    const d = Math.max(0, Number(keys[i].d) || 0);
-    const s = d > 0 ? bezierEase(keys[i].e, Math.max(0, Math.min(1, (at - start) / d))) : 1;
-    const k0 = keys[Math.max(0, i - 2)], k1 = keys[i - 1], k2 = keys[i], k3 = keys[Math.min(n - 1, i + 1)];
-    const out = k1.o || [0, 0, 0], into = k2.i || [0, 0, 0];
-    const p = bezierPoint(k1.p, k1.p.map((v, j) => v + out[j]), k2.p.map((v, j) => v + into[j]), k2.p, s);
-    let dir = catmullRom(k0.dir, k1.dir, k2.dir, k3.dir, s);
-    const len = Math.hypot(dir[0], dir[1], dir[2]);
-    dir = len > 1e-6 ? dir.map((v) => v / len) : k2.dir.slice();
-    return { p, dir, f: k1.f + (k2.f - k1.f) * s };
-  }
-  const PATH_PREFIX = /^path_\d+$/i;
-  const KEY_PREFIX = /^key_\d+$/i;
-  const LINEAR = [0, 0, 1, 1];
-  const RAMPS = { Linear: [0, 0, 1, 1], 'Ease in': [0.42, 0, 1, 1], 'Ease out': [0, 0, 0.58, 1], 'Ease in-out': [0.42, 0, 0.58, 1], 'Slow in, fast out': [0.7, 0, 0.84, 0], 'Fast in, slow out': [0.16, 1, 0.3, 1] };
-  let pathPlaying = false; // the game camera is on a path: it isn't synced meanwhile
-  let pathLineTimer = null;
-  let pathPreviewing = false; // the camera view is flying a path: it isn't locked to the active camera meanwhile
+  // ---- Camera animation (experimental) -------------------------------------------------------------
+  let pathPlaying = false; // the game camera is flying an animation: it isn't synced meanwhile
+  let pathPlayTimer = null;
   const CAMERA_PATHS_KEY = 'pose_studio_camera_paths';
   function cameraPathsOn() {
     try {
@@ -3163,441 +3081,10 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
       return false;
     }
   }
-  let pathPlayTimer = null;
-  let pathPreview = null; // requestAnimationFrame id while previewing in Blockbench
-  const pathLines = new Map(); // path uuid -> { line, signature }
-
-  function pathRoots() {
-    if (typeof Project === 'undefined' || !Project) return [];
-    return Outliner.root.filter((node) => node instanceof Group && PATH_PREFIX.test(node.name));
-  }
-  const pathKeys = (path) => (path.children || []).filter((c) => c instanceof Group && KEY_PREFIX.test(c.name));
-  const keyInfo = (key) => Object.assign({ d: 2, e: LINEAR.slice() }, key.pose_key || {});
-  const pathInfo = (path) => Object.assign({ ramp: LINEAR.slice(), loop: false, hud: true }, path.pose_path || {});
-
-  // the path the selection is in, else the first one
-  function currentPath() {
-    for (let node = selectedNode(); node && node !== 'root'; node = node.parent) {
-      if (node instanceof Group && PATH_PREFIX.test(node.name) && node.parent === 'root') return node;
-    }
-    return pathRoots()[0] || null;
-  }
-
-  // ---- the spline handles ----
-  // Each key has two handles in the viewport, key_N_in and key_N_out (small boxes beside it, in the
-  // path group): the path arrives at the key from the "in" handle and leaves towards the "out"
-  // handle, so dragging them bends the path at that point. Until you move one, a key's handles
-  // shape themselves (a smooth curve through its neighbours). Move one and the other swings to
-  // stay opposite it, keeping the path smooth through the key. Handles move along with their key.
-  const HANDLE_NAME = /^(key_\d+)_(in|out)$/i;
-  const handleOf = (path, key, side) => (path.children || []).find((c) => c instanceof Group && c.name === `${key.name}_${side}`) || null;
-  const pathWatch = new Map(); // group uuid -> its origin when last looked at
-
-  function moveGroupTo(group, to) {
-    const d = to.map((v, i) => v - group.origin[i]);
-    if (d.some((v) => Math.abs(v) > 1e-6)) translateTree(group, d);
-  }
-
-  // A key's own smooth "out" offset: a third of the way along the line between its neighbours.
-  function autoOut(keys, i) {
-    const prev = keys[Math.max(0, i - 1)].origin;
-    const next = keys[Math.min(keys.length - 1, i + 1)].origin;
-    const scale = i === 0 || i === keys.length - 1 ? 1 / 3 : 1 / 6;
-    return next.map((v, j) => (v - prev[j]) * scale);
-  }
-
-  function makeHandle(path, key, side) {
-    const at = key.origin.slice();
-    const handle = new Group({ name: `${key.name}_${side}`, origin: at.slice() }).addTo(path).init();
-    handle.pose_handle = { auto: true };
-    new Cube({ name: 'handle', from: at.map((v) => v - 1), to: at.map((v) => v + 1), color: side === 'out' ? 2 : 6 }).addTo(handle).init();
-    return handle;
-  }
-
-  // Keeps every path's handles right: made where they're missing, removed when their key is gone,
-  // carried along when their key moves, mirrored when one is dragged, and re-shaped while automatic.
-  // Returns true when something was changed.
-  function tendPathHandles() {
-    let changed = false;
-    const selected = new Set((typeof Outliner !== 'undefined' && Outliner.selected ? Outliner.selected : []).map((el) => el.parent).concat(typeof Group !== 'undefined' && Array.isArray(Group.selected) ? Group.selected : Group.selected ? [Group.selected] : []));
-    for (const path of pathRoots()) {
-      const keys = pathKeys(path);
-      const names = new Set(keys.map((k) => k.name));
-      for (const node of (path.children || []).slice()) {
-        const m = node instanceof Group && node.name.match(HANDLE_NAME);
-        if (m && !names.has(m[1])) {
-          node.remove();
-          pathWatch.delete(node.uuid);
-          changed = true;
-        }
-      }
-      keys.forEach((key, i) => {
-        let hin = handleOf(path, key, 'in');
-        let hout = handleOf(path, key, 'out');
-        if (!hin) {
-          hin = makeHandle(path, key, 'in');
-          changed = true;
-        }
-        if (!hout) {
-          hout = makeHandle(path, key, 'out');
-          changed = true;
-        }
-        const was = (g) => pathWatch.get(g.uuid);
-        const moved = (g) => was(g) && was(g).some((v, j) => Math.abs(v - g.origin[j]) > 1e-4);
-        // the key was moved: its handles go with it (unless they were moved along in the same drag)
-        if (moved(key)) {
-          const d = key.origin.map((v, j) => v - was(key)[j]);
-          for (const h of [hin, hout]) if (!moved(h)) translateTree(h, d);
-          changed = true;
-        } else {
-          // a handle was dragged: it's yours now, and the other one swings opposite it
-          const dragged = [hin, hout].filter(moved);
-          if (dragged.length === 1) {
-            const h = dragged[0];
-            const other = h === hin ? hout : hin;
-            h.pose_handle = { auto: false };
-            const off = h.origin.map((v, j) => v - key.origin[j]);
-            const len = Math.hypot(...off);
-            const otherOff = other.origin.map((v, j) => v - key.origin[j]);
-            const otherLen = (other.pose_handle && other.pose_handle.auto === false ? Math.hypot(...otherOff) : len) || len;
-            if (len > 1e-4 && !selected.has(other)) {
-              moveGroupTo(other, key.origin.map((v, j) => v - (off[j] / len) * otherLen));
-              other.pose_handle = { auto: false };
-            }
-            changed = true;
-          } else if (dragged.length === 2) {
-            hin.pose_handle = { auto: false };
-            hout.pose_handle = { auto: false };
-            changed = true;
-          }
-        }
-        // automatic ones follow the neighbours
-        const auto = (h) => !h.pose_handle || h.pose_handle.auto !== false;
-        if (auto(hin) || auto(hout)) {
-          const out = autoOut(keys, i);
-          if (auto(hout)) {
-            const to = key.origin.map((v, j) => v + out[j]);
-            if (to.some((v, j) => Math.abs(v - hout.origin[j]) > 1e-4)) {
-              moveGroupTo(hout, to);
-              changed = true;
-            }
-          }
-          if (auto(hin)) {
-            const to = key.origin.map((v, j) => v - out[j]);
-            if (to.some((v, j) => Math.abs(v - hin.origin[j]) > 1e-4)) {
-              moveGroupTo(hin, to);
-              changed = true;
-            }
-          }
-        }
-        for (const g of [key, hin, hout]) pathWatch.set(g.uuid, g.origin.slice());
-      });
-    }
-    if (changed && typeof Canvas !== 'undefined' && Canvas.updateAll) Canvas.updateAll();
-    return changed;
-  }
-
-  // The keys in model space, for drawing and previewing here: p in pixels, dir as Blockbench has
-  // it, o and i the handles as offsets from the key.
-  function pathModelKeys(path) {
-    const fallbackFov = mainViewportFov();
-    const keys = pathKeys(path);
-    return keys.map((key, n) => {
-      const info = keyInfo(key);
-      const hin = handleOf(path, key, 'in');
-      const hout = handleOf(path, key, 'out');
-      const auto = autoOut(keys, n);
-      return {
-        p: key.origin.slice(), dir: cameraForward(key).toArray(), f: Number(key.pose_fov) || fallbackFov, d: Number(info.d) || 0, e: info.e,
-        o: hout ? hout.origin.map((v, j) => v - key.origin[j]) : auto,
-        i: hin ? hin.origin.map((v, j) => v - key.origin[j]) : auto.map((v) => -v),
-      };
-    });
-  }
-
-  // Adds a key where the active camera is (or the Blockbench view), at the end of the current path.
-  function addPathKey() {
-    if (typeof Project === 'undefined' || !Project) newProject(Formats.free);
-    const preview = viewportPreview();
-    const cam = activeCamera();
-    let pos;
-    let dir;
-    if (cam) {
-      pos = cam.origin.slice();
-      dir = cameraForward(cam);
-    } else if (preview && preview.camera && preview.controls) {
-      const space = modelSpace();
-      const p = preview.camera.position.clone();
-      const t = preview.controls.target.clone();
-      if (space) {
-        space.worldToLocal(p);
-        space.worldToLocal(t);
-      }
-      pos = p.toArray().map((v) => round(v, 2));
-      dir = t.sub(p);
-    } else return null;
-    let path = currentPath();
-    Undo.initEdit({ outliner: true, elements: [] });
-    if (!path) {
-      let n = 1;
-      while (Outliner.root.some((g) => g instanceof Group && g.name === `path_${n}`)) n++;
-      path = new Group({ name: `path_${n}`, origin: pos.slice() }).init();
-      path.pose_path = { ramp: LINEAR.slice(), loop: false, hud: true };
-    }
-    const keys = pathKeys(path);
-    let n = 1;
-    while (keys.some((k) => k.name === `key_${n}`)) n++;
-    const key = new Group({ name: `key_${n}`, origin: pos.slice(), rotation: rotationFacing(dir) }).addTo(path).init();
-    // the time to get here: 4 blocks a second from the key before (at least half a second)
-    const last = keys[keys.length - 1];
-    const blocks = last ? Math.hypot(pos[0] - last.origin[0], pos[1] - last.origin[1], pos[2] - last.origin[2]) / 16 : 0;
-    key.pose_key = { d: last ? round(Math.max(0.5, blocks / 4), 2) : 0, e: LINEAR.slice() };
-    if (cam && cam.pose_fov) key.pose_fov = cam.pose_fov;
-    let elements = null;
-    try {
-      elements = cameraSpline(key, pos);
-    } catch (e) {
-      elements = null;
-    }
-    if (!elements) elements = [new Cube({ name: 'key', from: pos.map((v) => v - 2), to: pos.map((v) => v + 2), color: 6 }).addTo(key).init()];
-    for (const side of ['in', 'out']) elements.push(...makeHandle(path, key, side).children);
-    Undo.finishEdit('Add camera path key', { outliner: true, elements });
-    tendPathHandles();
-    Canvas.updateAll();
-    Blockbench.showQuickMessage(`${path.name}: ${key.name} added (${keys.length + 1} key${keys.length ? 's' : ''}). Camera Path… sets the timing`, 3000);
-    return key;
-  }
-
-  // Blockbench draws each path as a line through its keys, and a thin line from each key to its
-  // two handles (redrawn when anything moves). Off with the experimental setting.
-  function updatePathLines() {
-    const space = modelSpace();
-    const on = cameraPathsOn() && typeof THREE !== 'undefined' && space && space.add;
-    if (on) tendPathHandles();
-    const alive = new Set();
-    for (const path of on ? pathRoots() : []) {
-      const keys = pathModelKeys(path);
-      alive.add(path.uuid);
-      const signature = JSON.stringify(keys.map((k) => [k.p, k.o, k.i]));
-      const old = pathLines.get(path.uuid);
-      if (old && old.signature === signature && old.line.parent === space) continue;
-      if (old) for (const obj of [old.line, old.arms]) if (obj && obj.parent) obj.parent.remove(obj);
-      if (keys.length < 2) {
-        pathLines.delete(path.uuid);
-        continue;
-      }
-      const points = [];
-      for (let i = 1; i < keys.length; i++) {
-        const k1 = keys[i - 1], k2 = keys[i];
-        const c0 = k1.p.map((v, j) => v + k1.o[j]), c1 = k2.p.map((v, j) => v + k2.i[j]);
-        for (let s = i === 1 ? 0 : 1; s <= 32; s++) points.push(new THREE.Vector3(...bezierPoint(k1.p, c0, c1, k2.p, s / 32)));
-      }
-      const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(points), new THREE.LineBasicMaterial({ color: 0xffc83d, depthTest: false, transparent: true }));
-      const armPoints = [];
-      keys.forEach((k, i) => {
-        if (i < keys.length - 1) armPoints.push(new THREE.Vector3(...k.p), new THREE.Vector3(...k.p.map((v, j) => v + k.o[j])));
-        if (i > 0) armPoints.push(new THREE.Vector3(...k.p), new THREE.Vector3(...k.p.map((v, j) => v + k.i[j])));
-      });
-      const arms = new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(armPoints), new THREE.LineBasicMaterial({ color: 0x9fd0ff, depthTest: false, transparent: true, opacity: 0.8 }));
-      for (const obj of [line, arms]) {
-        obj.renderOrder = 900;
-        obj.no_export = true;
-        obj.raycast = () => {};
-        space.add(obj);
-      }
-      pathLines.set(path.uuid, { line, arms, signature });
-    }
-    for (const [uuid, entry] of pathLines) {
-      if (alive.has(uuid)) continue;
-      for (const obj of [entry.line, entry.arms]) if (obj && obj.parent) obj.parent.remove(obj);
-      pathLines.delete(uuid);
-    }
-  }
-
-  function removePathLines() {
-    for (const entry of pathLines.values()) for (const obj of [entry.line, entry.arms]) if (obj && obj.parent) obj.parent.remove(obj);
-    pathLines.clear();
-  }
-
-  function stopPathPreview() {
-    if (pathPreview !== null && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(pathPreview);
-    pathPreview = null;
-    pathPreviewing = false; // the camera view follows the active camera again
-  }
-
-  // Flies the camera view (the bottom viewport, locked to the active camera otherwise) along the
-  // path, in real time. The view you work in stays where it is.
-  async function previewPath(path, onDone) {
-    stopPathPreview();
-    path = path || currentPath();
-    if (!path) return;
-    tendPathHandles();
-    const keys = pathModelKeys(path);
-    if (keys.length < 2) {
-      Blockbench.showQuickMessage('A camera path needs at least two keys (Add Path Key)', 3000);
-      return;
-    }
-    if (povToggle && !povToggle.value) {
-      povToggle.set(true);
-      await sleep(400); // the split view is set up
-    }
-    const view = povPreview;
-    if (!view || !view.camera) {
-      Blockbench.showQuickMessage('Turn on Camera POV Viewport to preview the path', 3000);
-      return;
-    }
-    const info = pathInfo(path);
-    const total = pathLength(keys);
-    const space = modelSpace();
-    const started = performance.now();
-    pathPreviewing = true;
-    const frame = () => {
-      if (!pathPreviewing) return;
-      const time = (performance.now() - started) / 1000;
-      const s = pathAt(keys, info.ramp, Math.min(time, total));
-      const pos = new THREE.Vector3(...s.p);
-      const target = pos.clone().add(new THREE.Vector3(...s.dir).multiplyScalar(32));
-      if (space) {
-        space.localToWorld(pos);
-        space.localToWorld(target);
-      }
-      view.camera.position.copy(pos);
-      if (view.controls && view.controls.target) view.controls.target.copy(target);
-      view.camera.lookAt(target);
-      if (view.setFOV && Number.isFinite(s.f) && Math.abs(view.camera.fov - s.f) > 0.05) view.setFOV(s.f);
-      if (time >= total) {
-        // hold the last frame for a moment, then back to the active camera
-        pathPreview = null;
-        setTimeout(() => {
-          if (pathPreview === null) pathPreviewing = false;
-          if (onDone) onDone();
-        }, 800);
-        return;
-      }
-      pathPreview = requestAnimationFrame(frame);
-    };
-    pathPreview = requestAnimationFrame(frame);
-  }
-
-  // ---- the path on Blockbench's timeline ----
-  // Camera Path ▸ Open in Timeline: the path becomes an animation of Blockbench's own (as long as the
-  // path, a marker at every key, 20 frames a second: one per game tick) and the Animate tab opens.
-  // Scrub, step frame by frame or play there, and the camera view shows that moment of the path;
-  // with Sync Game Camera on, so does Minecraft. Back in Edit, the camera view follows the active
-  // camera again.
-  const TIMELINE_PREFIX = 'camera_';
-  let pathScrub = null; // { path, time } while the timeline is on a path's animation
   const blockbenchAnimation = () => (typeof BBAnimation !== 'undefined' ? BBAnimation : typeof Animation !== 'undefined' && Animation.all ? Animation : null);
 
-  // Puts the camera view on a state of the path ({ p, dir, f } in model space).
-  function showPathState(s) {
-    const view = povPreview;
-    if (!view || !view.camera || !s) return false;
-    const space = modelSpace();
-    const pos = new THREE.Vector3(...s.p);
-    const target = pos.clone().add(new THREE.Vector3(...s.dir).multiplyScalar(32));
-    if (space) {
-      space.localToWorld(pos);
-      space.localToWorld(target);
-    }
-    view.camera.position.copy(pos);
-    if (view.controls && view.controls.target) view.controls.target.copy(target);
-    view.camera.lookAt(target);
-    if (view.setFOV && Number.isFinite(s.f) && Math.abs(view.camera.fov - s.f) > 0.05) view.setFOV(s.f);
-    return true;
-  }
-
-  // The path's animation: made if it isn't there, its length and key markers brought up to date.
-  function pathAnimation(path) {
-    const Anim = blockbenchAnimation();
-    if (!Anim) return null;
-    const name = TIMELINE_PREFIX + path.name;
-    let anim = (Anim.all || []).find((a) => a.name === name);
-    if (!anim) {
-      anim = new Anim({ name, loop: 'once', snapping: 20 });
-      anim.add(false);
-    }
-    const keys = pathModelKeys(path);
-    anim.length = Math.max(0.05, round(pathLength(keys), 3));
-    anim.snapping = 20;
-    if (typeof TimelineMarker !== 'undefined') {
-      let at = 0;
-      const times = keys.map((k, i) => (at += i ? Math.max(0, k.d) : 0));
-      const wanted = times.map((t) => round(t, 3)).join();
-      if ((anim.markers || []).map((m) => round(m.time, 3)).join() !== wanted) {
-        anim.markers = times.map((time, i) => new TimelineMarker({ time, color: i % 8 }));
-      }
-    }
-    return anim;
-  }
-
-  async function openPathTimeline(path) {
-    path = path || currentPath();
-    if (!path || pathKeys(path).length < 2) {
-      Blockbench.showQuickMessage('A camera path needs at least two keys (Add Path Key)', 3000);
-      return;
-    }
-    tendPathHandles();
-    const anim = pathAnimation(path);
-    if (!anim || typeof Modes === 'undefined' || !Modes.options || !Modes.options.animate) {
-      Blockbench.showMessageBox({ title: 'Pose Studio: camera path', message: "This Blockbench doesn't offer the Animate tab for this project, so the path can't be put on its timeline. Preview Path still plays it." });
-      return;
-    }
-    stopPathPreview();
-    if (povToggle && !povToggle.value) {
-      povToggle.set(true);
-      await sleep(400);
-    }
-    Modes.options.animate.select();
-    if (anim.select) anim.select();
-    if (typeof Timeline !== 'undefined' && Timeline.setTime) Timeline.setTime(0);
-    onTimelineFrame();
-    Blockbench.showQuickMessage('Scrub or step the timeline: the camera view (and Minecraft, with Sync Game Camera on) shows that frame', 5000);
-  }
-
-  // The path whose animation the timeline is on, if any.
-  function timelinePath() {
-    const Anim = blockbenchAnimation();
-    const selected = Anim && Anim.selected;
-    if (!selected || typeof Modes === 'undefined' || !Modes.animate || !String(selected.name).startsWith(TIMELINE_PREFIX)) return null;
-    const name = String(selected.name).slice(TIMELINE_PREFIX.length);
-    return pathRoots().find((g) => g.name === name) || null;
-  }
-
-  // Blockbench showing a frame of the timeline (scrubbed, stepped or played).
-  function onTimelineFrame() {
-    const path = cameraPathsOn() ? timelinePath() : null;
-    if (!path) {
-      if (pathScrub) {
-        pathScrub = null;
-        pathPreviewing = false;
-        lastCamera = null; // the game camera goes back to the active camera
-      }
-      return;
-    }
-    const time = typeof Timeline !== 'undefined' ? Number(Timeline.time) || 0 : 0;
-    pathScrub = { path, time };
-    pathPreviewing = true;
-    const keys = pathModelKeys(path);
-    showPathState(pathAt(keys, pathInfo(path).ramp, Math.min(time, pathLength(keys))));
-  }
-
-  // What the game camera should show while the timeline is on a path: that frame.
-  function pathScrubMessage() {
-    if (!pathScrub) return null;
-    if (timelinePath() !== pathScrub.path) {
-      onTimelineFrame(); // left the Animate tab, or picked another animation
-      return null;
-    }
-    const keys = pathModelKeys(pathScrub.path);
-    const s = pathAt(keys, pathInfo(pathScrub.path).ramp, Math.min(pathScrub.time, pathLength(keys)));
-    if (!s) return null;
-    const target = s.p.map((v, i) => v + s.dir[i] * 160);
-    return JSON.stringify({ p: toWorld(s.p), t: toWorld(target), f: round(s.f, 1) });
-  }
-
   // ---- animating a camera like any animation software ----
-  // Camera Path ▸ Animate Camera: the Animate tab opens with the active camera selected, in an
+  // Camera ▸ Animate Camera: the Animate tab opens with the active camera selected, in an
   // animation of its own. Keyframe its position and rotation on the timeline (and its scale, to
   // zoom), set the keyframes' interpolation to bezier and shape the curves in Blockbench's graph
   // editor. The camera view and the game follow the playhead. Play Animation in Minecraft samples
@@ -3620,7 +3107,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
       await sleep(400);
     }
     // an animation of ours unless you're already working in one
-    let anim = Anim.selected && !String(Anim.selected.name).startsWith(TIMELINE_PREFIX) ? Anim.selected : (Anim.all || []).find((a) => a.name === CAMERA_ANIMATION);
+    let anim = Anim.selected || (Anim.all || []).find((a) => a.name === CAMERA_ANIMATION);
     if (!anim) {
       anim = new Anim({ name: CAMERA_ANIMATION, loop: 'once', length: 5, snapping: 20 });
       anim.add(false);
@@ -3641,7 +3128,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
         "• For smooth ramps, select keyframes and set their interpolation to Bezier (or Smooth), then shape the curves in the timeline's graph editor.\n" +
         '• Scale the camera to zoom: scale 2 is twice the zoom.\n' +
         '• The camera view at the bottom, and Minecraft with Sync Game Camera on, follow the playhead.\n\n' +
-        'When it looks right: Camera Path ▸ Play Animation in Minecraft.',
+        'When it looks right: Camera ▸ Play Animation in Minecraft.',
     });
   }
 
@@ -3673,11 +3160,11 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     const Anim = blockbenchAnimation();
     const anim = Anim && (Anim.selected || (Anim.all || []).find((a) => a.name === CAMERA_ANIMATION));
     if (!cam || !anim || typeof Timeline === 'undefined' || typeof Animator === 'undefined') {
-      Blockbench.showQuickMessage(!cam ? 'There is no active camera' : 'Animate the camera first (Camera Path ▸ Animate Camera)', 3000);
+      Blockbench.showQuickMessage(!cam ? 'There is no active camera' : 'Animate the camera first (Camera ▸ Animate Camera)', 3000);
       return false;
     }
     if (typeof Modes !== 'undefined' && !Modes.animate) {
-      Blockbench.showQuickMessage('Open the Animate tab to play the animation (Camera Path ▸ Animate Camera)', 3500);
+      Blockbench.showQuickMessage('Open the Animate tab to play the animation (Camera ▸ Animate Camera)', 3500);
       return false;
     }
     const samples = sampleCameraAnimation(cam, anim);
@@ -3703,14 +3190,6 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     return true;
   }
 
-  // The path as Minecraft gets it: positions as block offsets from the anchor, directions in the
-  // world's axes.
-  function pathGameKeys(path) {
-    tendPathHandles();
-    const offset = (v) => [round(-v[0] / 16, 3), round(v[1] / 16, 3), round(-v[2] / 16, 3)]; // as toWorld, without the anchor
-    return pathModelKeys(path).map((k) => ({ p: toWorld(k.p), dir: [-k.dir[0], k.dir[1], -k.dir[2]].map((v) => round(v, 4)), f: round(k.f, 2), d: round(k.d, 3), e: k.e.map((v) => round(Number(v) || 0, 3)), o: offset(k.o), i: offset(k.i) }));
-  }
-
   function endPathPlay() {
     if (pathPlayTimer) clearTimeout(pathPlayTimer);
     pathPlayTimer = null;
@@ -3718,217 +3197,9 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     lastCamera = null; // the game camera goes back to following the active camera
   }
 
-  async function playPath(path) {
-    path = path || currentPath();
-    if (!requireConnection()) return false;
-    if (!path || pathKeys(path).length < 2) {
-      Blockbench.showQuickMessage('A camera path needs at least two keys (Add Path Key)', 3000);
-      return false;
-    }
-    const keys = pathGameKeys(path);
-    const info = pathInfo(path);
-    endPathPlay();
-    pathPlaying = true;
-    try {
-      await link.command(`scriptevent pose:path ${JSON.stringify({ n: keys.length, ramp: info.ramp.map((v) => round(Number(v) || 0, 3)), loop: info.loop ? 1 : 0, hud: info.hud ? 1 : 0 })}`);
-      for (let i = 0; i < keys.length; i++) {
-        const k = keys[i];
-        await link.command(`scriptevent pose:pathkey ${JSON.stringify({ i, k: [...k.p, ...k.dir, k.f, k.d, ...k.e, ...k.o, ...k.i] })}`);
-      }
-      await link.command('scriptevent pose:pathplay {"t":0}');
-    } catch (e) {
-      endPathPlay();
-      Blockbench.showMessageBox({ title: 'Pose Studio: camera path', message: `Minecraft didn't take the path: ${e.message || e}\n\nUpdate the Minecraft packs (Check for Updates, then reopen the world).` });
-      return false;
-    }
-    // when it's over the camera stays on the last frame for a moment, then follows the scene again
-    if (!info.loop) pathPlayTimer = setTimeout(endPathPlay, (pathLength(keys) + 1.5) * 1000);
-    return true;
-  }
-
   function stopPath() {
-    stopPathPreview();
     if (link.connected) send('scriptevent pose:pathstop');
     endPathPlay();
-  }
-
-  // Pose Studio ▸ Camera Path ▸ Camera Path…: timings, ramps, preview and play.
-  function cameraPathDialog() {
-    const path = currentPath();
-    if (!path || !pathKeys(path).length) {
-      Blockbench.showMessageBox({ title: 'Pose Studio: camera path', message: 'There is no camera path yet.\n\nLook through a camera (or move the Blockbench view) to where the path should start and choose Camera Path ▸ Add Path Key. Do the same for each point along the way, then come back here.' });
-      return;
-    }
-    const groups = pathKeys(path);
-    const info = pathInfo(path);
-    const rampName = (e) => Object.keys(RAMPS).find((name) => RAMPS[name].every((v, i) => Math.abs(v - e[i]) < 0.005)) || 'Custom';
-    const save = (vm) => {
-      vm.keys.forEach((k, i) => {
-        groups[i].pose_key = { d: i ? Math.max(0, Number(k.d) || 0) : 0, e: k.e.map(Number) };
-        groups[i].pose_fov = Math.max(1, Math.min(170, Number(k.f) || 70));
-      });
-      path.pose_path = { ramp: vm.ramp.map(Number), loop: !!vm.loop, hud: !!vm.hud };
-      if (typeof Project !== 'undefined' && Project) Project.saved = false;
-    };
-    let vm = null;
-    let dragging = -1;
-    const fallbackFov = mainViewportFov();
-    new Dialog({
-      id: 'pose_studio_camera_path',
-      title: `Camera Path: ${path.name} (experimental)`,
-      width: 760,
-      buttons: ['Close'],
-      component: {
-        data: () => ({
-          keys: groups.map((g) => ({ name: g.name, d: keyInfo(g).d, f: round(Number(g.pose_fov) || fallbackFov, 1), e: keyInfo(g).e.slice() })),
-          ramp: info.ramp.slice(),
-          loop: info.loop,
-          hud: info.hud,
-          target: -1, // which ramp the curve editor shows: -1 the whole path, else the key it leads to
-          speed: 4,
-          ramps: Object.keys(RAMPS),
-          playing: false,
-        }),
-        computed: {
-          total() {
-            return this.keys.slice(1).reduce((sum, k) => sum + Math.max(0, Number(k.d) || 0), 0);
-          },
-          curve() {
-            return this.target < 0 ? this.ramp : this.keys[this.target].e;
-          },
-          curvePath() {
-            const e = this.curve;
-            return `M0,100 C${e[0] * 100},${100 - e[1] * 100} ${e[2] * 100},${100 - e[3] * 100} 100,0`;
-          },
-          curveName() {
-            return rampName(this.curve);
-          },
-        },
-        mounted() {
-          vm = this;
-        },
-        methods: {
-          nameOf(e) {
-            return rampName(e);
-          },
-          changed() {
-            save(this);
-          },
-          setRamp(name) {
-            if (!RAMPS[name]) return;
-            const e = RAMPS[name].slice();
-            if (this.target < 0) this.ramp = e;
-            else this.$set(this.keys[this.target], 'e', e);
-            save(this);
-          },
-          grab(handle) {
-            dragging = handle;
-          },
-          drag(event) {
-            if (dragging < 0) return;
-            const box = this.$refs.curve.getBoundingClientRect();
-            const x = Math.max(0, Math.min(1, (event.clientX - box.left) / box.width));
-            const y = Math.max(0, Math.min(1, 1 - (event.clientY - box.top) / box.height));
-            const e = this.curve.slice();
-            e[dragging * 2] = Math.round(x * 100) / 100;
-            e[dragging * 2 + 1] = Math.round(y * 100) / 100;
-            if (this.target < 0) this.ramp = e;
-            else this.$set(this.keys[this.target], 'e', e);
-          },
-          drop() {
-            if (dragging >= 0) save(this);
-            dragging = -1;
-          },
-          evenSpeed() {
-            const speed = Math.max(0.1, Number(this.speed) || 4);
-            for (let i = 1; i < groups.length; i++) {
-              const a = groups[i - 1].origin, b = groups[i].origin;
-              this.keys[i].d = Math.max(0.1, Math.round((Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]) / 16 / speed) * 100) / 100);
-            }
-            save(this);
-          },
-          async play() {
-            save(this);
-            stopPathPreview();
-            this.playing = await playPath(path);
-            if (this.playing && !this.loop) setTimeout(() => (this.playing = false), (this.total + 1.5) * 1000);
-          },
-          preview() {
-            save(this);
-            previewPath(path);
-            Blockbench.showQuickMessage('Previewing in the camera view (bottom viewport)', 2000);
-          },
-          stop() {
-            stopPath();
-            this.playing = false;
-          },
-          timeline() {
-            save(this);
-            if (typeof Dialog !== 'undefined' && Dialog.open && Dialog.open.hide) Dialog.open.hide();
-            openPathTimeline(path);
-          },
-        },
-        template: `
-          <div @mousemove="drag" @mouseup="drop" @mouseleave="drop" style="display: flex; gap: 16px; user-select: none;">
-            <div style="flex: 1; min-width: 0;">
-              <div style="display: grid; grid-template-columns: 1fr 86px 70px 1fr; gap: 4px 8px; align-items: center;">
-                <b>Key</b><b>Seconds to reach</b><b>FOV</b><b>Ramp into it</b>
-                <template v-for="(k, i) in keys">
-                  <span :key="'n' + i">{{ k.name }}</span>
-                  <input :key="'d' + i" type="number" class="dark_bordered" min="0" step="0.1" v-model.number="k.d" @change="changed" :disabled="i === 0" :style="{ opacity: i === 0 ? 0.3 : 1 }">
-                  <input :key="'f' + i" type="number" class="dark_bordered" min="1" max="170" step="1" v-model.number="k.f" @change="changed">
-                  <button :key="'e' + i" @click="target = i" :disabled="i === 0" :style="{ minWidth: 0, opacity: i === 0 ? 0.3 : 1, background: target === i ? 'var(--color-accent)' : '', color: target === i ? 'var(--color-accent_text)' : '' }">{{ i === 0 ? 'start' : nameOf(k.e) }}</button>
-                </template>
-              </div>
-              <div style="margin-top: 12px; display: flex; gap: 8px; align-items: center;">
-                <span>Same speed all the way:</span>
-                <input type="number" class="dark_bordered" min="0.1" step="0.5" v-model.number="speed" style="width: 70px;">
-                <span>blocks a second</span>
-                <button @click="evenSpeed" style="min-width: 0;">Set the times</button>
-              </div>
-              <div style="margin-top: 10px;">The whole path takes <b>{{ total.toFixed(2) }}</b> seconds.</div>
-              <div style="margin-top: 10px; display: flex; gap: 16px;">
-                <label><input type="checkbox" v-model="hud" @change="changed"> Hide the interface while it plays</label>
-                <label><input type="checkbox" v-model="loop" @change="changed"> Loop</label>
-              </div>
-              <div style="margin-top: 14px; display: flex; gap: 8px;">
-                <button @click="play" style="flex: 1;"><i class="material-icons" style="vertical-align: middle;">play_arrow</i> Play in Minecraft</button>
-                <button @click="preview" style="flex: 1;"><i class="material-icons" style="vertical-align: middle;">visibility</i> Preview here</button>
-                <button @click="timeline" style="min-width: 0;" title="Scrub it frame by frame on Blockbench's timeline"><i class="material-icons" style="vertical-align: middle;">view_timeline</i> Timeline</button>
-                <button @click="stop" style="min-width: 0;"><i class="material-icons" style="vertical-align: middle;">stop</i> Stop</button>
-              </div>
-              <p style="margin-top: 12px; color: var(--color-subtle_text);">The shape of the path is set in the viewport: move and turn the keys like cameras, and drag each key's two handles (key_N_in, key_N_out) to bend the path there. The yellow line is the path. Preview plays in the camera view at the bottom.</p>
-            </div>
-            <div style="flex: none; width: 240px;">
-              <div style="display: flex; gap: 4px; margin-bottom: 6px;">
-                <button @click="target = -1" :style="{ flex: 1, minWidth: 0, background: target < 0 ? 'var(--color-accent)' : '', color: target < 0 ? 'var(--color-accent_text)' : '' }">Whole path</button>
-                <span style="align-self: center; color: var(--color-subtle_text);">{{ target < 0 ? '' : 'into ' + keys[target].name }}</span>
-              </div>
-              <svg ref="curve" viewBox="-6 -6 112 112" style="width: 240px; height: 240px; background: var(--color-back); border: 1px solid var(--color-border); cursor: crosshair;">
-                <rect x="0" y="0" width="100" height="100" fill="none" stroke="var(--color-border)" stroke-width="0.5"/>
-                <line x1="0" y1="100" x2="100" y2="0" stroke="var(--color-border)" stroke-width="0.5" stroke-dasharray="2 2"/>
-                <line x1="0" y1="100" :x2="curve[0] * 100" :y2="100 - curve[1] * 100" stroke="var(--color-subtle_text)" stroke-width="0.8"/>
-                <line x1="100" y1="0" :x2="curve[2] * 100" :y2="100 - curve[3] * 100" stroke="var(--color-subtle_text)" stroke-width="0.8"/>
-                <path :d="curvePath" fill="none" stroke="var(--color-accent)" stroke-width="2"/>
-                <circle :cx="curve[0] * 100" :cy="100 - curve[1] * 100" r="4.5" fill="var(--color-accent)" style="cursor: grab;" @mousedown.prevent="grab(0)"/>
-                <circle :cx="curve[2] * 100" :cy="100 - curve[3] * 100" r="4.5" fill="var(--color-accent)" style="cursor: grab;" @mousedown.prevent="grab(1)"/>
-              </svg>
-              <div style="display: flex; justify-content: space-between; color: var(--color-subtle_text); font-size: 12px;"><span>time →</span><span>{{ curveName }} ({{ curve.join(', ') }})</span></div>
-              <div style="display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px;">
-                <button v-for="name in ramps" :key="name" @click="setRamp(name)" style="min-width: 0; flex: 1 1 45%;">{{ name }}</button>
-              </div>
-              <p style="margin-top: 8px; color: var(--color-subtle_text); font-size: 12px;">This is the speed ramp (time, not shape). Drag the two handles. Steep is fast, flat is slow: a curve that starts flat eases in, one that ends flat eases out.</p>
-            </div>
-          </div>`,
-      },
-      onCancel() {
-        stopPathPreview();
-      },
-      onConfirm() {
-        if (vm) save(vm);
-        stopPathPreview();
-      },
-    }).show();
   }
 
   // ---- Lights ---------------------------------------------------------------------------------------
@@ -4045,8 +3316,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
           a.link,
           '_',
           locations,
-          { name: 'Camera Settings', id: 'pose_studio_camera_menu', icon: 'photo_camera_front', children: [aspect, a.timeweather, a.follow] },
-          ...(cameraPathsOn() ? [{ name: 'Camera Path (experimental)', id: 'pose_studio_path_menu', icon: 'timeline', children: [a.camanimate, a.camanimplay, a.pathstop, '_', { name: 'Path Keys (older way)', id: 'pose_studio_path_keys_menu', icon: 'add_road', children: [a.pathkey, a.pathedit, '_', a.pathtimeline, a.pathpreview, a.pathplay] }] }] : []),
+          { name: 'Camera Settings', id: 'pose_studio_camera_menu', icon: 'photo_camera_front', children: [aspect, a.timeweather, a.follow, ...(cameraPathsOn() ? ['_', a.camanimate, a.camanimplay, a.camanimstop] : [])] },
           { name: 'Stream Deck', id: 'pose_studio_deck_menu', icon: 'grid_view', children: [a.deck, a.deckplugin] },
           '_',
           a.comparegame,
@@ -4076,8 +3346,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
           },
           { name: 'Add Camera', id: 'pose_studio_add_camera', icon: 'videocam', children: [a.grabcam, a.savecam] },
           { name: 'Lights', id: 'pose_studio_light_menu', icon: 'lightbulb', children: [a.addlight, a.lightlevel] },
-          ...(cameraPathsOn() ? [{ name: 'Camera Path (experimental)', id: 'pose_studio_path_menu', icon: 'timeline', children: [a.camanimate, a.camanimplay, a.pathstop, '_', { name: 'Path Keys (older way)', id: 'pose_studio_path_keys_menu', icon: 'add_road', children: [a.pathkey, a.pathedit, '_', a.pathtimeline, a.pathpreview, a.pathplay] }] }] : []),
-          { name: 'Camera', id: 'pose_studio_camera_menu', icon: 'photo_camera_front', children: [a.pov, a.camera, '_', a.fov, aspect, a.timeweather, '_', a.lookcam, a.follow] },
+          { name: 'Camera', id: 'pose_studio_camera_menu', icon: 'photo_camera_front', children: [a.pov, a.camera, '_', a.fov, aspect, a.timeweather, '_', a.lookcam, a.follow, ...(cameraPathsOn() ? ['_', a.camanimate, a.camanimplay, a.camanimstop] : [])] },
           '_',
           a.scan,
           a.scanmore,
@@ -4324,11 +3593,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
               <div class="ps-grid" style="margin-top: 4px" v-if="s.paths">
                 <div class="ps-btn ps-wide" @click="run('pose_studio_cam_animate')" title="Keyframe the active camera on Blockbench's timeline"><i class="material-icons">movie_filter</i><span>Animate Camera</span></div>
                 <div class="ps-btn" @click="run('pose_studio_cam_anim_play')" title="The game flies the camera's animation"><i class="material-icons">smart_display</i><span>Play in Game</span></div>
-                <div class="ps-btn" @click="run('pose_studio_path_stop')"><i class="material-icons">stop</i><span>Stop</span></div>
-                <div class="ps-btn" @click="run('pose_studio_path_timeline')" title="Scrub the path frame by frame on Blockbench's timeline"><i class="material-icons">view_timeline</i><span>Timeline</span></div>
-                <div class="ps-btn" @click="run('pose_studio_path_preview')" title="Flies the camera view along the path"><i class="material-icons">visibility</i><span>Preview</span></div>
-                <div class="ps-btn" @click="run('pose_studio_path_key')" title="A point of the camera path, where the active camera is"><i class="material-icons">add_road</i><span>Path Key</span></div>
-                <div class="ps-btn" @click="run('pose_studio_path')" title="Timings, ramps, preview and play (experimental)"><i class="material-icons">timeline</i><span>Camera Path…</span></div>
+                <div class="ps-btn" @click="run('pose_studio_cam_anim_stop')" title="Stops the animation in the game"><i class="material-icons">stop</i><span>Stop</span></div>
               </div>
               <div style="margin-top: 4px">
                 <div v-for="name in s.cameras" :key="name" class="ps-cam" :class="{ 'ps-on': name === s.camera }" @click="pickCamera(name)" :title="name === s.camera ? 'The active camera' : 'Make this the active camera'">
@@ -11112,6 +10377,17 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // <changelog>
   const CHANGELOG = [
     {
+      "version": "0.65.0",
+      "date": "2026-10-05",
+      "changes": [
+        "Camera animation (experimental): the older path keys, spline handles, the Camera Path window and the Camera Path menu are gone. Animating the camera on the timeline is the one way to do it now.",
+        "Animate Camera (Timeline), Play Animation in Minecraft and Stop Animation in Minecraft are now at the bottom of the Camera menu, and still on the panel under Cameras.",
+        "The setting is renamed Pose Studio: Camera Animation (experimental). If you had it on, it stays on.",
+        "Scenes that still have path_N groups from the old method keep them as plain groups: delete them in the outliner if you no longer want them.",
+        "Stream Deck plugin 1.6.1: sprites for the camera animation actions."
+      ]
+    },
+    {
       "version": "0.64.0",
       "date": "2026-10-05",
       "changes": [
@@ -12054,7 +11330,7 @@ ${PLUGIN_URL}`,
 
   // for the plugin's own tests only (they set this flag); nothing happens otherwise
   if (typeof globalThis !== 'undefined' && globalThis.__POSE_STUDIO_TEST) {
-    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS, sceneSpot, addLight, lightRoots, bezierEase, catmullRom, pathAt, pathLength, addPathKey, pathGameKeys, playPath, stopPath, pathRoots, bezierPoint, tendPathHandles, pathModelKeys, previewPath, cameraPathsOn, pathAnimation, onTimelineFrame, pathScrubMessage, openPathTimeline, cameraPose, sampleCameraAnimation, playCameraAnimation, animateCamera, zoomedFov };
+    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS, sceneSpot, addLight, lightRoots, stopPath, cameraPathsOn, cameraPose, sampleCameraAnimation, playCameraAnimation, animateCamera, zoomedFov };
   }
 
   Plugin.register('pose_studio', {
@@ -12078,9 +11354,6 @@ ${PLUGIN_URL}`,
         new Property(Group, 'object', 'pose_vars'),
         new Property(Group, 'number', 'pose_eq_layout'),
         new Property(Group, 'number', 'pose_light'),
-        new Property(Group, 'object', 'pose_key'),
-        new Property(Group, 'object', 'pose_path'),
-        new Property(Group, 'object', 'pose_handle'),
         new Property(Group, 'object', 'pose_mount'),
         new Property(Group, 'object', 'pose_driver'),
         new Property(Group, 'number', 'pose_skin_slot', { default: 0 }),
@@ -12091,7 +11364,6 @@ ${PLUGIN_URL}`,
       if (Blockbench.on) Blockbench.on('select_project', onProjectSelected);
       if (Blockbench.on) Blockbench.on('load_project', refreshOnLoad);
       if (Blockbench.on) Blockbench.on('undo', onBlockbenchUndo);
-      if (Blockbench.on) Blockbench.on('display_animation_frame', onTimelineFrame);
       if (Blockbench.on) Blockbench.on('redo', onBlockbenchRedo);
 
       const a = {
@@ -12259,18 +11531,6 @@ ${PLUGIN_URL}`,
           name: 'Light Level…', icon: 'brightness_medium', click: lightLevelDialog,
           description: 'How bright the selected light is (1 to 15).',
         }),
-        pathkey: new Action('pose_studio_path_key', {
-          name: 'Add Path Key', icon: 'add_road', click: () => addPathKey(),
-          description: 'Adds a key to the camera path where the active camera is (or the Blockbench view): a point the camera flies through.',
-        }),
-        pathedit: new Action('pose_studio_path', {
-          name: 'Camera Path…', icon: 'timeline', click: cameraPathDialog,
-          description: 'The timings and bezier ramps of the camera path, a preview here, and playing it in Minecraft.',
-        }),
-        pathpreview: new Action('pose_studio_path_preview', {
-          name: 'Preview Path', icon: 'visibility', click: () => previewPath(),
-          description: 'Flies the camera view (the bottom viewport) along the camera path.',
-        }),
         camanimate: new Action('pose_studio_cam_animate', {
           name: 'Animate Camera (Timeline)', icon: 'movie_filter', click: () => animateCamera(),
           description: "Opens the Animate tab with the active camera ready to keyframe: position, rotation and zoom on Blockbench's timeline, with its graph editor for the curves.",
@@ -12279,17 +11539,9 @@ ${PLUGIN_URL}`,
           name: 'Play Animation in Minecraft', icon: 'smart_display', click: () => playCameraAnimation(),
           description: "Flies the Minecraft camera through the camera's animation (the one open in the Animate tab), a frame every game tick.",
         }),
-        pathtimeline: new Action('pose_studio_path_timeline', {
-          name: 'Open in Timeline', icon: 'view_timeline', click: () => openPathTimeline(),
-          description: "Puts the camera path on Blockbench's timeline (the Animate tab): scrub or step frame by frame and the camera view, and Minecraft, show that frame.",
-        }),
-        pathplay: new Action('pose_studio_path_play', {
-          name: 'Play Path in Minecraft', icon: 'play_arrow', click: () => playPath(),
-          description: 'Flies the Minecraft camera along the camera path.',
-        }),
-        pathstop: new Action('pose_studio_path_stop', {
-          name: 'Stop Path', icon: 'stop', click: () => stopPath(),
-          description: 'Stops the camera path; the game camera follows the scene again.',
+        camanimstop: new Action('pose_studio_cam_anim_stop', {
+          name: 'Stop Animation in Minecraft', icon: 'stop', click: () => stopPath(),
+          description: 'Stops the camera animation in the game; the game camera follows the scene again.',
         }),
         comparegame: new Action('pose_studio_compare_game', {
           name: 'Compare with Game', icon: 'compare',
@@ -12358,8 +11610,8 @@ ${PLUGIN_URL}`,
           },
         }),
         setting('pose_studio_camera_paths', {
-          name: 'Pose Studio: Camera Paths (experimental)', type: 'toggle', value: cameraPathsOn(),
-          description: 'Adds camera paths: keys the game camera flies through, with spline handles in the viewport, timings and speed ramps (the Camera Path menu, and the panel under Cameras).',
+          name: 'Pose Studio: Camera Animation (experimental)', type: 'toggle', value: cameraPathsOn(),
+          description: "Adds Animate Camera and Play Animation in Minecraft (the Camera menu, and the panel under Cameras): keyframe a camera on Blockbench's timeline and the game flies it.",
           onChange: (value) => {
             try {
               localStorage.setItem(CAMERA_PATHS_KEY, value ? '1' : '0');
@@ -12407,13 +11659,6 @@ ${PLUGIN_URL}`,
         checkForUpdates(false).catch(() => {});
         removeSunTiltLighting();
         if (deckToggle && deckToggle.value) setDeckLink(true);
-        pathLineTimer = setInterval(() => {
-          try {
-            updatePathLines();
-          } catch (e) {
-            // drawn again next time
-          }
-        }, 400);
         try {
           if (typeof Project !== 'undefined' && Project) refreshOldEquipment();
         } catch (e) {
@@ -12427,13 +11672,9 @@ ${PLUGIN_URL}`,
       if (Blockbench.removeListener) Blockbench.removeListener('select_project', onProjectSelected);
       if (Blockbench.removeListener) Blockbench.removeListener('load_project', refreshOnLoad);
       if (Blockbench.removeListener) Blockbench.removeListener('undo', onBlockbenchUndo);
-      if (Blockbench.removeListener) Blockbench.removeListener('display_animation_frame', onTimelineFrame);
       if (Blockbench.removeListener) Blockbench.removeListener('redo', onBlockbenchRedo);
       deck.stop();
-      if (pathLineTimer) clearInterval(pathLineTimer);
-      pathLineTimer = null;
-      stopPathPreview();
-      removePathLines();
+      endPathPlay();
       removePosePanel();
       menuParts = null;
       if (startupTimer) clearTimeout(startupTimer);

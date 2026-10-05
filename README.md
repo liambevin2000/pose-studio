@@ -116,27 +116,19 @@ Cameras, their FOVs and the scan are saved with your Blockbench project. Turning
 
 After editing files in `packs/`, bump the `version` in both manifests and run `node build-mcaddon.js` before re-importing, or copy the folders into `development_behavior_packs` and `development_resource_packs` so changes load without version bumps.
 
-## Camera paths (experimental)
+## Camera animation (experimental)
 
-Fly the game camera along a path, for recording. Turn it on in **File ▸ Preferences ▸ Settings ▸ Pose Studio: Camera Paths (experimental)**.
+Animate a camera on Blockbench's timeline and have the game fly it, for recording. Turn it on in **File ▸ Preferences ▸ Settings ▸ Pose Studio: Camera Animation (experimental)**.
 
-**Animate the camera on the timeline.** With a camera active, **Camera Path ▸ Animate Camera (Timeline)** opens Blockbench's Animate tab with that camera selected in a `camera_shot` animation.
+With a camera active, **Camera ▸ Animate Camera (Timeline)** opens Blockbench's Animate tab with that camera selected in a `camera_shot` animation.
 
 - Move the playhead, move or turn the camera, and add a Position or Rotation keyframe. Set the animation's length in its properties.
 - For ramps, set keyframes to Bezier (or Smooth) and shape the curves in the timeline's graph editor.
 - Scale the camera to zoom: scale 2 is twice the zoom.
 - The camera view at the bottom follows the playhead; with Sync Game Camera on, so does Minecraft.
-- **Play Animation in Minecraft** samples the animation every game tick and the game flies it. **Stop** ends it.
+- **Play Animation in Minecraft** samples the animation every game tick and the game flies it. **Stop Animation in Minecraft** ends it.
 
-**Path keys (the older way)**, under Camera Path ▸ Path Keys:
-
-1. Look through a camera (or move the Blockbench view) to where the path starts: **Camera Path ▸ Add Path Key**. Do the same for each point along the way. The keys are a `path_1` group of `key_N` groups; move and turn them like cameras, drag them in the outliner to reorder.
-2. **Bend the path in the viewport.** Each key has two handles, `key_N_in` and `key_N_out`: drag one with the move tool and the path bends there (the other swings opposite it). Untouched handles shape themselves. The yellow line is the path.
-3. **Camera Path ▸ Camera Path…**: the seconds to reach each key, the FOV at it, and the speed ramp of each stretch and of the whole path (a bezier: drag its two handles, or pick a preset). *Set the times* fills them in for one speed.
-4. **Open in Timeline** puts the path on Blockbench's timeline (the Animate tab): scrub, step frame by frame or play, and the camera view shows that frame; with Sync Game Camera on, so does Minecraft. One frame is one game tick.
-5. **Preview Path** flies the camera view (the bottom POV viewport) along it. **Play in Minecraft** makes the game fly the camera (a step every tick, eased between ticks). **Stop** ends either.
-
-Minecraft's camera can't roll, so paths have direction but no tilt.
+Minecraft's camera can't roll, so the game shows direction but no tilt.
 
 ## Moving structures
 

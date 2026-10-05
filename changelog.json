@@ -1,5 +1,16 @@
 [
   {
+    "version": "0.65.0",
+    "date": "2026-10-05",
+    "changes": [
+      "Camera animation (experimental): the older path keys, spline handles, the Camera Path window and the Camera Path menu are gone. Animating the camera on the timeline is the one way to do it now.",
+      "Animate Camera (Timeline), Play Animation in Minecraft and Stop Animation in Minecraft are now at the bottom of the Camera menu, and still on the panel under Cameras.",
+      "The setting is renamed Pose Studio: Camera Animation (experimental). If you had it on, it stays on.",
+      "Scenes that still have path_N groups from the old method keep them as plain groups: delete them in the outliner if you no longer want them.",
+      "Stream Deck plugin 1.6.1: sprites for the camera animation actions."
+    ]
+  },
+  {
     "version": "0.64.0",
     "date": "2026-10-05",
     "changes": [
