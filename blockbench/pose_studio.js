@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.63.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.64.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -369,6 +369,31 @@
     const r = group.rotation;
     return new THREE.Vector3(0, 0, -1).applyEuler(new THREE.Euler(r[0] * DEG, r[1] * DEG, r[2] * DEG, eulerOrder()));
   }
+
+  // Where a camera is and looks, in model space: { pos, forward (unit), zoom }. In the Edit tab
+  // that's the camera group as you placed it. In the Animate tab it's the camera as the timeline
+  // has it at this frame (Blockbench moves the group's scene object for the keyframes), so the
+  // camera view and the game show the animation as you scrub. Scaling the camera in an animation
+  // zooms: scale 2 halves the field of view.
+  function cameraPose(cam) {
+    const animated = typeof Modes !== 'undefined' && Modes.animate && cam.mesh && cam.mesh.getWorldPosition;
+    if (!animated) return { pos: new THREE.Vector3().fromArray(cam.origin), forward: cameraForward(cam), zoom: 1 };
+    const space = modelSpace();
+    cam.mesh.updateWorldMatrix(true, false);
+    const pos = cam.mesh.getWorldPosition(new THREE.Vector3());
+    const turn = cam.mesh.getWorldQuaternion(new THREE.Quaternion());
+    const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(turn);
+    if (space && space.worldToLocal) {
+      const tip = pos.clone().add(forward);
+      space.worldToLocal(pos);
+      space.worldToLocal(tip);
+      forward.copy(tip.sub(pos)).normalize();
+    }
+    const scale = cam.mesh.scale ? Math.abs(cam.mesh.scale.x) : 1;
+    return { pos, forward, zoom: scale > 0.01 ? scale : 1 };
+  }
+  // the field of view a camera has at a zoom
+  const zoomedFov = (fov, zoom) => round(Math.max(1, Math.min(170, fov / (zoom || 1))), 2);
 
   // ---- Rotating several things together --------------------------------------------------------
   // Blockbench turns each selected group around its own pivot. With two or more mannequins,
@@ -858,8 +883,9 @@
     }
     if (!cam) return;
     const space = modelSpace();
-    const pos = new THREE.Vector3().fromArray(cam.origin);
-    const target = pos.clone().add(cameraForward(cam).multiplyScalar(32));
+    const pose = cameraPose(cam);
+    const pos = pose.pos.clone();
+    const target = pos.clone().add(pose.forward.clone().multiplyScalar(32));
     if (space) {
       space.localToWorld(pos);
       space.localToWorld(target);
@@ -867,7 +893,7 @@
     povPreview.camera.position.copy(pos);
     povPreview.controls.target.copy(target);
     povPreview.camera.lookAt(target);
-    const fov = cam.pose_fov || mainViewportFov();
+    const fov = zoomedFov(cam.pose_fov || mainViewportFov(), pose.zoom);
     if (povPreview.camera.fov !== fov && povPreview.setFOV) povPreview.setFOV(fov);
   }
 
@@ -1516,9 +1542,10 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
     const fov = preview && !preview.isOrtho && preview.camera && preview.camera.fov ? round(preview.camera.fov, 1) : undefined;
     const cam = activeCamera();
     if (cam) {
-      const origin = new THREE.Vector3().fromArray(cam.origin);
-      const target = origin.clone().add(cameraForward(cam).multiplyScalar(160));
-      return JSON.stringify({ p: toWorld(origin.toArray()), t: toWorld(target.toArray()), f: cam.pose_fov || fov });
+      const pose = cameraPose(cam);
+      const target = pose.pos.clone().add(pose.forward.clone().multiplyScalar(160));
+      const camFov = cam.pose_fov || fov;
+      return JSON.stringify({ p: toWorld(pose.pos.toArray()), t: toWorld(target.toArray()), f: camFov ? zoomedFov(camFov, pose.zoom) : camFov });
     }
     if (!preview || !preview.camera || !preview.controls) return null;
     const space = modelSpace();
@@ -3569,6 +3596,113 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     return JSON.stringify({ p: toWorld(s.p), t: toWorld(target), f: round(s.f, 1) });
   }
 
+  // ---- animating a camera like any animation software ----
+  // Camera Path ▸ Animate Camera: the Animate tab opens with the active camera selected, in an
+  // animation of its own. Keyframe its position and rotation on the timeline (and its scale, to
+  // zoom), set the keyframes' interpolation to bezier and shape the curves in Blockbench's graph
+  // editor. The camera view and the game follow the playhead. Play Animation in Minecraft samples
+  // the animation once a game tick and has the game fly it.
+  const CAMERA_ANIMATION = 'camera_shot';
+
+  async function animateCamera() {
+    const cam = activeCamera();
+    const Anim = blockbenchAnimation();
+    if (!cam) {
+      Blockbench.showQuickMessage('Add a camera first (it becomes the camera you animate)', 3000);
+      return;
+    }
+    if (!Anim || typeof Modes === 'undefined' || !Modes.options || !Modes.options.animate) {
+      Blockbench.showMessageBox({ title: 'Pose Studio: animate camera', message: "This Blockbench doesn't offer the Animate tab for this project." });
+      return;
+    }
+    if (povToggle && !povToggle.value) {
+      povToggle.set(true);
+      await sleep(400);
+    }
+    // an animation of ours unless you're already working in one
+    let anim = Anim.selected && !String(Anim.selected.name).startsWith(TIMELINE_PREFIX) ? Anim.selected : (Anim.all || []).find((a) => a.name === CAMERA_ANIMATION);
+    if (!anim) {
+      anim = new Anim({ name: CAMERA_ANIMATION, loop: 'once', length: 5, snapping: 20 });
+      anim.add(false);
+    }
+    Modes.options.animate.select();
+    if (anim.select) anim.select();
+    try {
+      if (typeof unselectAllElements === 'function') unselectAllElements();
+      if (cam.select) cam.select(); // its channels show in the timeline
+    } catch (e) {
+      // select it in the outliner
+    }
+    Blockbench.showMessageBox({
+      title: 'Animate Camera',
+      message:
+        `${cam.name} is ready to animate in "${anim.name}".\n\n` +
+        '• Move the playhead, then move or turn the camera: add a Position or Rotation keyframe (the + next to the channel) for each pose.\n' +
+        "• For smooth ramps, select keyframes and set their interpolation to Bezier (or Smooth), then shape the curves in the timeline's graph editor.\n" +
+        '• Scale the camera to zoom: scale 2 is twice the zoom.\n' +
+        '• The camera view at the bottom, and Minecraft with Sync Game Camera on, follow the playhead.\n\n' +
+        'When it looks right: Camera Path ▸ Play Animation in Minecraft.',
+    });
+  }
+
+  // The camera's animation, sampled every game tick: [{ p, dir, f }] in the game's terms.
+  function sampleCameraAnimation(cam, anim) {
+    const step = 0.05;
+    const length = Math.max(step, Number(anim.length) || 0);
+    const count = Math.round(length / step) + 1;
+    const baseFov = cam.pose_fov || mainViewportFov();
+    const was = Timeline.time;
+    const samples = [];
+    try {
+      for (let i = 0; i < count; i++) {
+        Timeline.setTime(Math.min(i * step, length), true);
+        Animator.preview();
+        const pose = cameraPose(cam);
+        samples.push({ p: toWorld(pose.pos.toArray()), dir: [-pose.forward.x, pose.forward.y, -pose.forward.z].map((v) => round(v, 4)), f: zoomedFov(baseFov, pose.zoom) });
+      }
+    } finally {
+      Timeline.setTime(was, true);
+      Animator.preview();
+    }
+    return samples;
+  }
+
+  async function playCameraAnimation() {
+    if (!requireConnection()) return false;
+    const cam = activeCamera();
+    const Anim = blockbenchAnimation();
+    const anim = Anim && (Anim.selected || (Anim.all || []).find((a) => a.name === CAMERA_ANIMATION));
+    if (!cam || !anim || typeof Timeline === 'undefined' || typeof Animator === 'undefined') {
+      Blockbench.showQuickMessage(!cam ? 'There is no active camera' : 'Animate the camera first (Camera Path ▸ Animate Camera)', 3000);
+      return false;
+    }
+    if (typeof Modes !== 'undefined' && !Modes.animate) {
+      Blockbench.showQuickMessage('Open the Animate tab to play the animation (Camera Path ▸ Animate Camera)', 3500);
+      return false;
+    }
+    const samples = sampleCameraAnimation(cam, anim);
+    if (samples.length < 2) return false;
+    endPathPlay();
+    pathPlaying = true;
+    Blockbench.showQuickMessage(`Sending ${samples.length} frames to Minecraft…`, 2000);
+    try {
+      await link.command(`scriptevent pose:path ${JSON.stringify({ n: samples.length, step: 0.05, ramp: [0, 0, 1, 1], loop: anim.loop === 'loop' ? 1 : 0, hud: 1 })}`);
+      const PER = 4; // samples a message (a message stays well under Minecraft's command length)
+      for (let i = 0; i < samples.length; i += PER) {
+        const flat = [];
+        for (const s of samples.slice(i, i + PER)) flat.push(...s.p, ...s.dir, s.f);
+        await link.command(`scriptevent pose:pathsamples ${JSON.stringify({ i, s: flat })}`);
+      }
+      await link.command('scriptevent pose:pathplay {"t":0}');
+    } catch (e) {
+      endPathPlay();
+      Blockbench.showMessageBox({ title: 'Pose Studio: camera animation', message: `Minecraft didn't take the animation: ${e.message || e}\n\nUpdate the Minecraft packs (Check for Updates, then reopen the world).` });
+      return false;
+    }
+    if (anim.loop !== 'loop') pathPlayTimer = setTimeout(endPathPlay, ((samples.length - 1) * 0.05 + 1.5) * 1000);
+    return true;
+  }
+
   // The path as Minecraft gets it: positions as block offsets from the anchor, directions in the
   // world's axes.
   function pathGameKeys(path) {
@@ -3912,7 +4046,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
           '_',
           locations,
           { name: 'Camera Settings', id: 'pose_studio_camera_menu', icon: 'photo_camera_front', children: [aspect, a.timeweather, a.follow] },
-          ...(cameraPathsOn() ? [{ name: 'Camera Path (experimental)', id: 'pose_studio_path_menu', icon: 'timeline', children: [a.pathkey, a.pathedit, '_', a.pathtimeline, a.pathpreview, a.pathplay, a.pathstop] }] : []),
+          ...(cameraPathsOn() ? [{ name: 'Camera Path (experimental)', id: 'pose_studio_path_menu', icon: 'timeline', children: [a.camanimate, a.camanimplay, a.pathstop, '_', { name: 'Path Keys (older way)', id: 'pose_studio_path_keys_menu', icon: 'add_road', children: [a.pathkey, a.pathedit, '_', a.pathtimeline, a.pathpreview, a.pathplay] }] }] : []),
           { name: 'Stream Deck', id: 'pose_studio_deck_menu', icon: 'grid_view', children: [a.deck, a.deckplugin] },
           '_',
           a.comparegame,
@@ -3942,7 +4076,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
           },
           { name: 'Add Camera', id: 'pose_studio_add_camera', icon: 'videocam', children: [a.grabcam, a.savecam] },
           { name: 'Lights', id: 'pose_studio_light_menu', icon: 'lightbulb', children: [a.addlight, a.lightlevel] },
-          ...(cameraPathsOn() ? [{ name: 'Camera Path (experimental)', id: 'pose_studio_path_menu', icon: 'timeline', children: [a.pathkey, a.pathedit, '_', a.pathtimeline, a.pathpreview, a.pathplay, a.pathstop] }] : []),
+          ...(cameraPathsOn() ? [{ name: 'Camera Path (experimental)', id: 'pose_studio_path_menu', icon: 'timeline', children: [a.camanimate, a.camanimplay, a.pathstop, '_', { name: 'Path Keys (older way)', id: 'pose_studio_path_keys_menu', icon: 'add_road', children: [a.pathkey, a.pathedit, '_', a.pathtimeline, a.pathpreview, a.pathplay] }] }] : []),
           { name: 'Camera', id: 'pose_studio_camera_menu', icon: 'photo_camera_front', children: [a.pov, a.camera, '_', a.fov, aspect, a.timeweather, '_', a.lookcam, a.follow] },
           '_',
           a.scan,
@@ -4188,6 +4322,9 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
               </div>
               <div class="ps-note" v-if="!s.cameras.length">No cameras yet: add one above.</div>
               <div class="ps-grid" style="margin-top: 4px" v-if="s.paths">
+                <div class="ps-btn ps-wide" @click="run('pose_studio_cam_animate')" title="Keyframe the active camera on Blockbench's timeline"><i class="material-icons">movie_filter</i><span>Animate Camera</span></div>
+                <div class="ps-btn" @click="run('pose_studio_cam_anim_play')" title="The game flies the camera's animation"><i class="material-icons">smart_display</i><span>Play in Game</span></div>
+                <div class="ps-btn" @click="run('pose_studio_path_stop')"><i class="material-icons">stop</i><span>Stop</span></div>
                 <div class="ps-btn" @click="run('pose_studio_path_timeline')" title="Scrub the path frame by frame on Blockbench's timeline"><i class="material-icons">view_timeline</i><span>Timeline</span></div>
                 <div class="ps-btn" @click="run('pose_studio_path_preview')" title="Flies the camera view along the path"><i class="material-icons">visibility</i><span>Preview</span></div>
                 <div class="ps-btn" @click="run('pose_studio_path_key')" title="A point of the camera path, where the active camera is"><i class="material-icons">add_road</i><span>Path Key</span></div>
@@ -10159,7 +10296,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     return { id: idItem.slice(2), name: scene.world || '', anchor: point('A|'), player: point('P|'), locations, removed: scene.removed || [], protocol: version ? Number(version.slice(2)) : 0 };
   }
 
-  const EXPECTED_PACK_PROTOCOL = 23; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
+  const EXPECTED_PACK_PROTOCOL = 24; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
   let warnedOldPack = false;
 
   // Scene files in the scenes folders that belong to a world (their pose_world says so), as
@@ -10974,6 +11111,17 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.64.0",
+      "date": "2026-10-05",
+      "changes": [
+        "Camera paths (experimental): animate the camera on Blockbench's timeline, like any animation software. Camera Path ▸ Animate Camera opens the Animate tab with the active camera selected in a camera_shot animation. Add Position and Rotation keyframes to it on the timeline, set keyframes to Bezier or Smooth, and shape the curves in Blockbench's graph editor.",
+        "The camera view at the bottom follows the playhead as you scrub, step or play, and so does Minecraft with Sync Game Camera on. Scale the camera in the animation to zoom: scale 2 is twice the zoom.",
+        "Play Animation in Minecraft reads the animation once per game tick (20 a second) and has the game fly exactly that, so whatever curves you draw are what you get. Animations can be up to 5 minutes long, and a looping animation loops in the game.",
+        "The path keys and handles from before are still there, under Camera Path ▸ Path Keys (older way).",
+        "Update the Minecraft packs with this version (Check for Updates, then reopen the world)."
+      ]
+    },
     {
       "version": "0.63.0",
       "date": "2026-10-05",
@@ -11906,7 +12054,7 @@ ${PLUGIN_URL}`,
 
   // for the plugin's own tests only (they set this flag); nothing happens otherwise
   if (typeof globalThis !== 'undefined' && globalThis.__POSE_STUDIO_TEST) {
-    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS, sceneSpot, addLight, lightRoots, bezierEase, catmullRom, pathAt, pathLength, addPathKey, pathGameKeys, playPath, stopPath, pathRoots, bezierPoint, tendPathHandles, pathModelKeys, previewPath, cameraPathsOn, pathAnimation, onTimelineFrame, pathScrubMessage, openPathTimeline };
+    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS, sceneSpot, addLight, lightRoots, bezierEase, catmullRom, pathAt, pathLength, addPathKey, pathGameKeys, playPath, stopPath, pathRoots, bezierPoint, tendPathHandles, pathModelKeys, previewPath, cameraPathsOn, pathAnimation, onTimelineFrame, pathScrubMessage, openPathTimeline, cameraPose, sampleCameraAnimation, playCameraAnimation, animateCamera, zoomedFov };
   }
 
   Plugin.register('pose_studio', {
@@ -12122,6 +12270,14 @@ ${PLUGIN_URL}`,
         pathpreview: new Action('pose_studio_path_preview', {
           name: 'Preview Path', icon: 'visibility', click: () => previewPath(),
           description: 'Flies the camera view (the bottom viewport) along the camera path.',
+        }),
+        camanimate: new Action('pose_studio_cam_animate', {
+          name: 'Animate Camera (Timeline)', icon: 'movie_filter', click: () => animateCamera(),
+          description: "Opens the Animate tab with the active camera ready to keyframe: position, rotation and zoom on Blockbench's timeline, with its graph editor for the curves.",
+        }),
+        camanimplay: new Action('pose_studio_cam_anim_play', {
+          name: 'Play Animation in Minecraft', icon: 'smart_display', click: () => playCameraAnimation(),
+          description: "Flies the Minecraft camera through the camera's animation (the one open in the Animate tab), a frame every game tick.",
         }),
         pathtimeline: new Action('pose_studio_path_timeline', {
           name: 'Open in Timeline', icon: 'view_timeline', click: () => openPathTimeline(),

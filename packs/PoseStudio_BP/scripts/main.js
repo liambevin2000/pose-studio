@@ -427,6 +427,7 @@ function removeAllLights() {
 // eased so it's smooth between ticks.
 //   pose:path {"n":keys,"ramp":[x1,y1,x2,y2],"loop":0|1,"hud":0|1}   a new path (empty)
 //   pose:pathkey {"i":index,"k":[x,y,z, dx,dy,dz, fov, seconds, e1,e2,e3,e4, ox,oy,oz, ix,iy,iz]}
+//   pose:pathsamples {"i":index,"s":[…]}            a sampled animation instead of keys (see below)
 //   pose:pathplay {"t":seconds to start from}      pose:pathstop
 // A cubic-bezier ramp as in CSS / After Effects: e = [x1, y1, x2, y2], the two handles of a curve
 // from (0,0) to (1,1). Given how far through the time you are (u, 0-1), how far along you are.
@@ -561,8 +562,22 @@ function playPath(player, data) {
 
 function setPath(data) {
   stopPath();
-  const n = Math.max(0, Math.min(200, Number(data.n) || 0));
-  cameraPath = { keys: new Array(n).fill(null), ramp: Array.isArray(data.ramp) ? data.ramp.map(Number) : [0, 0, 1, 1], loop: !!data.loop, hud: !!data.hud };
+  const n = Math.max(0, Math.min(6000, Number(data.n) || 0)); // 5 minutes of samples at most
+  cameraPath = { keys: new Array(n).fill(null), ramp: Array.isArray(data.ramp) ? data.ramp.map(Number) : [0, 0, 1, 1], loop: !!data.loop, hud: !!data.hud, step: Math.max(0.01, Number(data.step) || 0.05) };
+}
+
+// `pose:pathsamples {"i":index,"s":[x,y,z, dx,dy,dz, fov, …]}` — an animation sampled every `step`
+// seconds (see pose:path): seven numbers a sample, several samples a message. Each is a key a step
+// after the one before, in a straight line, so the game flies exactly what Blockbench animated.
+function setPathSamples(data) {
+  const s = data.s;
+  if (!cameraPath || !Array.isArray(s)) return;
+  const first = Number(data.i) || 0;
+  for (let n = 0; n * 7 + 6 < s.length; n++) {
+    const v = s.slice(n * 7, n * 7 + 7).map(Number);
+    const index = first + n;
+    cameraPath.keys[index] = { p: v.slice(0, 3), dir: v.slice(3, 6), f: v[6], d: index ? cameraPath.step : 0, e: [0, 0, 1, 1], o: [0, 0, 0], i: [0, 0, 0] };
+  }
 }
 
 function setPathKey(data) {
@@ -896,7 +911,7 @@ function debug(player) {
 // Every name looks like `PSD[op|page|item]`; page 0 always carries
 // `M|ready|<pages>|<items>|<items per page>` or `M|busy|<percent>`.
 // What this script understands; Blockbench warns when the world runs an older one.
-const PACK_PROTOCOL = 23;
+const PACK_PROTOCOL = 24;
 const IO_OBJECTIVE = "pose_io";
 const ITEMS_PER_PAGE = 30;
 const MAX_PAGES_PER_BATCH = 16;
@@ -1654,6 +1669,8 @@ function handle(ev) {
       return setPath(data);
     case "pose:pathkey":
       return setPathKey(data);
+    case "pose:pathsamples":
+      return setPathSamples(data);
     case "pose:pathplay":
       return playPath(player, data);
     case "pose:pathstop":

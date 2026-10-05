@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.64.0 (2026-10-05)
+
+- Camera paths (experimental): animate the camera on Blockbench's timeline, like any animation software. Camera Path ▸ Animate Camera opens the Animate tab with the active camera selected in a camera_shot animation. Add Position and Rotation keyframes to it on the timeline, set keyframes to Bezier or Smooth, and shape the curves in Blockbench's graph editor.
+- The camera view at the bottom follows the playhead as you scrub, step or play, and so does Minecraft with Sync Game Camera on. Scale the camera in the animation to zoom: scale 2 is twice the zoom.
+- Play Animation in Minecraft reads the animation once per game tick (20 a second) and has the game fly exactly that, so whatever curves you draw are what you get. Animations can be up to 5 minutes long, and a looping animation loops in the game.
+- The path keys and handles from before are still there, under Camera Path ▸ Path Keys (older way).
+- Update the Minecraft packs with this version (Check for Updates, then reopen the world).
+
 ## 0.63.0 (2026-10-05)
 
 - Camera paths (experimental): Open in Timeline. It puts the path on Blockbench's own timeline: the Animate tab opens with an animation as long as the path and a marker at every key. Scrub the playhead, step frame by frame or press play, and the camera view at the bottom shows that exact moment of the path.
