@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.60.1 (2026-10-05)
+
+- Light Level… is a slider now, from 0 to 15, and Minecraft follows as you drag it. 0 turns the light off: its light block is taken away and the marker stays, so you can turn it back up later. Cancel puts the level back as it was.
+
 ## 0.60.0 (2026-10-05)
 
 - New: lights. Add Light (in the menu under Lights, or on the panel under Scene) adds a light to the scene: a small marker in Blockbench, an invisible light block in Minecraft in the block the marker is in. Move the marker and the light block moves with it; delete it and the light block is taken away.

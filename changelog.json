@@ -1,5 +1,12 @@
 [
   {
+    "version": "0.60.1",
+    "date": "2026-10-05",
+    "changes": [
+      "Light Level… is a slider now, from 0 to 15, and Minecraft follows as you drag it. 0 turns the light off: its light block is taken away and the marker stays, so you can turn it back up later. Cancel puts the level back as it was."
+    ]
+  },
+  {
     "version": "0.60.0",
     "date": "2026-10-05",
     "changes": [

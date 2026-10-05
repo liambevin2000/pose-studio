@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.60.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.60.1'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -1605,10 +1605,11 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
       const id = mannequinId(light.name);
       if (seen.has(id)) continue;
       seen.add(id);
-      const msg = lightMessage(light);
+      const off = lightLevel(light) === 0;
+      const msg = off ? 'off' : lightMessage(light);
       if (lastSent.get(id) === msg) continue;
       if (link.inFlight >= MAX_IN_FLIGHT) return;
-      send(`scriptevent pose:light ${msg}`);
+      send(off ? `scriptevent pose:remove ${JSON.stringify({ id })}` : `scriptevent pose:light ${msg}`);
       lastSent.set(id, msg);
     }
     for (const id of Array.from(lastSent.keys())) {
@@ -3094,20 +3095,37 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
       Blockbench.showQuickMessage('Select a light (light_) first', 2000);
       return;
     }
+    // a slider from 0 (off: the marker stays, the light block goes) to 15; the game follows as you drag
+    const before = lightLevel(light);
+    const set = (value) => {
+      light.pose_light = Math.max(0, Math.min(15, Math.round(Number(value) || 0)));
+    };
     new Dialog({
       id: 'pose_studio_light_level',
       title: `Light Level: ${light.name}`,
-      form: { level: { label: 'Level (1 dim, 15 brightest)', type: 'number', value: light.pose_light || 15, min: 1, max: 15, step: 1 } },
+      form: { level: { label: 'Level (0 off, 15 brightest)', type: 'range', min: 0, max: 15, step: 1, value: before, editable_range_label: true } },
+      onFormChange(form) {
+        set(form.level);
+      },
       onConfirm(form) {
-        light.pose_light = Math.max(1, Math.min(15, Math.round(Number(form.level) || 15)));
+        set(form.level);
         if (typeof Project !== 'undefined' && Project) Project.saved = false;
-        Blockbench.showQuickMessage(`${light.name}: level ${light.pose_light}`, 2000);
+        Blockbench.showQuickMessage(light.pose_light ? `${light.name}: level ${light.pose_light}` : `${light.name} is off`, 2000);
+      },
+      onCancel() {
+        set(before);
       },
     }).show();
   }
 
+  // 0 (off) to 15; a light that was never given a level is 15
+  function lightLevel(light) {
+    const v = light.pose_light;
+    return typeof v === 'number' && Number.isFinite(v) ? Math.max(0, Math.min(15, Math.round(v))) : 15;
+  }
+
   function lightMessage(light) {
-    return JSON.stringify({ id: mannequinId(light.name), p: toWorld(light.origin), l: light.pose_light || 15 });
+    return JSON.stringify({ id: mannequinId(light.name), p: toWorld(light.origin), l: lightLevel(light) });
   }
 
   // ---- Classic menu or the panel (experimental) ------------------------------------------------------
@@ -3275,7 +3293,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     const active = hasProject ? activeCamera() : null;
     const light = hasProject ? selectedLight() : null;
     return {
-      light: light ? light.pose_light || 15 : 0,
+      light: light ? lightLevel(light) : -1,
       linkOn: !!(linkToggle && linkToggle.value),
       connected: !!link.connected,
       world: (connectedWorld && connectedWorld.name) || '',
@@ -3385,7 +3403,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
             <div v-show="!folded.selected">
               <div class="ps-note" v-if="!s.kind">Select a player, a mob, a camera or a light.</div>
               <div class="ps-grid" v-if="s.kind === 'light'">
-                <div class="ps-btn ps-wide" @click="run('pose_studio_light_level')"><i class="material-icons">brightness_medium</i><span>Light Level… ({{ s.light }})</span></div>
+                <div class="ps-btn ps-wide" @click="run('pose_studio_light_level')"><i class="material-icons">brightness_medium</i><span>Light Level… ({{ s.light === 0 ? 'off' : s.light }})</span></div>
               </div>
               <div class="ps-grid" v-if="s.kind === 'player'">
                 <div class="ps-btn ps-wide" @click="run('pose_studio_outfit')"><i class="material-icons">checkroom</i><span>Skin &amp; Equipment…</span></div>
@@ -10193,6 +10211,13 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.60.1",
+      "date": "2026-10-05",
+      "changes": [
+        "Light Level… is a slider now, from 0 to 15, and Minecraft follows as you drag it. 0 turns the light off: its light block is taken away and the marker stays, so you can turn it back up later. Cancel puts the level back as it was."
+      ]
+    },
     {
       "version": "0.60.0",
       "date": "2026-10-05",
