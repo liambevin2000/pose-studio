@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.58.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.58.1'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -8962,19 +8962,21 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // On connect: freeze the day/night and weather cycles (remembering how they were).
   async function freezeWorldClock() {
     if (!freezeEnabled || !link.connected) return;
-    if (!frozenRules) {
-      frozenRules = { dodaylightcycle: await readGamerule('dodaylightcycle'), doweathercycle: await readGamerule('doweathercycle') };
-    }
+    const now = { dodaylightcycle: await readGamerule('dodaylightcycle'), doweathercycle: await readGamerule('doweathercycle') };
+    // Kept from a connection that was lost before the cycles could be put back: still right if this
+    // world is as we left it (both frozen). A world where they run is another world (or was reset).
+    const asWeLeftIt = now.dodaylightcycle === false && now.doweathercycle === false;
+    if (!frozenRules || !asWeLeftIt) frozenRules = now;
     await link.command('gamerule dodaylightcycle false').catch(logFailure);
     await link.command('gamerule doweathercycle false').catch(logFailure);
   }
 
   // On disconnect (or when the setting is turned off): the cycles run again if they did before.
   async function unfreezeWorldClock() {
-    if (!frozenRules || !link.connected) {
-      frozenRules = null;
-      return;
-    }
+    if (!frozenRules) return;
+    // the connection is gone: nothing can be put back now. How the cycles were is kept, so they're
+    // put back the next time this world is connected and then disconnected properly.
+    if (!link.connected) return;
     for (const [rule, value] of Object.entries(frozenRules)) {
       if (value === true) await link.command(`gamerule ${rule} true`).catch(logFailure); // only what we know was on
     }
@@ -10027,6 +10029,13 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.58.1",
+      "date": "2026-10-05",
+      "changes": [
+        "Fixed: after the connection to Minecraft was lost (the world closed), Pose Studio forgot how the day and weather cycles were set before it froze them. Reconnecting and then disconnecting normally left them frozen. It now remembers, and puts them back the next time you disconnect from that world."
+      ]
+    },
     {
       "version": "0.58.0",
       "date": "2026-10-05",

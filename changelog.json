@@ -1,5 +1,12 @@
 [
   {
+    "version": "0.58.1",
+    "date": "2026-10-05",
+    "changes": [
+      "Fixed: after the connection to Minecraft was lost (the world closed), Pose Studio forgot how the day and weather cycles were set before it froze them. Reconnecting and then disconnecting normally left them frozen. It now remembers, and puts them back the next time you disconnect from that world."
+    ]
+  },
+  {
     "version": "0.58.0",
     "date": "2026-10-05",
     "changes": [

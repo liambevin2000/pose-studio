@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.58.1 (2026-10-05)
+
+- Fixed: after the connection to Minecraft was lost (the world closed), Pose Studio forgot how the day and weather cycles were set before it froze them. Reconnecting and then disconnecting normally left them frozen. It now remembers, and puts them back the next time you disconnect from that world.
+
 ## 0.58.0 (2026-10-05)
 
 - Fixed: a location whose scene was built away from where the location was set didn't load its players and mobs until you walked there. Opening a location now takes you to where the scene actually is (the middle of its players and mobs, or its cameras if there are none), and Minecraft keeps that area loaded instead of the area around the location's starting point.
