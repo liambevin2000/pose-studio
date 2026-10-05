@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.63.0 (2026-10-05)
+
+- Camera paths (experimental): Open in Timeline. It puts the path on Blockbench's own timeline: the Animate tab opens with an animation as long as the path and a marker at every key. Scrub the playhead, step frame by frame or press play, and the camera view at the bottom shows that exact moment of the path.
+- With Sync Game Camera on, Minecraft follows the playhead too, so you can check any frame in the real game. The timeline runs at 20 frames a second, one frame per game tick, the same steps the game takes when it plays the path.
+- Change timings or move keys and the animation's length and markers follow the next time you open it in the timeline. Back in the Edit tab, the camera view and the game follow the active camera again. Open in Timeline is in the Camera Path menu, on the panel, and a button in the Camera Path window.
+
 ## 0.62.0 (2026-10-05)
 
 - Camera paths are now an experimental setting, off by default: File > Preferences > Settings > Pose Studio: Camera Paths (experimental). Off, the Camera Path menu, its panel buttons and the path lines are hidden.

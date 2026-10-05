@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.62.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.63.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -1622,7 +1622,7 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
     sendStructureTarget();
 
     if (cameraSync && !shooting && !pathPlaying && link.inFlight < MAX_IN_FLIGHT) {
-      const cam = cameraMessage();
+      const cam = pathScrubMessage() || cameraMessage();
       if (cam && cam !== lastCamera) {
         send(`scriptevent pose:cam ${cam}`);
         lastCamera = cam;
@@ -3452,6 +3452,123 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     pathPreview = requestAnimationFrame(frame);
   }
 
+  // ---- the path on Blockbench's timeline ----
+  // Camera Path ▸ Open in Timeline: the path becomes an animation of Blockbench's own (as long as the
+  // path, a marker at every key, 20 frames a second: one per game tick) and the Animate tab opens.
+  // Scrub, step frame by frame or play there, and the camera view shows that moment of the path;
+  // with Sync Game Camera on, so does Minecraft. Back in Edit, the camera view follows the active
+  // camera again.
+  const TIMELINE_PREFIX = 'camera_';
+  let pathScrub = null; // { path, time } while the timeline is on a path's animation
+  const blockbenchAnimation = () => (typeof BBAnimation !== 'undefined' ? BBAnimation : typeof Animation !== 'undefined' && Animation.all ? Animation : null);
+
+  // Puts the camera view on a state of the path ({ p, dir, f } in model space).
+  function showPathState(s) {
+    const view = povPreview;
+    if (!view || !view.camera || !s) return false;
+    const space = modelSpace();
+    const pos = new THREE.Vector3(...s.p);
+    const target = pos.clone().add(new THREE.Vector3(...s.dir).multiplyScalar(32));
+    if (space) {
+      space.localToWorld(pos);
+      space.localToWorld(target);
+    }
+    view.camera.position.copy(pos);
+    if (view.controls && view.controls.target) view.controls.target.copy(target);
+    view.camera.lookAt(target);
+    if (view.setFOV && Number.isFinite(s.f) && Math.abs(view.camera.fov - s.f) > 0.05) view.setFOV(s.f);
+    return true;
+  }
+
+  // The path's animation: made if it isn't there, its length and key markers brought up to date.
+  function pathAnimation(path) {
+    const Anim = blockbenchAnimation();
+    if (!Anim) return null;
+    const name = TIMELINE_PREFIX + path.name;
+    let anim = (Anim.all || []).find((a) => a.name === name);
+    if (!anim) {
+      anim = new Anim({ name, loop: 'once', snapping: 20 });
+      anim.add(false);
+    }
+    const keys = pathModelKeys(path);
+    anim.length = Math.max(0.05, round(pathLength(keys), 3));
+    anim.snapping = 20;
+    if (typeof TimelineMarker !== 'undefined') {
+      let at = 0;
+      const times = keys.map((k, i) => (at += i ? Math.max(0, k.d) : 0));
+      const wanted = times.map((t) => round(t, 3)).join();
+      if ((anim.markers || []).map((m) => round(m.time, 3)).join() !== wanted) {
+        anim.markers = times.map((time, i) => new TimelineMarker({ time, color: i % 8 }));
+      }
+    }
+    return anim;
+  }
+
+  async function openPathTimeline(path) {
+    path = path || currentPath();
+    if (!path || pathKeys(path).length < 2) {
+      Blockbench.showQuickMessage('A camera path needs at least two keys (Add Path Key)', 3000);
+      return;
+    }
+    tendPathHandles();
+    const anim = pathAnimation(path);
+    if (!anim || typeof Modes === 'undefined' || !Modes.options || !Modes.options.animate) {
+      Blockbench.showMessageBox({ title: 'Pose Studio: camera path', message: "This Blockbench doesn't offer the Animate tab for this project, so the path can't be put on its timeline. Preview Path still plays it." });
+      return;
+    }
+    stopPathPreview();
+    if (povToggle && !povToggle.value) {
+      povToggle.set(true);
+      await sleep(400);
+    }
+    Modes.options.animate.select();
+    if (anim.select) anim.select();
+    if (typeof Timeline !== 'undefined' && Timeline.setTime) Timeline.setTime(0);
+    onTimelineFrame();
+    Blockbench.showQuickMessage('Scrub or step the timeline: the camera view (and Minecraft, with Sync Game Camera on) shows that frame', 5000);
+  }
+
+  // The path whose animation the timeline is on, if any.
+  function timelinePath() {
+    const Anim = blockbenchAnimation();
+    const selected = Anim && Anim.selected;
+    if (!selected || typeof Modes === 'undefined' || !Modes.animate || !String(selected.name).startsWith(TIMELINE_PREFIX)) return null;
+    const name = String(selected.name).slice(TIMELINE_PREFIX.length);
+    return pathRoots().find((g) => g.name === name) || null;
+  }
+
+  // Blockbench showing a frame of the timeline (scrubbed, stepped or played).
+  function onTimelineFrame() {
+    const path = cameraPathsOn() ? timelinePath() : null;
+    if (!path) {
+      if (pathScrub) {
+        pathScrub = null;
+        pathPreviewing = false;
+        lastCamera = null; // the game camera goes back to the active camera
+      }
+      return;
+    }
+    const time = typeof Timeline !== 'undefined' ? Number(Timeline.time) || 0 : 0;
+    pathScrub = { path, time };
+    pathPreviewing = true;
+    const keys = pathModelKeys(path);
+    showPathState(pathAt(keys, pathInfo(path).ramp, Math.min(time, pathLength(keys))));
+  }
+
+  // What the game camera should show while the timeline is on a path: that frame.
+  function pathScrubMessage() {
+    if (!pathScrub) return null;
+    if (timelinePath() !== pathScrub.path) {
+      onTimelineFrame(); // left the Animate tab, or picked another animation
+      return null;
+    }
+    const keys = pathModelKeys(pathScrub.path);
+    const s = pathAt(keys, pathInfo(pathScrub.path).ramp, Math.min(pathScrub.time, pathLength(keys)));
+    if (!s) return null;
+    const target = s.p.map((v, i) => v + s.dir[i] * 160);
+    return JSON.stringify({ p: toWorld(s.p), t: toWorld(target), f: round(s.f, 1) });
+  }
+
   // The path as Minecraft gets it: positions as block offsets from the anchor, directions in the
   // world's axes.
   function pathGameKeys(path) {
@@ -3611,6 +3728,11 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
             stopPath();
             this.playing = false;
           },
+          timeline() {
+            save(this);
+            if (typeof Dialog !== 'undefined' && Dialog.open && Dialog.open.hide) Dialog.open.hide();
+            openPathTimeline(path);
+          },
         },
         template: `
           <div @mousemove="drag" @mouseup="drop" @mouseleave="drop" style="display: flex; gap: 16px; user-select: none;">
@@ -3638,6 +3760,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
               <div style="margin-top: 14px; display: flex; gap: 8px;">
                 <button @click="play" style="flex: 1;"><i class="material-icons" style="vertical-align: middle;">play_arrow</i> Play in Minecraft</button>
                 <button @click="preview" style="flex: 1;"><i class="material-icons" style="vertical-align: middle;">visibility</i> Preview here</button>
+                <button @click="timeline" style="min-width: 0;" title="Scrub it frame by frame on Blockbench's timeline"><i class="material-icons" style="vertical-align: middle;">view_timeline</i> Timeline</button>
                 <button @click="stop" style="min-width: 0;"><i class="material-icons" style="vertical-align: middle;">stop</i> Stop</button>
               </div>
               <p style="margin-top: 12px; color: var(--color-subtle_text);">The shape of the path is set in the viewport: move and turn the keys like cameras, and drag each key's two handles (key_N_in, key_N_out) to bend the path there. The yellow line is the path. Preview plays in the camera view at the bottom.</p>
@@ -3789,7 +3912,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
           '_',
           locations,
           { name: 'Camera Settings', id: 'pose_studio_camera_menu', icon: 'photo_camera_front', children: [aspect, a.timeweather, a.follow] },
-          ...(cameraPathsOn() ? [{ name: 'Camera Path (experimental)', id: 'pose_studio_path_menu', icon: 'timeline', children: [a.pathkey, a.pathedit, '_', a.pathpreview, a.pathplay, a.pathstop] }] : []),
+          ...(cameraPathsOn() ? [{ name: 'Camera Path (experimental)', id: 'pose_studio_path_menu', icon: 'timeline', children: [a.pathkey, a.pathedit, '_', a.pathtimeline, a.pathpreview, a.pathplay, a.pathstop] }] : []),
           { name: 'Stream Deck', id: 'pose_studio_deck_menu', icon: 'grid_view', children: [a.deck, a.deckplugin] },
           '_',
           a.comparegame,
@@ -3819,7 +3942,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
           },
           { name: 'Add Camera', id: 'pose_studio_add_camera', icon: 'videocam', children: [a.grabcam, a.savecam] },
           { name: 'Lights', id: 'pose_studio_light_menu', icon: 'lightbulb', children: [a.addlight, a.lightlevel] },
-          ...(cameraPathsOn() ? [{ name: 'Camera Path (experimental)', id: 'pose_studio_path_menu', icon: 'timeline', children: [a.pathkey, a.pathedit, '_', a.pathpreview, a.pathplay, a.pathstop] }] : []),
+          ...(cameraPathsOn() ? [{ name: 'Camera Path (experimental)', id: 'pose_studio_path_menu', icon: 'timeline', children: [a.pathkey, a.pathedit, '_', a.pathtimeline, a.pathpreview, a.pathplay, a.pathstop] }] : []),
           { name: 'Camera', id: 'pose_studio_camera_menu', icon: 'photo_camera_front', children: [a.pov, a.camera, '_', a.fov, aspect, a.timeweather, '_', a.lookcam, a.follow] },
           '_',
           a.scan,
@@ -4065,7 +4188,8 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
               </div>
               <div class="ps-note" v-if="!s.cameras.length">No cameras yet: add one above.</div>
               <div class="ps-grid" style="margin-top: 4px" v-if="s.paths">
-                <div class="ps-btn ps-wide" @click="run('pose_studio_path_preview')" title="Flies the camera view along the path"><i class="material-icons">visibility</i><span>Preview Path</span></div>
+                <div class="ps-btn" @click="run('pose_studio_path_timeline')" title="Scrub the path frame by frame on Blockbench's timeline"><i class="material-icons">view_timeline</i><span>Timeline</span></div>
+                <div class="ps-btn" @click="run('pose_studio_path_preview')" title="Flies the camera view along the path"><i class="material-icons">visibility</i><span>Preview</span></div>
                 <div class="ps-btn" @click="run('pose_studio_path_key')" title="A point of the camera path, where the active camera is"><i class="material-icons">add_road</i><span>Path Key</span></div>
                 <div class="ps-btn" @click="run('pose_studio_path')" title="Timings, ramps, preview and play (experimental)"><i class="material-icons">timeline</i><span>Camera Path…</span></div>
               </div>
@@ -10851,6 +10975,15 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // <changelog>
   const CHANGELOG = [
     {
+      "version": "0.63.0",
+      "date": "2026-10-05",
+      "changes": [
+        "Camera paths (experimental): Open in Timeline. It puts the path on Blockbench's own timeline: the Animate tab opens with an animation as long as the path and a marker at every key. Scrub the playhead, step frame by frame or press play, and the camera view at the bottom shows that exact moment of the path.",
+        "With Sync Game Camera on, Minecraft follows the playhead too, so you can check any frame in the real game. The timeline runs at 20 frames a second, one frame per game tick, the same steps the game takes when it plays the path.",
+        "Change timings or move keys and the animation's length and markers follow the next time you open it in the timeline. Back in the Edit tab, the camera view and the game follow the active camera again. Open in Timeline is in the Camera Path menu, on the panel, and a button in the Camera Path window."
+      ]
+    },
+    {
       "version": "0.62.0",
       "date": "2026-10-05",
       "changes": [
@@ -11773,7 +11906,7 @@ ${PLUGIN_URL}`,
 
   // for the plugin's own tests only (they set this flag); nothing happens otherwise
   if (typeof globalThis !== 'undefined' && globalThis.__POSE_STUDIO_TEST) {
-    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS, sceneSpot, addLight, lightRoots, bezierEase, catmullRom, pathAt, pathLength, addPathKey, pathGameKeys, playPath, stopPath, pathRoots, bezierPoint, tendPathHandles, pathModelKeys, previewPath, cameraPathsOn };
+    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS, sceneSpot, addLight, lightRoots, bezierEase, catmullRom, pathAt, pathLength, addPathKey, pathGameKeys, playPath, stopPath, pathRoots, bezierPoint, tendPathHandles, pathModelKeys, previewPath, cameraPathsOn, pathAnimation, onTimelineFrame, pathScrubMessage, openPathTimeline };
   }
 
   Plugin.register('pose_studio', {
@@ -11810,6 +11943,7 @@ ${PLUGIN_URL}`,
       if (Blockbench.on) Blockbench.on('select_project', onProjectSelected);
       if (Blockbench.on) Blockbench.on('load_project', refreshOnLoad);
       if (Blockbench.on) Blockbench.on('undo', onBlockbenchUndo);
+      if (Blockbench.on) Blockbench.on('display_animation_frame', onTimelineFrame);
       if (Blockbench.on) Blockbench.on('redo', onBlockbenchRedo);
 
       const a = {
@@ -11989,6 +12123,10 @@ ${PLUGIN_URL}`,
           name: 'Preview Path', icon: 'visibility', click: () => previewPath(),
           description: 'Flies the camera view (the bottom viewport) along the camera path.',
         }),
+        pathtimeline: new Action('pose_studio_path_timeline', {
+          name: 'Open in Timeline', icon: 'view_timeline', click: () => openPathTimeline(),
+          description: "Puts the camera path on Blockbench's timeline (the Animate tab): scrub or step frame by frame and the camera view, and Minecraft, show that frame.",
+        }),
         pathplay: new Action('pose_studio_path_play', {
           name: 'Play Path in Minecraft', icon: 'play_arrow', click: () => playPath(),
           description: 'Flies the Minecraft camera along the camera path.',
@@ -12133,6 +12271,7 @@ ${PLUGIN_URL}`,
       if (Blockbench.removeListener) Blockbench.removeListener('select_project', onProjectSelected);
       if (Blockbench.removeListener) Blockbench.removeListener('load_project', refreshOnLoad);
       if (Blockbench.removeListener) Blockbench.removeListener('undo', onBlockbenchUndo);
+      if (Blockbench.removeListener) Blockbench.removeListener('display_animation_frame', onTimelineFrame);
       if (Blockbench.removeListener) Blockbench.removeListener('redo', onBlockbenchRedo);
       deck.stop();
       if (pathLineTimer) clearInterval(pathLineTimer);
