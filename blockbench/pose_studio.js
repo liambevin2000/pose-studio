@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.67.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.68.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -6149,6 +6149,22 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
       .replace(/_/g, ' ')
       .trim() || 'default';
 
+  // The parts (bone name patterns) a mob's render controller only shows when it's saddled.
+  const MAX_SADDLE_LOOKS = 48; // mobs with more looks than this (horses) keep the looks they have
+  function saddleParts(content, description) {
+    const parts = [];
+    for (const rule of mainController(content, description).part_visibility || []) {
+      for (const [pattern, condition] of Object.entries(rule)) {
+        if (typeof condition !== 'string' || !/\b(q|query)\.is_saddled\b/i.test(condition)) continue;
+        // shown when saddled, hidden when not
+        if (idleCondition(condition, { is_saddled: 1 }) && !idleCondition(condition, { is_saddled: 0 })) {
+          parts.push(new RegExp('^' + pattern.toLowerCase().replace(/[.+?^${}()|[\]\\]/g, (ch) => '\\' + ch).replace(/\*/g, '.*') + '$'));
+        }
+      }
+    }
+    return parts;
+  }
+
   // Every look of a list entry, baby versions included (the plain entry first). Each is an entry of
   // its own: { ...entry, geometryId, texturePath, layers, choices, flags, variant, baby }.
   function variantEntries(content, entry) {
@@ -6197,6 +6213,17 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     const plain = out.findIndex((v) => !v.baby && v.geometryId === entry.geometryId && v.texturePath === entry.texturePath);
     if (plain > 0) out.unshift(out.splice(plain, 1)[0]);
     else if (plain < 0 && !out.some((v) => !v.baby)) out.unshift(Object.assign({}, entry, { baby: false, flags: null, variant: 'default', choices: {} }));
+    // a saddle the mob only shows when saddled (a part its render controller hides otherwise):
+    // every look that has that part gets a saddled twin
+    const saddle = saddleParts(content, description);
+    if (saddle.length && out.length <= MAX_SADDLE_LOOKS) {
+      for (const look of out.slice()) {
+        const geometry = resolveGeometry(content.geometries, look.geometryId);
+        if (!geometry || !geometry.bones.some((b) => (b.cubes || []).length && saddle.some((re) => re.test(String(b.name).toLowerCase())))) continue;
+        look.saddleTwin = true;
+        out.push(Object.assign({}, look, { saddled: true, saddleTwin: false, flags: Object.assign({}, look.flags, { is_saddled: 1 }) }));
+      }
+    }
     out.choiceList = choices.map((c) => ({ name: c.name, label: choiceTitle(c), values: c.labels.map(cleanLabel) }));
     return out;
   }
@@ -8083,7 +8110,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     const db = await openThumbDb();
     if (db) db.transaction('thumbs', 'readwrite').objectStore('thumbs').put(value, key);
   }
-  const thumbKey = (entry) => `v7|${entry.id}|${entry.geometryId}|${entry.texturePath}|${entry.source}`;
+  const thumbKey = (entry) => `v7|${entry.id}|${entry.geometryId}|${entry.texturePath}|${entry.source}${entry.saddled ? '|saddled' : ''}`;
 
   async function makeThumbnail(content, entry) {
     const key = thumbKey(entry);
@@ -8281,7 +8308,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   function entityInfo(entry, model, rest, content = null) {
     return {
       entity: entry.id, key: entryKey(entry), bones: posableBones(model, boneUsage(content, entry.id)), rest, source: entry.source,
-      variant: entry.variant || 'default', baby: !!entry.baby, choices: entry.choices || {},
+      variant: entry.variant || 'default', baby: !!entry.baby, saddled: !!entry.saddled, choices: entry.choices || {},
     };
   }
 
@@ -8363,7 +8390,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   const PROXY_TYPE = 'pose:proxy';
   const PROXY_REGISTRY = () => `${devPackDir('resource')}\\pose_studio_proxies.json`;
 
-  const entryKey = (entry) => `${entry.id}|${entry.geometryId}|${entry.texturePath}${entry.flags && entry.flags.is_baby ? '|baby' : ''}`;
+  const entryKey = (entry) => `${entry.id}|${entry.geometryId}|${entry.texturePath}${entry.flags && entry.flags.is_baby ? '|baby' : ''}${entry.flags && entry.flags.is_saddled ? '|saddled' : ''}`;
 
   let registryCache = null;
   function proxyRegistry() {
@@ -8471,7 +8498,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     const shared = new Map(); // geometry key -> { g, indices }
     const geometryOf = [];
     models.forEach((m, i) => {
-      const geoKey = `${m.entry.id}|${m.entry.geometryId}|${m.entry.flags && m.entry.flags.is_baby ? 'baby' : ''}`;
+      const geoKey = `${m.entry.id}|${m.entry.geometryId}|${m.entry.flags && m.entry.flags.is_baby ? 'baby' : ''}${m.entry.flags && m.entry.flags.is_saddled ? '|saddled' : ''}`;
       let slot = shared.get(geoKey);
       if (!slot) {
         const g = shared.size;
@@ -8834,11 +8861,13 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     const choices = looks.choiceList || [];
     const currentLook = looks.find((l) => entryKey(l) === root.pose_entity.key) || looks[0];
     // the closest look to a set of choices (a baby can't wear horse armour, for instance)
-    const closest = (sel, baby) => {
+    // with Saddle ticked: the saddled twin of a look, or the look itself when it has no saddle
+    const saddleMatch = (l, saddled) => (saddled ? !!l.saddled || !l.saddleTwin : !l.saddled);
+    const closest = (sel, baby, saddled) => {
       let best = null;
       let score = -1;
       for (const l of looks) {
-        if (l.baby !== baby) continue;
+        if (l.baby !== baby || !saddleMatch(l, saddled)) continue;
         const s = choices.reduce((n, c, i) => n + ((l.choices || {})[c.name] === sel[c.name] ? (i === 0 ? 100 : 10) : 0), 0);
         if (s > score) {
           score = s;
@@ -8848,6 +8877,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
       return best;
     };
     const hasBabies = looks.some((l) => l.baby);
+    const hasSaddles = looks.some((l) => l.saddled);
     let busy = Promise.resolve();
     new Dialog({
       id: 'pose_studio_variants',
@@ -8860,6 +8890,8 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
           sel: Object.assign({}, ...choices.map((c) => ({ [c.name]: (currentLook.choices || {})[c.name] || 0 }))),
           baby: !!currentLook.baby,
           hasBabies,
+          saddled: !!currentLook.saddled,
+          hasSaddles,
           current: entryKey(currentLook),
           thumbs: {},
         }),
@@ -8869,7 +8901,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
             const first = this.choices[0];
             return looks
               .map((l, i) => ({ i, key: entryKey(l), label: first ? first.values[(l.choices || {})[first.name]] || l.variant : l.variant + (l.baby ? ' (baby)' : ''), look: l }))
-              .filter(({ look }) => !first || (look.baby === this.baby && this.choices.slice(1).every((c) => (look.choices || {})[c.name] === this.sel[c.name])));
+              .filter(({ look }) => saddleMatch(look, this.saddled) && (!first || (look.baby === this.baby && this.choices.slice(1).every((c) => (look.choices || {})[c.name] === this.sel[c.name]))));
           },
         },
         watch: {
@@ -8900,19 +8932,26 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
             this.current = entryKey(look);
             for (const c of this.choices) if ((look.choices || {})[c.name] !== undefined) this.sel[c.name] = look.choices[c.name];
             this.baby = look.baby;
+            if (look.saddled || look.saddleTwin) this.saddled = !!look.saddled;
             busy = busy.then(() => setEntityVariant(root, state.content, look)).catch((e) => showError('Pose Studio: variant', e));
             return busy;
           },
           pickTile(g) {
-            return this.apply(this.choices.length ? closest(Object.assign({}, this.sel, { [this.choices[0].name]: (g.look.choices || {})[this.choices[0].name] }), this.baby) : g.look);
+            return this.apply(this.choices.length ? closest(Object.assign({}, this.sel, { [this.choices[0].name]: (g.look.choices || {})[this.choices[0].name] }), this.baby, this.saddled) : g.look);
           },
           changed() {
-            return this.apply(closest(this.sel, this.baby));
+            return this.apply(closest(this.sel, this.baby, this.saddled));
+          },
+          // Saddle ticked or unticked: the same look, with or without it
+          saddle() {
+            const now = looks.find((l) => entryKey(l) === this.current) || currentLook;
+            const twin = looks.find((l) => !!l.saddled === this.saddled && l.geometryId === now.geometryId && l.texturePath === now.texturePath && l.baby === now.baby && (this.saddled ? true : !l.saddled));
+            return twin && (twin.saddled || twin.saddleTwin) ? this.apply(twin) : undefined;
           },
         },
         template: `
           <div class="pose_studio_variants">
-            <div v-if="choices.length > 1 || hasBabies" style="display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; margin-bottom: 10px;">
+            <div v-if="choices.length > 1 || hasBabies || hasSaddles" style="display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; margin-bottom: 10px;">
               <label v-for="c in choices.slice(1)" :key="c.name" style="display: flex; gap: 6px; align-items: center;">
                 <span>{{ c.label }}</span>
                 <select v-model.number="sel[c.name]" @change="changed()">
@@ -8921,6 +8960,9 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
               </label>
               <label v-if="hasBabies" style="display: flex; gap: 6px; align-items: center;">
                 <input type="checkbox" v-model="baby" @change="changed()"> Baby
+              </label>
+              <label v-if="hasSaddles" style="display: flex; gap: 6px; align-items: center;" title="Shows the mob's saddle (looks without one stay as they are)">
+                <input type="checkbox" v-model="saddled" @change="saddle()"> Saddle
               </label>
             </div>
             <h3 v-if="choices.length" style="margin: 0 0 6px;">{{ choices[0].label }}</h3>
@@ -10945,6 +10987,14 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // <changelog>
   const CHANGELOG = [
     {
+      "version": "0.68.0",
+      "date": "2026-10-05",
+      "changes": [
+        "Variant has a Saddle tickbox for mobs that can wear one (DragonCraft's dragons, camels, donkeys, mules).",
+        "Open Add Entity once and reload Minecraft's packs when asked."
+      ]
+    },
+    {
       "version": "0.67.0",
       "date": "2026-10-05",
       "changes": [
@@ -11823,7 +11873,7 @@ ${PLUGIN_URL}`,
 
   // for the plugin's own tests only (they set this flag); nothing happens otherwise
   if (typeof globalThis !== 'undefined' && globalThis.__POSE_STUDIO_TEST) {
-    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS, sceneSpot, addLight, lightRoots, stopPath, cameraPathsOn, cameraPose, sampleCameraAnimation, playCameraAnimation, animateCamera, zoomedFov, setupClipChannel, removeClipChannel, clipKeys, clipPose, clipState, displayClips, addAnimationKey, sampleAnimation, liveRotation, liveOrigin, poseMessage, entityMessage, setContentCache: (c) => (contentCache = c), particleList, particleEntry, placeParticle, fxMessage, fxRoots };
+    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS, sceneSpot, addLight, lightRoots, stopPath, cameraPathsOn, cameraPose, sampleCameraAnimation, playCameraAnimation, animateCamera, zoomedFov, setupClipChannel, removeClipChannel, clipKeys, clipPose, clipState, displayClips, addAnimationKey, sampleAnimation, liveRotation, liveOrigin, poseMessage, entityMessage, setContentCache: (c) => (contentCache = c), saddleParts, particleList, particleEntry, placeParticle, fxMessage, fxRoots };
   }
 
   Plugin.register('pose_studio', {

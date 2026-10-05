@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.68.0 (2026-10-05)
+
+- Variant has a Saddle tickbox for mobs that can wear one (DragonCraft's dragons, camels, donkeys, mules).
+- Open Add Entity once and reload Minecraft's packs when asked.
+
 ## 0.67.0 (2026-10-05)
 
 - New: particles. Add smoke, wind and other effects from your packs to the scene and move them in Blockbench.

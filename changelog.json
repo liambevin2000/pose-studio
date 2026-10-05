@@ -1,5 +1,13 @@
 [
   {
+    "version": "0.68.0",
+    "date": "2026-10-05",
+    "changes": [
+      "Variant has a Saddle tickbox for mobs that can wear one (DragonCraft's dragons, camels, donkeys, mules).",
+      "Open Add Entity once and reload Minecraft's packs when asked."
+    ]
+  },
+  {
     "version": "0.67.0",
     "date": "2026-10-05",
     "changes": [
