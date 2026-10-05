@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.58.1'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.59.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -3030,6 +3030,85 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     if (!requireConnection()) return;
     send(`scriptevent pose:corner ${which}`);
     if (which === 'clear') removeStructureMesh();
+  }
+
+  // ---- Classic menu or the panel (experimental) ------------------------------------------------------
+  // Settings ▸ Pose Studio: New Panel Interface (experimental). Off (the default): everything is in
+  // the Pose Studio menu, as it always was. On: the everyday things are buttons on the Pose Studio
+  // panel and the menu only has the rest. Every action exists either way (shortcuts, Stream Deck).
+  const NEW_UI_KEY = 'pose_studio_new_ui';
+  let menuParts = null; // { a, aspectMenuItems } from onload
+  function newInterface() {
+    try {
+      return localStorage.getItem(NEW_UI_KEY) === '1';
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function applyInterface() {
+    if (!menuParts) return;
+    const { a, aspectMenuItems } = menuParts;
+    if (menu) {
+      delete MenuBar.menus.pose_studio;
+      menu = null;
+    }
+    const locations = { name: 'Locations', id: 'pose_studio_scene_menu', icon: 'place', children: [a.savescene, a.newlocation, a.locations, a.goscene, '_', a.refreshloc, a.realign, a.unlinkscene, '_', a.pickworld] };
+    const aspect = { name: 'Aspect Ratio', id: 'pose_studio_aspect', icon: 'aspect_ratio', children: aspectMenuItems };
+    const items = newInterface()
+      ? [
+          a.showpanel,
+          a.link,
+          '_',
+          locations,
+          { name: 'Camera Settings', id: 'pose_studio_camera_menu', icon: 'photo_camera_front', children: [aspect, a.timeweather, a.follow] },
+          { name: 'Stream Deck', id: 'pose_studio_deck_menu', icon: 'grid_view', children: [a.deck, a.deckplugin] },
+          '_',
+          a.comparegame,
+          a.wildmobs,
+          a.skin,
+          a.anchor,
+          a.clear,
+          '_',
+          { name: 'Setup', id: 'pose_studio_more', icon: 'settings', children: [a.folders, a.installpacks, a.reloadpacks, '_', a.checkupdates, a.debuginfo] },
+        ]
+      : [
+          a.link,
+          locations,
+          '_',
+          a.add,
+          a.outfit,
+          a.entity,
+          a.equipment,
+          a.variant,
+          a.animation,
+          a.drop,
+          a.ride,
+          a.wildmobs,
+          {
+            name: 'Structure', id: 'pose_studio_structure_menu', icon: 'view_in_ar',
+            children: [a.structcorner1, a.structcorner2, a.structlook1, a.structlook2, '_', a.structget, a.structapply, '_', a.structundo, a.structredo, '_', a.structclear],
+          },
+          { name: 'Add Camera', id: 'pose_studio_add_camera', icon: 'videocam', children: [a.grabcam, a.savecam] },
+          { name: 'Camera', id: 'pose_studio_camera_menu', icon: 'photo_camera_front', children: [a.pov, a.camera, '_', a.fov, aspect, a.timeweather, '_', a.lookcam, a.follow] },
+          '_',
+          a.scan,
+          a.scanmore,
+          a.capture,
+          a.entityshot,
+          a.entityshotoptions,
+          '_',
+          { name: 'More', id: 'pose_studio_more', icon: 'more_horiz', children: [a.folders, a.installpacks, a.reloadpacks, '_', a.deck, a.deckplugin, '_', a.comparegame, a.anchor, a.skin, a.clear, '_', a.checkupdates, a.debuginfo] },
+        ];
+    menu = new BarMenu('pose_studio', items, { name: 'Pose Studio' });
+    MenuBar.addMenu(menu, 'tools');
+    if (MenuBar.update) MenuBar.update();
+    try {
+      if (newInterface()) setupPosePanel();
+      else removePosePanel();
+    } catch (e) {
+      console.warn('[Pose Studio] panel', e);
+    }
   }
 
   // ---- Wild mobs ------------------------------------------------------------------------------------
@@ -10030,6 +10109,13 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // <changelog>
   const CHANGELOG = [
     {
+      "version": "0.59.0",
+      "date": "2026-10-05",
+      "changes": [
+        "The new panel interface is now an experimental setting, off by default: File > Preferences > Settings > Pose Studio: New Panel Interface (experimental). Off, everything is in the Pose Studio menu as before (with the new things added: Remove Wild Mobs, Go to Scene, Check for Updates, Debug Info). On, the everyday things are buttons on the Pose Studio panel and the menu is short. It switches straight away, no restart."
+      ]
+    },
+    {
       "version": "0.58.1",
       "date": "2026-10-05",
       "changes": [
@@ -11152,6 +11238,18 @@ ${PLUGIN_URL}`,
             else unfreezeWorldClock().catch(() => {});
           },
         }),
+        setting('pose_studio_new_ui', {
+          name: 'Pose Studio: New Panel Interface (experimental)', type: 'toggle', value: newInterface(),
+          description: 'Puts the everyday things on a Pose Studio panel in the sidebar (buttons, the camera list, what is connected) and shortens the Pose Studio menu. Off: everything is in the menu, as before.',
+          onChange: (value) => {
+            try {
+              localStorage.setItem(NEW_UI_KEY, value ? '1' : '0');
+            } catch (e) {
+              // used until Blockbench restarts
+            }
+            applyInterface();
+          },
+        }),
         setting('pose_studio_follow_locations', {
           name: 'Pose Studio: Go to Locations', type: 'toggle', value: true,
           description: 'When you switch to a location far from where you stand, teleport there (Minecraft only shows the world around the player). Off: ask first.',
@@ -11182,33 +11280,8 @@ ${PLUGIN_URL}`,
         self.changelog = pluginPageChangelog();
       }
 
-      // The everyday things are buttons on the Pose Studio panel; the menu has the rest. (Every action
-      // still exists whether it's listed here or not: shortcuts and Stream Deck keys use them.)
-      menu = new BarMenu('pose_studio', [
-        a.showpanel,
-        a.link,
-        '_',
-        { name: 'Locations', id: 'pose_studio_scene_menu', icon: 'place', children: [a.savescene, a.newlocation, a.locations, a.goscene, '_', a.refreshloc, a.realign, a.unlinkscene, '_', a.pickworld] },
-        {
-          name: 'Camera Settings', id: 'pose_studio_camera_menu', icon: 'photo_camera_front',
-          children: [{ name: 'Aspect Ratio', id: 'pose_studio_aspect', icon: 'aspect_ratio', children: aspectMenuItems }, a.timeweather, a.follow],
-        },
-        { name: 'Stream Deck', id: 'pose_studio_deck_menu', icon: 'grid_view', children: [a.deck, a.deckplugin] },
-        '_',
-        a.comparegame,
-        a.wildmobs,
-        a.skin,
-        a.anchor,
-        a.clear,
-        '_',
-        { name: 'Setup', id: 'pose_studio_more', icon: 'settings', children: [a.folders, a.installpacks, a.reloadpacks, '_', a.checkupdates, a.debuginfo] },
-      ], { name: 'Pose Studio' });
-      MenuBar.addMenu(menu, 'tools');
-      try {
-        setupPosePanel();
-      } catch (e) {
-        console.warn('[Pose Studio] panel', e);
-      }
+      menuParts = { a, aspectMenuItems };
+      applyInterface();
       startupTimer = setTimeout(() => {
         startupTimer = null;
         showWhatsNewOnce();
@@ -11231,6 +11304,7 @@ ${PLUGIN_URL}`,
       if (Blockbench.removeListener) Blockbench.removeListener('redo', onBlockbenchRedo);
       deck.stop();
       removePosePanel();
+      menuParts = null;
       if (startupTimer) clearTimeout(startupTimer);
       startupTimer = null;
       if (tickTimer) clearInterval(tickTimer);

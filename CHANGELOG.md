@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.59.0 (2026-10-05)
+
+- The new panel interface is now an experimental setting, off by default: File > Preferences > Settings > Pose Studio: New Panel Interface (experimental). Off, everything is in the Pose Studio menu as before (with the new things added: Remove Wild Mobs, Go to Scene, Check for Updates, Debug Info). On, the everyday things are buttons on the Pose Studio panel and the menu is short. It switches straight away, no restart.
+
 ## 0.58.1 (2026-10-05)
 
 - Fixed: after the connection to Minecraft was lost (the world closed), Pose Studio forgot how the day and weather cycles were set before it froze them. Reconnecting and then disconnecting normally left them frozen. It now remembers, and puts them back the next time you disconnect from that world.

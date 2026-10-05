@@ -1,5 +1,12 @@
 [
   {
+    "version": "0.59.0",
+    "date": "2026-10-05",
+    "changes": [
+      "The new panel interface is now an experimental setting, off by default: File > Preferences > Settings > Pose Studio: New Panel Interface (experimental). Off, everything is in the Pose Studio menu as before (with the new things added: Remove Wild Mobs, Go to Scene, Check for Updates, Debug Info). On, the everyday things are buttons on the Pose Studio panel and the menu is short. It switches straight away, no restart."
+    ]
+  },
+  {
     "version": "0.58.1",
     "date": "2026-10-05",
     "changes": [
