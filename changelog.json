@@ -1,5 +1,16 @@
 [
   {
+    "version": "0.62.0",
+    "date": "2026-10-05",
+    "changes": [
+      "Camera paths are now an experimental setting, off by default: File > Preferences > Settings > Pose Studio: Camera Paths (experimental). Off, the Camera Path menu, its panel buttons and the path lines are hidden.",
+      "The shape of a path is now edited in the viewport. Every key has two spline handles, key_N_in and key_N_out (small boxes joined to the key by a thin line): the path arrives from the in handle and leaves towards the out handle, so dragging one bends the path at that key. Until you move one, a key's handles shape themselves into a smooth curve through its neighbours. Drag one and the other swings opposite it, keeping the path smooth. Handles travel with their key and go when it's deleted.",
+      "Preview now plays in the camera view (the bottom POV viewport) instead of moving the view you work in; it turns the POV viewport on if it's off. There's a Preview Path action in the menu and on the panel, so you can preview without opening the window.",
+      "Camera Path… keeps the timings: seconds to each key, FOV, and the speed ramps (those are about time, not shape).",
+      "Update the Minecraft packs (Check for Updates, then reopen the world)."
+    ]
+  },
+  {
     "version": "0.61.0",
     "date": "2026-10-05",
     "changes": [

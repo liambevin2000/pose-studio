@@ -118,11 +118,12 @@ After editing files in `packs/`, bump the `version` in both manifests and run `n
 
 ## Camera paths (experimental)
 
-Fly the game camera along a path, for recording.
+Fly the game camera along a path, for recording. Turn it on in **File ▸ Preferences ▸ Settings ▸ Pose Studio: Camera Paths (experimental)**.
 
-1. Look through a camera (or move the Blockbench view) to where the path starts: **Camera Path ▸ Add Path Key**. Do the same for each point along the way. The keys are a `path_1` group of `key_N` groups; move and turn them like cameras, drag them in the outliner to reorder. The yellow line is the path.
-2. **Camera Path ▸ Camera Path…**: the seconds to reach each key, the FOV at it, and the bezier ramp of each stretch and of the whole path (drag the curve's two handles, or pick a preset). *Set the times* fills them in for one speed.
-3. **Play in Minecraft** (the game flies the camera, a step every tick, eased between ticks), **Preview here**, **Stop**.
+1. Look through a camera (or move the Blockbench view) to where the path starts: **Camera Path ▸ Add Path Key**. Do the same for each point along the way. The keys are a `path_1` group of `key_N` groups; move and turn them like cameras, drag them in the outliner to reorder.
+2. **Bend the path in the viewport.** Each key has two handles, `key_N_in` and `key_N_out`: drag one with the move tool and the path bends there (the other swings opposite it). Untouched handles shape themselves. The yellow line is the path.
+3. **Camera Path ▸ Camera Path…**: the seconds to reach each key, the FOV at it, and the speed ramp of each stretch and of the whole path (a bezier: drag its two handles, or pick a preset). *Set the times* fills them in for one speed.
+4. **Preview Path** flies the camera view (the bottom POV viewport) along it. **Play in Minecraft** makes the game fly the camera (a step every tick, eased between ticks). **Stop** ends either.
 
 Minecraft's camera can't roll, so paths have direction but no tilt.
 
