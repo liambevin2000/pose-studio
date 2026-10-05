@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.60.0 (2026-10-05)
+
+- New: lights. Add Light (in the menu under Lights, or on the panel under Scene) adds a light to the scene: a small marker in Blockbench, an invisible light block in Minecraft in the block the marker is in. Move the marker and the light block moves with it; delete it and the light block is taken away.
+- Light Level… sets how bright the selected light is, from 1 to 15 (new lights are 15). Add as many lights as you like; they're saved with the scene.
+- Light blocks only ever go into air, and only light blocks are ever taken away, so nothing of the world is replaced. A light moved inside a solid block gives no light, and Minecraft says so. Remove Mannequins from World takes the lights away too.
+- Update the Minecraft packs (Check for Updates, then reopen the world).
+
 ## 0.59.0 (2026-10-05)
 
 - The new panel interface is now an experimental setting, off by default: File > Preferences > Settings > Pose Studio: New Panel Interface (experimental). Off, everything is in the Pose Studio menu as before (with the new things added: Remove Wild Mobs, Go to Scene, Check for Updates, Debug Info). On, the everyday things are buttons on the Pose Studio panel and the menu is short. It switches straight away, no restart.

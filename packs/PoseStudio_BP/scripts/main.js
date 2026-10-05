@@ -270,6 +270,7 @@ function applyEquipment(entity, equipment, slots = Object.keys(EQUIP_SLOTS)) {
 }
 
 function removeMannequin(data) {
+  if (removeLight(String(data.id))) return;
   const anchor = getAnchor();
   if (!anchor) return;
   const dim = world.getDimension(anchor.dim);
@@ -277,6 +278,7 @@ function removeMannequin(data) {
 }
 
 function clearAll() {
+  removeAllLights();
   for (const dimId of ["overworld", "nether", "the_end"]) {
     for (const e of world.getDimension(dimId).getEntities({ families: ["pose_studio"] })) e.remove();
   }
@@ -341,6 +343,82 @@ function clearMobs(player, data) {
     }
   }
   finishResult([`K|${mobs}|${items}`]);
+}
+
+// `pose:light {"id","p":[x,y,z],"l":1-15}` — a light of the scene: an invisible light block in the
+// block at p (from the anchor), at that level. Moving the light moves the block (the old one is
+// taken away), `pose:remove {id}` takes it away. Light blocks only ever go into air and only light
+// blocks are ever taken away, so nothing of the world is replaced. Which lights exist is kept in
+// the world.
+const LIGHTS_PROPERTY = "pose:lights"; // { id: { x, y, z, dim, l } }
+const warnedLights = new Set();
+
+function readLights() {
+  const raw = world.getDynamicProperty(LIGHTS_PROPERTY);
+  if (typeof raw !== "string") return {};
+  try {
+    return JSON.parse(raw) || {};
+  } catch {
+    return {};
+  }
+}
+
+function writeLights(lights) {
+  world.setDynamicProperty(LIGHTS_PROPERTY, Object.keys(lights).length ? JSON.stringify(lights) : undefined);
+}
+
+const isLightBlock = (block) => !!block && /^minecraft:light_block/.test(block.typeId);
+
+function takeLight(entry) {
+  if (!entry) return;
+  try {
+    const block = world.getDimension(entry.dim).getBlock({ x: entry.x, y: entry.y, z: entry.z });
+    if (isLightBlock(block)) block.setType("minecraft:air");
+  } catch {
+    // not loaded: it goes when the light is next set or removed there
+  }
+}
+
+function setLight(player, data) {
+  const anchor = requireAnchor(player);
+  const id = String(data.id);
+  if (!finite(data.p)) throw new Error("light needs p:[x,y,z]");
+  const level = Math.max(1, Math.min(15, Math.round(Number(data.l) || 15)));
+  const at = toWorld(anchor, data.p.map(Number));
+  const pos = { x: Math.floor(at.x), y: Math.floor(at.y), z: Math.floor(at.z), dim: anchor.dim, l: level };
+  const lights = readLights();
+  const old = lights[id];
+  const block = world.getDimension(anchor.dim).getBlock({ x: pos.x, y: pos.y, z: pos.z });
+  if (!block) throw new Error("LocationInUnloadedChunkError: the light's place isn't loaded"); // tried again when it is
+  if (old && (old.x !== pos.x || old.y !== pos.y || old.z !== pos.z || old.dim !== pos.dim)) takeLight(old);
+  if (block.isAir || isLightBlock(block)) {
+    block.setType(`minecraft:light_block_${level}`);
+    lights[id] = pos;
+    warnedLights.delete(id);
+  } else {
+    // inside a block: no light there (and none left where it was)
+    delete lights[id];
+    if (player && !warnedLights.has(id)) {
+      warnedLights.add(id);
+      player.sendMessage(`§e[Pose Studio]§r ${id} is inside a block (${block.typeId.replace("minecraft:", "")}): move it into the open to light it`);
+    }
+  }
+  writeLights(lights);
+}
+
+function removeLight(id) {
+  const lights = readLights();
+  if (!lights[id]) return false;
+  takeLight(lights[id]);
+  delete lights[id];
+  writeLights(lights);
+  return true;
+}
+
+function removeAllLights() {
+  const lights = readLights();
+  for (const entry of Object.values(lights)) takeLight(entry);
+  writeLights({});
 }
 
 function setCamera(player, data) {
@@ -664,7 +742,7 @@ function debug(player) {
 // Every name looks like `PSD[op|page|item]`; page 0 always carries
 // `M|ready|<pages>|<items>|<items per page>` or `M|busy|<percent>`.
 // What this script understands; Blockbench warns when the world runs an older one.
-const PACK_PROTOCOL = 20;
+const PACK_PROTOCOL = 21;
 const IO_OBJECTIVE = "pose_io";
 const ITEMS_PER_PAGE = 30;
 const MAX_PAGES_PER_BATCH = 16;
@@ -1416,6 +1494,8 @@ function handle(ev) {
       return redoMove(player, data);
     case "pose:clearmobs":
       return clearMobs(player, data);
+    case "pose:light":
+      return setLight(player, data);
     case "pose:backdrop":
       return setBackdrop(player, data);
     case "pose:camclear":
@@ -1480,7 +1560,7 @@ system.runTimeout(() => {
 
 // Updates for a spot whose chunks aren't loaded (a location far from the player) wait here and
 // are retried every second, so the location appears as soon as you get there.
-const WAITING_EVENTS = new Set(["pose:set", "pose:ent", "pose:hold"]);
+const WAITING_EVENTS = new Set(["pose:set", "pose:ent", "pose:hold", "pose:light"]);
 const waiting = new Map(); // "event|id" -> the latest event for it
 let toldAboutWaiting = false;
 

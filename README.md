@@ -76,6 +76,7 @@ Everything is in the **Pose Studio** menu, next to Tools:
 | **Camera ▸ Look Through Camera / Follow Viewport** | Moves the working view to the active camera / makes the game camera follow the viewport instead of a camera. |
 | **Import World…** | Brings the terrain around you into Blockbench as a `world_scan` mesh. The data comes back in large checked batches, several times faster than before. |
 | **Expand World…** | Adds the terrain around where you're standing now to the terrain already imported. |
+| **Add Light** / **Light Level…** | A light of the scene: a marker in Blockbench, an invisible light block (level 1-15) in Minecraft where the marker is. It follows the marker and goes when the marker is deleted. |
 | **Capture Screenshot** | Hides the HUD and saves the Minecraft window to `Pictures/Pose Studio`. |
 | **Compare with Game** (More) | Saves the game shot with Blockbench's outline (red) over Minecraft's (green), to show where armour or items are drawn differently. |
 | **Capture Entities Only** | Saves the players and mobs on their own from the game camera: a transparent PNG and/or on the sky. The normal shot is taken first, with nothing moved, so the light is the scene's. For the cut-out, the blocks around them are cleared for about two seconds and then put back exactly. Needs Sync Game Camera. **Entity Shot Options…** picks what is saved: on their own, on the sky, the normal shot, normal, ID mask and depth passes, each player and mob separately, and whether particles are removed. |

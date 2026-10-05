@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.59.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.60.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -1601,6 +1601,16 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
         lastSent.set(key, hand);
       }
     }
+    for (const light of lightRoots()) {
+      const id = mannequinId(light.name);
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const msg = lightMessage(light);
+      if (lastSent.get(id) === msg) continue;
+      if (link.inFlight >= MAX_IN_FLIGHT) return;
+      send(`scriptevent pose:light ${msg}`);
+      lastSent.set(id, msg);
+    }
     for (const id of Array.from(lastSent.keys())) {
       if (seen.has(id)) continue;
       send(`scriptevent pose:remove ${JSON.stringify({ id })}`);
@@ -3032,6 +3042,74 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     if (which === 'clear') removeStructureMesh();
   }
 
+  // ---- Lights ---------------------------------------------------------------------------------------
+  // Pose Studio ▸ Add Light: a light of the scene. In Blockbench it's a small yellow marker (a
+  // light_N group) you move like anything else; in Minecraft it's an invisible light block in the
+  // block the marker is in, at the light's level (1-15, Light Level…). Moving the marker moves the
+  // light block, deleting it takes the light block away. Light blocks only go into air.
+  const LIGHT_PREFIX = /^light_\d+$/i;
+  function lightRoots() {
+    if (typeof Project === 'undefined' || !Project) return [];
+    return Outliner.root.filter((node) => node instanceof Group && LIGHT_PREFIX.test(node.name));
+  }
+
+  function selectedLight() {
+    for (let node = selectedNode(); node && node !== 'root'; node = node.parent) {
+      if (node instanceof Group && LIGHT_PREFIX.test(node.name) && node.parent === 'root') return node;
+    }
+    return null;
+  }
+
+  // the middle of the block a point (model space) is in
+  function blockCentre(v) {
+    return [Math.round(v[0] / 16) * 16, Math.floor(v[1] / 16) * 16 + 8, Math.round(v[2] / 16) * 16];
+  }
+
+  function addLight() {
+    if (typeof Project === 'undefined' || !Project) newProject(Formats.free);
+    // above what's selected (a player, a mob), else a little above the middle of the scene
+    const near = selectedPoseRoot();
+    const at = blockCentre(near ? [near.origin[0], near.origin[1] + 48, near.origin[2]] : [0, 40, 0]);
+    let n = 1;
+    while (Outliner.root.some((g) => g instanceof Group && g.name === `light_${n}`)) n++;
+    Undo.initEdit({ outliner: true, elements: [] });
+    const group = new Group({ name: `light_${n}`, origin: at.slice() }).init();
+    group.pose_light = 15;
+    const cube = new Cube({ name: 'light', from: at.map((v) => v - 3), to: at.map((v) => v + 3), color: 4 }).addTo(group).init();
+    Undo.finishEdit('Add light', { outliner: true, elements: [cube] });
+    Canvas.updateAll();
+    try {
+      if (typeof unselectAllElements === 'function') unselectAllElements();
+      if (typeof group.select === 'function') group.select();
+    } catch (e) {
+      // it's in the outliner either way
+    }
+    Blockbench.showQuickMessage(`${group.name} added (level 15). Move it where the light should be`, 3000);
+    return group;
+  }
+
+  function lightLevelDialog() {
+    const light = selectedLight();
+    if (!light) {
+      Blockbench.showQuickMessage('Select a light (light_) first', 2000);
+      return;
+    }
+    new Dialog({
+      id: 'pose_studio_light_level',
+      title: `Light Level: ${light.name}`,
+      form: { level: { label: 'Level (1 dim, 15 brightest)', type: 'number', value: light.pose_light || 15, min: 1, max: 15, step: 1 } },
+      onConfirm(form) {
+        light.pose_light = Math.max(1, Math.min(15, Math.round(Number(form.level) || 15)));
+        if (typeof Project !== 'undefined' && Project) Project.saved = false;
+        Blockbench.showQuickMessage(`${light.name}: level ${light.pose_light}`, 2000);
+      },
+    }).show();
+  }
+
+  function lightMessage(light) {
+    return JSON.stringify({ id: mannequinId(light.name), p: toWorld(light.origin), l: light.pose_light || 15 });
+  }
+
   // ---- Classic menu or the panel (experimental) ------------------------------------------------------
   // Settings ▸ Pose Studio: New Panel Interface (experimental). Off (the default): everything is in
   // the Pose Studio menu, as it always was. On: the everyday things are buttons on the Pose Studio
@@ -3090,6 +3168,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
             children: [a.structcorner1, a.structcorner2, a.structlook1, a.structlook2, '_', a.structget, a.structapply, '_', a.structundo, a.structredo, '_', a.structclear],
           },
           { name: 'Add Camera', id: 'pose_studio_add_camera', icon: 'videocam', children: [a.grabcam, a.savecam] },
+          { name: 'Lights', id: 'pose_studio_light_menu', icon: 'lightbulb', children: [a.addlight, a.lightlevel] },
           { name: 'Camera', id: 'pose_studio_camera_menu', icon: 'photo_camera_front', children: [a.pov, a.camera, '_', a.fov, aspect, a.timeweather, '_', a.lookcam, a.follow] },
           '_',
           a.scan,
@@ -3194,7 +3273,9 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     const root = hasProject ? selectedPoseRoot() : null;
     const cam = hasProject ? selectedCamera() : null;
     const active = hasProject ? activeCamera() : null;
+    const light = hasProject ? selectedLight() : null;
     return {
+      light: light ? light.pose_light || 15 : 0,
       linkOn: !!(linkToggle && linkToggle.value),
       connected: !!link.connected,
       world: (connectedWorld && connectedWorld.name) || '',
@@ -3207,8 +3288,8 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
         const l = projectLink();
         return l ? (l.loc && l.loc !== 'main' ? l.loc : l.name || 'Main') : '';
       })(),
-      selected: cam ? cam.name : root ? root.name : '',
-      kind: cam ? 'camera' : root ? (ENTITY_PREFIX.test(root.name) ? 'mob' : 'player') : '',
+      selected: light ? light.name : cam ? cam.name : root ? root.name : '',
+      kind: light ? 'light' : cam ? 'camera' : root ? (ENTITY_PREFIX.test(root.name) ? 'mob' : 'player') : '',
       structure: !!structure,
       shooting: !!shooting,
     };
@@ -3294,6 +3375,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
               <div class="ps-btn" @click="run('pose_studio_entity')"><i class="material-icons">pets</i><span>Add Entity…</span></div>
               <div class="ps-btn" @click="run('pose_studio_grabcam')" title="A camera where you're looking from in Minecraft"><i class="material-icons">add_a_photo</i><span>Camera: Game</span></div>
               <div class="ps-btn" @click="run('pose_studio_savecam')" title="A camera where the Blockbench view is"><i class="material-icons">switch_video</i><span>Camera: View</span></div>
+              <div class="ps-btn ps-wide" @click="run('pose_studio_add_light')" title="A light: a marker here, an invisible light block in Minecraft"><i class="material-icons">lightbulb</i><span>Add Light</span></div>
               <div class="ps-btn" @click="run('pose_studio_scan')"><i class="material-icons">travel_explore</i><span>Import World…</span></div>
               <div class="ps-btn" @click="run('pose_studio_scan_expand')"><i class="material-icons">add_location_alt</i><span>Expand World…</span></div>
               <div class="ps-btn ps-wide" @click="run('pose_studio_clear_mobs')" title="Takes the mobs you didn't place out of the scene, without drops"><i class="material-icons">pest_control</i><span>Remove Wild Mobs…</span></div>
@@ -3301,7 +3383,10 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
 
             <div class="ps-head" @click="fold('selected')"><i class="material-icons">{{ folded.selected ? 'chevron_right' : 'expand_more' }}</i>{{ s.selected || 'Selected' }}</div>
             <div v-show="!folded.selected">
-              <div class="ps-note" v-if="!s.kind">Select a player, a mob or a camera.</div>
+              <div class="ps-note" v-if="!s.kind">Select a player, a mob, a camera or a light.</div>
+              <div class="ps-grid" v-if="s.kind === 'light'">
+                <div class="ps-btn ps-wide" @click="run('pose_studio_light_level')"><i class="material-icons">brightness_medium</i><span>Light Level… ({{ s.light }})</span></div>
+              </div>
               <div class="ps-grid" v-if="s.kind === 'player'">
                 <div class="ps-btn ps-wide" @click="run('pose_studio_outfit')"><i class="material-icons">checkroom</i><span>Skin &amp; Equipment…</span></div>
                 <div class="ps-btn" @click="run('pose_studio_animation')"><i class="material-icons">animation</i><span>Animation…</span></div>
@@ -9293,7 +9378,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     return { id: idItem.slice(2), name: scene.world || '', anchor: point('A|'), player: point('P|'), locations, removed: scene.removed || [], protocol: version ? Number(version.slice(2)) : 0 };
   }
 
-  const EXPECTED_PACK_PROTOCOL = 20; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
+  const EXPECTED_PACK_PROTOCOL = 21; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
   let warnedOldPack = false;
 
   // Scene files in the scenes folders that belong to a world (their pose_world says so), as
@@ -10108,6 +10193,16 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.60.0",
+      "date": "2026-10-05",
+      "changes": [
+        "New: lights. Add Light (in the menu under Lights, or on the panel under Scene) adds a light to the scene: a small marker in Blockbench, an invisible light block in Minecraft in the block the marker is in. Move the marker and the light block moves with it; delete it and the light block is taken away.",
+        "Light Level… sets how bright the selected light is, from 1 to 15 (new lights are 15). Add as many lights as you like; they're saved with the scene.",
+        "Light blocks only ever go into air, and only light blocks are ever taken away, so nothing of the world is replaced. A light moved inside a solid block gives no light, and Minecraft says so. Remove Mannequins from World takes the lights away too.",
+        "Update the Minecraft packs (Check for Updates, then reopen the world)."
+      ]
+    },
     {
       "version": "0.59.0",
       "date": "2026-10-05",
@@ -10992,7 +11087,7 @@ ${PLUGIN_URL}`,
 
   // for the plugin's own tests only (they set this flag); nothing happens otherwise
   if (typeof globalThis !== 'undefined' && globalThis.__POSE_STUDIO_TEST) {
-    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS, sceneSpot };
+    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS, sceneSpot, addLight, lightRoots };
   }
 
   Plugin.register('pose_studio', {
@@ -11015,6 +11110,7 @@ ${PLUGIN_URL}`,
         new Property(Group, 'object', 'pose_animation'),
         new Property(Group, 'object', 'pose_vars'),
         new Property(Group, 'number', 'pose_eq_layout'),
+        new Property(Group, 'number', 'pose_light'),
         new Property(Group, 'object', 'pose_mount'),
         new Property(Group, 'object', 'pose_driver'),
         new Property(Group, 'number', 'pose_skin_slot', { default: 0 }),
@@ -11183,6 +11279,14 @@ ${PLUGIN_URL}`,
         goscene: new Action('pose_studio_go_scene', {
           name: 'Go to Scene', icon: 'near_me', click: () => goToScene(),
           description: "Takes you to where this scene's players, mobs and cameras are, so Minecraft loads and shows them.",
+        }),
+        addlight: new Action('pose_studio_add_light', {
+          name: 'Add Light', icon: 'lightbulb', click: () => addLight(),
+          description: 'Adds a light to the scene: a marker here, an invisible light block in Minecraft. Move it where the light should be.',
+        }),
+        lightlevel: new Action('pose_studio_light_level', {
+          name: 'Light Level…', icon: 'brightness_medium', click: lightLevelDialog,
+          description: 'How bright the selected light is (1 to 15).',
         }),
         comparegame: new Action('pose_studio_compare_game', {
           name: 'Compare with Game', icon: 'compare',
