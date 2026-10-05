@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.58.0 (2026-10-05)
+
+- Fixed: a location whose scene was built away from where the location was set didn't load its players and mobs until you walked there. Opening a location now takes you to where the scene actually is (the middle of its players and mobs, or its cameras if there are none), and Minecraft keeps that area loaded instead of the area around the location's starting point.
+- New: Go to Scene (on the panel under Location, and in Locations). It takes you to the open scene's players, mobs and cameras whenever you want.
+
 ## 0.57.0 (2026-10-05)
 
 - New: Remove Wild Mobs… (on the panel under Scene, and in the menu). It takes every mob out of the scene that Pose Studio didn't place, within the distance you set. They're removed, not killed, so they drop nothing. Your players and mobs, boats, minecarts, armour stands, paintings and item frames are left alone.

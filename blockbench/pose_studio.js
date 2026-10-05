@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.57.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.58.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -3203,7 +3203,8 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
 
             <div class="ps-head" @click="fold('location')"><i class="material-icons">{{ folded.location ? 'chevron_right' : 'expand_more' }}</i>Location{{ s.location ? ': ' + s.location : '' }}</div>
             <div class="ps-grid" v-show="!folded.location">
-              <div class="ps-btn ps-wide" @click="run('pose_studio_locations')" title="Every location of this world: open one, go there"><i class="material-icons">place</i><span>Locations…</span></div>
+              <div class="ps-btn" @click="run('pose_studio_locations')" title="Every location of this world: open one, go there"><i class="material-icons">place</i><span>Locations…</span></div>
+              <div class="ps-btn" @click="run('pose_studio_go_scene')" title="Takes you to where this scene's players, mobs and cameras are"><i class="material-icons">near_me</i><span>Go to Scene</span></div>
               <div class="ps-btn" @click="run('pose_studio_save_scene')"><i class="material-icons">save</i><span>Save</span></div>
               <div class="ps-btn" @click="run('pose_studio_new_location')" title="A new location where you're standing"><i class="material-icons">add_location_alt</i><span>New Here…</span></div>
             </div>
@@ -9357,10 +9358,48 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     return body && (body.statusCode === undefined || body.statusCode >= 0) ? body : null;
   }
   let warnedTickingArea = false;
+  // Where the open scene really is in the world: the middle of its players, mobs and cameras (they
+  // can be a long way from the location's anchor, which is only the point positions are measured
+  // from). That's where Minecraft has to keep the world loaded, and where you go to see it. Without
+  // anything in the scene yet, the anchor itself.
+  function sceneSpot(anchor) {
+    if (!anchor) return null;
+    const roots = typeof Project !== 'undefined' && Project ? mannequinRoots().concat(entityRoots()) : [];
+    const cams = typeof Project !== 'undefined' && Project ? cameraRoots() : [];
+    // players and mobs if there are any (cameras can be far back, or high up); else the cameras
+    const things = roots.length ? roots : cams;
+    if (!things.length) return { x: Number(anchor.x), y: Number(anchor.y), z: Number(anchor.z), dim: anchor.dim };
+    const lo = [Infinity, Infinity, Infinity];
+    const hi = [-Infinity, -Infinity, -Infinity];
+    for (const g of things) {
+      const w = toWorld(g.origin);
+      for (let i = 0; i < 3; i++) {
+        lo[i] = Math.min(lo[i], w[i]);
+        hi[i] = Math.max(hi[i], w[i]);
+      }
+    }
+    return { x: round(Number(anchor.x) + (lo[0] + hi[0]) / 2, 2), y: round(Number(anchor.y) + lo[1], 2), z: round(Number(anchor.z) + (lo[2] + hi[2]) / 2, 2), dim: anchor.dim };
+  }
+
+  // Pose Studio ▸ Locations ▸ Go to Scene (and the panel's button): takes you to where the scene is.
+  async function goToScene() {
+    if (!requireConnection()) return;
+    const l = projectLink();
+    const anchor = (l && l.anchor) || (connectedWorld && connectedWorld.anchor);
+    const spot = sceneSpot(anchor);
+    if (!spot) {
+      Blockbench.showQuickMessage('This scene has no place in the world yet (save it as a location first)', 3000);
+      return;
+    }
+    await ensureTickingArea().catch(() => {});
+    if (await goToLocation(spot)) Blockbench.showQuickMessage('Pose Studio: you are at the scene', 2500);
+  }
+
   async function ensureTickingArea() {
     const l = projectLink();
     if (!link.connected || !l || !l.anchor || !connectedWorld || l.id !== connectedWorld.id) return;
-    const a = l.anchor;
+    // around the scene itself, not the anchor: a scene built away from its anchor stays loaded
+    const a = sceneSpot(l.anchor);
     const at = `${Math.floor(a.x)} ${Math.floor(a.y)} ${Math.floor(a.z)}`;
     const name = `pose_${String(l.loc || 'main').replace(/[^a-z0-9_]/gi, '_')}`;
     if (tickingAreas.get(name) === at) return;
@@ -9430,13 +9469,14 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     const fresh = await readWorldScene().catch(() => null);
     if (!fresh || !fresh.player) return;
     const sameDim = !linked.anchor.dim || !fresh.player.dim || linked.anchor.dim === fresh.player.dim;
-    const away = distanceTo(linked.anchor, fresh.player);
+    const spot = sceneSpot(linked.anchor);
+    const away = distanceTo(spot, fresh.player);
     if (sameDim && away <= FAR_AWAY) return;
     const name = linked.locName || 'This location';
     // Minecraft only draws the world (terrain and entities) around the player, so the player goes
     // with you. You're hidden and the camera is Pose Studio's anyway.
     if (followLocations) {
-      const went = await goToLocation(linked.anchor);
+      const went = await goToLocation(spot);
       if (!went) return false;
       Blockbench.showQuickMessage(`Pose Studio: took you to ${name} (${sameDim ? `${Math.round(away)} blocks` : 'another dimension'}) so Minecraft loads it`, 3500);
       await sleep(2000); // let the area load before anything reads it
@@ -9453,7 +9493,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
         cancel: 1,
       },
       (button) => {
-        if (button === 0) goToLocation(linked.anchor);
+        if (button === 0) goToLocation(spot);
       }
     );
     return false;
@@ -9987,6 +10027,14 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.58.0",
+      "date": "2026-10-05",
+      "changes": [
+        "Fixed: a location whose scene was built away from where the location was set didn't load its players and mobs until you walked there. Opening a location now takes you to where the scene actually is (the middle of its players and mobs, or its cameras if there are none), and Minecraft keeps that area loaded instead of the area around the location's starting point.",
+        "New: Go to Scene (on the panel under Location, and in Locations). It takes you to the open scene's players, mobs and cameras whenever you want."
+      ]
+    },
     {
       "version": "0.57.0",
       "date": "2026-10-05",
@@ -10849,7 +10897,7 @@ ${PLUGIN_URL}`,
 
   // for the plugin's own tests only (they set this flag); nothing happens otherwise
   if (typeof globalThis !== 'undefined' && globalThis.__POSE_STUDIO_TEST) {
-    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS };
+    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS, sceneSpot };
   }
 
   Plugin.register('pose_studio', {
@@ -11037,6 +11085,10 @@ ${PLUGIN_URL}`,
           name: 'Remove Wild Mobs…', icon: 'pest_control', click: removeWildMobsDialog,
           description: "Takes the mobs Pose Studio didn't place out of the scene, without drops (boats, minecarts and armour stands stay).",
         }),
+        goscene: new Action('pose_studio_go_scene', {
+          name: 'Go to Scene', icon: 'near_me', click: () => goToScene(),
+          description: "Takes you to where this scene's players, mobs and cameras are, so Minecraft loads and shows them.",
+        }),
         comparegame: new Action('pose_studio_compare_game', {
           name: 'Compare with Game', icon: 'compare',
           click: () => captureEntities(true),
@@ -11127,7 +11179,7 @@ ${PLUGIN_URL}`,
         a.showpanel,
         a.link,
         '_',
-        { name: 'Locations', id: 'pose_studio_scene_menu', icon: 'place', children: [a.savescene, a.newlocation, a.locations, '_', a.refreshloc, a.realign, a.unlinkscene, '_', a.pickworld] },
+        { name: 'Locations', id: 'pose_studio_scene_menu', icon: 'place', children: [a.savescene, a.newlocation, a.locations, a.goscene, '_', a.refreshloc, a.realign, a.unlinkscene, '_', a.pickworld] },
         {
           name: 'Camera Settings', id: 'pose_studio_camera_menu', icon: 'photo_camera_front',
           children: [{ name: 'Aspect Ratio', id: 'pose_studio_aspect', icon: 'aspect_ratio', children: aspectMenuItems }, a.timeweather, a.follow],
