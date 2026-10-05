@@ -2,7 +2,7 @@
 // The Blockbench plugin runs commands through the /connect websocket as the player,
 // e.g. `/scriptevent pose:set {"id":"mq_1","p":[x,y,z],"b":[...21 angles]}`.
 // Positions arrive as block offsets from the anchor; angles are already in Bedrock convention.
-import { world, system, BlockVolume, StructureSaveMode, StructureRotation } from "@minecraft/server";
+import { world, system, BlockVolume, StructureSaveMode, StructureRotation, MolangVariableMap } from "@minecraft/server";
 
 const TYPE = "pose:mannequin";
 const TAG_PREFIX = "pose_id.";
@@ -269,7 +269,51 @@ function applyEquipment(entity, equipment, slots = Object.keys(EQUIP_SLOTS)) {
   if (problems.length) throw new Error(`some equipment couldn't be set: ${problems.join("; ")}`);
 }
 
+// `pose:fx {"id","p","t":particle,"n":ticks,"v":{name: number | [x,y,z]}}` — a particle effect placed
+// in the scene: started at p every n ticks (0: once), with the values it reads. Kept until it's
+// removed (pose:remove), everything is cleared, or the world closes; Blockbench sends them again.
+const effects = new Map(); // id -> { dim, loc, t, every, vars, due }
+let fxRun;
+let fxTick = 0;
+const warnedFx = new Set();
+
+function startEffect(fx) {
+  const map = new MolangVariableMap();
+  for (const [name, value] of Object.entries(fx.vars)) {
+    if (Array.isArray(value)) map.setVector3(`variable.${name}`, { x: Number(value[0]) || 0, y: Number(value[1]) || 0, z: Number(value[2]) || 0 });
+    else map.setFloat(`variable.${name}`, Number(value) || 0);
+  }
+  try {
+    world.getDimension(fx.dim).spawnParticle(fx.t, fx.loc, map);
+  } catch (e) {
+    if (isUnloaded(e) || warnedFx.has(fx.t)) return; // not loaded right now: tried again next time
+    warnedFx.add(fx.t);
+    console.warn(`[Pose Studio] particle ${fx.t}: ${e}`);
+  }
+}
+
+function setFx(player, data) {
+  if (!finite(data.p) || !data.t) throw new Error("invalid particle");
+  const anchor = requireAnchor(player);
+  effects.set(String(data.id), { dim: anchor.dim, loc: toWorld(anchor, data.p), t: String(data.t), every: Math.max(0, Math.round(Number(data.n) || 0)), vars: data.v && typeof data.v === "object" ? data.v : {}, due: 0 });
+  if (fxRun !== undefined) return;
+  fxRun = system.runInterval(() => {
+    if (!effects.size) {
+      system.clearRun(fxRun);
+      fxRun = undefined;
+      return;
+    }
+    fxTick++;
+    for (const fx of effects.values()) {
+      if (fx.due < 0 || fxTick < fx.due) continue;
+      startEffect(fx);
+      fx.due = fx.every ? fxTick + fx.every : -1;
+    }
+  }, 1);
+}
+
 function removeMannequin(data) {
+  if (effects.delete(String(data.id))) return;
   if (removeLight(String(data.id))) return;
   const anchor = getAnchor();
   if (!anchor) return;
@@ -279,6 +323,7 @@ function removeMannequin(data) {
 
 function clearAll() {
   removeAllLights();
+  effects.clear();
   for (const dimId of ["overworld", "nether", "the_end"]) {
     for (const e of world.getDimension(dimId).getEntities({ families: ["pose_studio"] })) e.remove();
   }
@@ -940,7 +985,7 @@ function debug(player) {
 // Every name looks like `PSD[op|page|item]`; page 0 always carries
 // `M|ready|<pages>|<items>|<items per page>` or `M|busy|<percent>`.
 // What this script understands; Blockbench warns when the world runs an older one.
-const PACK_PROTOCOL = 25;
+const PACK_PROTOCOL = 26;
 const IO_OBJECTIVE = "pose_io";
 const ITEMS_PER_PAGE = 30;
 const MAX_PAGES_PER_BATCH = 16;
@@ -1692,6 +1737,8 @@ function handle(ev) {
       return redoMove(player, data);
     case "pose:clearmobs":
       return clearMobs(player, data);
+    case "pose:fx":
+      return setFx(player, data);
     case "pose:light":
       return setLight(player, data);
     case "pose:path":

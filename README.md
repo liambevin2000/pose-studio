@@ -137,6 +137,17 @@ Animate the camera, players and mobs on Blockbench's timeline and have the game 
 
 Limits: Minecraft's camera can't roll. Bones in the game update 20 times a second. Items held by mobs follow the playhead but not Play Animation in Minecraft. Position keyframes on single bones are not sent to the game.
 
+## Particles
+
+Place particle effects from the world's packs (DragonCraft's smoke, wind, dust…) or Minecraft's own in the scene.
+
+- **Particles ▸ Add Particle…** lists them, the packs' own first. Pick one and it becomes an `fx_N` marker: move it like anything else and Minecraft shows the effect there.
+- Most effects are one short burst, so the marker starts it again **every** so many seconds (0: only once). Lower is denser.
+- Some effects read values a script normally gives them (a wind's direction and intensity). Those appear as fields in the same window.
+- **Particle Settings…** changes the selected marker. Deleting the marker stops the effect.
+
+An effect that repeats by itself can't be stopped by Pose Studio once started: it stays until the world is reopened.
+
 ## Moving structures
 
 Select a box of blocks in Minecraft, move it in Blockbench, and Minecraft moves the blocks.

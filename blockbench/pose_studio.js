@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.66.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.67.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -1629,6 +1629,16 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
         send(`scriptevent pose:hold ${hand}`);
         lastSent.set(key, hand);
       }
+    }
+    for (const fx of fxRoots()) {
+      const id = mannequinId(fx.name);
+      if (seen.has(id) || !fxInfo(fx).id) continue;
+      seen.add(id);
+      const msg = fxMessage(fx);
+      if (lastSent.get(id) === msg) continue;
+      if (link.inFlight >= MAX_IN_FLIGHT) return;
+      send(`scriptevent pose:fx ${msg}`);
+      lastSent.set(id, msg);
     }
     for (const light of lightRoots()) {
       const id = mannequinId(light.name);
@@ -3643,6 +3653,201 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     return JSON.stringify({ id: mannequinId(light.name), p: toWorld(light.origin), l: lightLevel(light) });
   }
 
+  // ---- Particles --------------------------------------------------------------------------------------
+  // Pose Studio ▸ Particles ▸ Add Particle…: one of the particle effects of the world's packs (smoke,
+  // wind, dust…) or Minecraft's own, placed in the scene. In Blockbench it's a small marker (an
+  // fx_N group) you move like anything else; in Minecraft the effect is started there again and
+  // again (most effects are a short burst, so "every" is how often it's started). Effects that
+  // read values a script normally gives them (a wind's direction and strength) get those from the
+  // marker's settings. Deleting the marker stops it.
+  const FX_PREFIX = /^fx_\d+$/i;
+  function fxRoots() {
+    if (typeof Project === 'undefined' || !Project) return [];
+    return Outliner.root.filter((node) => node instanceof Group && FX_PREFIX.test(node.name));
+  }
+  function selectedFx() {
+    for (let node = selectedNode(); node && node !== 'root'; node = node.parent) {
+      if (node instanceof Group && FX_PREFIX.test(node.name) && node.parent === 'root') return node;
+    }
+    return null;
+  }
+  const fxInfo = (group) => Object.assign({ id: '', every: 1, vars: {} }, group.pose_fx || {});
+
+  // What a particle effect file says: how long a burst lasts, and the values it expects from outside.
+  const PARTICLE_OWN = /^(particle_(age|lifetime|random_[1-4])|emitter_(age|lifetime|random_[1-4])|entity_scale)$/;
+  function particleEntry(id, effect, source) {
+    const c = effect.components || {};
+    const looping = !!c['minecraft:emitter_lifetime_looping'];
+    const once = c['minecraft:emitter_lifetime_once'] || c['minecraft:emitter_lifetime_looping'] || {};
+    const active = Math.max(0, ...(String(once.active_time === undefined ? '' : once.active_time).match(/\d+(\.\d+)?/g) || []).map(Number));
+    const instant = !!c['minecraft:emitter_rate_instant'];
+    const text = JSON.stringify(effect);
+    const set = new Set(Object.keys(effect.curves || {}).map((k) => k.replace(/^(v|variable)\./i, '').toLowerCase()));
+    for (const m of text.matchAll(/\b(?:v|variable)\.([a-z_][a-z0-9_]*)\s*=(?!=)/gi)) set.add(m[1].toLowerCase());
+    const inputs = new Map();
+    for (const m of text.matchAll(/\b(?:v|variable)\.([a-z_][a-z0-9_]*)(\.[xyz]\b)?/gi)) {
+      const name = m[1].toLowerCase();
+      if (set.has(name) || PARTICLE_OWN.test(name)) continue;
+      inputs.set(name, { name, vector: !!m[2] || !!(inputs.get(name) && inputs.get(name).vector) });
+    }
+    return {
+      id, source, looping, instant,
+      name: id.replace(/^[^:]*:/, '').replace(/_/g, ' '),
+      // a steady burst is started again as it ends; a puff once a second; a looping one only once
+      every: looping ? 0 : instant ? 1 : Math.max(0.05, round(active || 1, 2)),
+      inputs: [...inputs.values()],
+    };
+  }
+
+  // Every particle effect of the world's packs and of Minecraft: the packs' own first.
+  function particleList(content) {
+    if (content.particles) return content.particles;
+    const found = new Map();
+    for (const layer of content.layers || []) {
+      for (const [path, file] of layer.files) {
+        if (!path.startsWith('particles/') || !path.endsWith('.json')) continue;
+        try {
+          const effect = parseLooseJson(file.read()).particle_effect;
+          const id = effect && effect.description && effect.description.identifier;
+          if (id) found.set(id, particleEntry(id, effect, layer.label));
+        } catch (e) {
+          // not a particle file we can read
+        }
+      }
+    }
+    content.particles = [...found.values()].sort((a, b) => (a.source === 'Minecraft') - (b.source === 'Minecraft') || a.id.localeCompare(b.id));
+    return content.particles;
+  }
+
+  // Puts a particle in the scene, or changes the one given. settings: { every, vars }.
+  function placeParticle(entry, settings, existing) {
+    if (typeof Project === 'undefined' || !Project) newProject(Formats.free);
+    const vars = {};
+    for (const input of entry.inputs || []) {
+      const v = (settings.vars || {})[input.name];
+      vars[input.name] = input.vector ? [0, 1, 2].map((i) => round(Number(Array.isArray(v) ? v[i] : 0) || 0, 3)) : round(Number(v) || 0, 3);
+    }
+    const info = { id: entry.id, every: Math.max(0, round(Number(settings.every) || 0, 2)), vars };
+    if (existing) {
+      Undo.initEdit({ outliner: true, elements: [] });
+      existing.pose_fx = info;
+      Undo.finishEdit('Change particle', { outliner: true, elements: [] });
+      return existing;
+    }
+    // beside what's selected (a player, a mob), else a little above the middle of the scene
+    const near = selectedPoseRoot();
+    const at = near ? [near.origin[0] + 16, near.origin[1] + 16, near.origin[2]] : [0, 24, 0];
+    let n = 1;
+    while (Outliner.root.some((g) => g instanceof Group && g.name === `fx_${n}`)) n++;
+    Undo.initEdit({ outliner: true, elements: [] });
+    const group = new Group({ name: `fx_${n}`, origin: at.slice() }).init();
+    group.pose_fx = info;
+    const cube = new Cube({ name: entry.name || 'particle', from: at.map((v) => v - 2), to: at.map((v) => v + 2), color: 1 }).addTo(group).init();
+    Undo.finishEdit('Add particle', { outliner: true, elements: [cube] });
+    Canvas.updateAll();
+    try {
+      if (typeof unselectAllElements === 'function') unselectAllElements();
+      if (typeof group.select === 'function') group.select();
+    } catch (e) {
+      // it's in the outliner either way
+    }
+    return group;
+  }
+
+  // Add Particle… (nothing of ours selected) and Particle Settings… (a particle selected).
+  async function particleDialog(edit) {
+    const existing = edit ? selectedFx() : null;
+    if (edit && !existing) {
+      Blockbench.showQuickMessage('Select a particle (fx_) first', 2000);
+      return;
+    }
+    let content;
+    try {
+      content = await previewContent();
+    } catch (e) {
+      showError('Pose Studio: particles', e);
+      return;
+    }
+    const list = particleList(content);
+    if (!list.length) {
+      Blockbench.showMessageBox({ title: 'Pose Studio: particles', message: "No particle effects were found in this world's packs or in Minecraft." });
+      return;
+    }
+    const had = existing ? fxInfo(existing) : null;
+    const byId = new Map(list.map((p) => [p.id, p]));
+    const defaults = (entry) => Object.fromEntries(entry.inputs.map((i) => [i.name, i.vector ? [1, 0, 0] : 1]));
+    let vm = null;
+    new Dialog({
+      id: 'pose_studio_particle',
+      title: existing ? `Particle: ${existing.name}` : 'Add Particle',
+      width: 520,
+      buttons: [existing ? 'Save' : 'Add', 'Cancel'],
+      cancelIndex: 1,
+      component: {
+        data: () => ({
+          search: '',
+          pick: had && byId.has(had.id) ? had.id : '',
+          every: had ? had.every : 1,
+          vars: had ? JSON.parse(JSON.stringify(had.vars || {})) : {},
+          list: list.map((p) => ({ id: p.id, name: p.name, source: p.source })),
+        }),
+        computed: {
+          shown() {
+            const q = this.search.trim().toLowerCase();
+            return (q ? this.list.filter((p) => p.id.toLowerCase().includes(q) || p.name.toLowerCase().includes(q)) : this.list).slice(0, 400);
+          },
+          entry() {
+            return byId.get(this.pick) || null;
+          },
+        },
+        methods: {
+          choose(id) {
+            this.pick = id;
+            const entry = byId.get(id);
+            this.every = entry.every;
+            this.vars = defaults(entry);
+          },
+        },
+        mounted() {
+          vm = this;
+          // a particle from before may read values the saved settings don't have yet
+          if (this.entry) this.vars = Object.assign(defaults(this.entry), this.vars);
+        },
+        template: `
+          <div>
+            <input type="text" class="dark_bordered" v-model="search" placeholder="Search particles (smoke, wind, dust…)" style="width: 100%; margin-bottom: 6px;">
+            <div style="height: 260px; overflow-y: auto; border: 1px solid var(--color-border);">
+              <div v-for="p in shown" :key="p.id" @click="choose(p.id)" :title="p.id" :style="{ padding: '3px 8px', cursor: 'pointer', display: 'flex', justifyContent: 'space-between', background: pick === p.id ? 'var(--color-accent)' : '', color: pick === p.id ? 'var(--color-accent_text)' : '' }">
+                <span>{{ p.name }}</span><span style="opacity: 0.6;">{{ p.source }}</span>
+              </div>
+            </div>
+            <div v-if="entry" style="margin-top: 10px;">
+              <label>Start it every <input type="number" class="dark_bordered" v-model.number="every" min="0" step="0.05" style="width: 70px;"> seconds</label>
+              <span style="opacity: 0.7; margin-left: 8px;">(0: only once)</span>
+              <div v-if="entry.looping" style="margin-top: 6px; color: var(--color-subtle_text);">This effect repeats by itself: it's started once, and stays where it was started until the world is reopened.</div>
+              <div v-for="input in entry.inputs" :key="input.name" style="margin-top: 6px; display: flex; gap: 6px; align-items: center;">
+                <span style="min-width: 130px;">{{ input.name }}</span>
+                <template v-if="input.vector">
+                  <input v-for="axis in [0, 1, 2]" :key="axis" type="number" class="dark_bordered" v-model.number="vars[input.name][axis]" step="0.1" style="width: 70px;" :title="'xyz'[axis]">
+                </template>
+                <input v-else type="number" class="dark_bordered" v-model.number="vars[input.name]" step="0.1" style="width: 70px;">
+              </div>
+            </div>
+          </div>`,
+      },
+      onConfirm() {
+        if (!vm || !vm.entry) return;
+        const group = placeParticle(vm.entry, { every: vm.every, vars: vm.vars }, existing);
+        if (!existing) Blockbench.showQuickMessage(`${group.name} added (${vm.entry.name}). Move it where the particles should be`, 3000);
+      },
+    }).show();
+  }
+
+  function fxMessage(group) {
+    const info = fxInfo(group);
+    return JSON.stringify({ id: mannequinId(group.name), p: toWorld(group.origin), t: info.id, n: Math.round(info.every * 20), v: info.vars || {} });
+  }
+
   // ---- Classic menu or the panel (experimental) ------------------------------------------------------
   // Settings ▸ Pose Studio: New Panel Interface (experimental). Off (the default): everything is in
   // the Pose Studio menu, as it always was. On: the everyday things are buttons on the Pose Studio
@@ -3703,6 +3908,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
           },
           { name: 'Add Camera', id: 'pose_studio_add_camera', icon: 'videocam', children: [a.grabcam, a.savecam] },
           { name: 'Lights', id: 'pose_studio_light_menu', icon: 'lightbulb', children: [a.addlight, a.lightlevel] },
+          { name: 'Particles', id: 'pose_studio_fx_menu', icon: 'auto_awesome', children: [a.addfx, a.editfx] },
           { name: 'Camera', id: 'pose_studio_camera_menu', icon: 'photo_camera_front', children: [a.pov, a.camera, '_', a.fov, aspect, a.timeweather, '_', a.lookcam, a.follow] },
           ...(cameraPathsOn() ? [{ name: 'Animate (experimental)', id: 'pose_studio_animate_menu', icon: 'movie_filter', children: [a.camanimate, a.animkey, '_', a.camanimplay, a.camanimstop] }] : []),
           '_',
@@ -3912,6 +4118,8 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
               <div class="ps-btn" @click="run('pose_studio_grabcam')" title="A camera where you're looking from in Minecraft"><i class="material-icons">add_a_photo</i><span>Camera: Game</span></div>
               <div class="ps-btn" @click="run('pose_studio_savecam')" title="A camera where the Blockbench view is"><i class="material-icons">switch_video</i><span>Camera: View</span></div>
               <div class="ps-btn ps-wide" @click="run('pose_studio_add_light')" title="A light: a marker here, an invisible light block in Minecraft"><i class="material-icons">lightbulb</i><span>Add Light</span></div>
+              <div class="ps-btn" @click="run('pose_studio_add_fx')" title="A particle effect of the world's packs (smoke, wind…), placed in the scene"><i class="material-icons">auto_awesome</i><span>Add Particle…</span></div>
+              <div class="ps-btn" @click="run('pose_studio_edit_fx')" title="What the selected particle is, how often it's started, and its values"><i class="material-icons">tune</i><span>Particle Settings…</span></div>
               <div class="ps-btn" @click="run('pose_studio_scan')"><i class="material-icons">travel_explore</i><span>Import World…</span></div>
               <div class="ps-btn" @click="run('pose_studio_scan_expand')"><i class="material-icons">add_location_alt</i><span>Expand World…</span></div>
               <div class="ps-btn ps-wide" @click="run('pose_studio_clear_mobs')" title="Takes the mobs you didn't place out of the scene, without drops"><i class="material-icons">pest_control</i><span>Remove Wild Mobs…</span></div>
@@ -5261,7 +5469,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     return entries;
   }
 
-  const INDEXED_FOLDERS = /^(entity|models|render_controllers|animations|animation_controllers|attachables|textures|texts)\//;
+  const INDEXED_FOLDERS = /^(entity|models|render_controllers|animations|animation_controllers|attachables|textures|texts|particles)\//;
 
   // A pack's files, from plain folders and from __brarchive archives. Keys are lower-case paths
   // without extension handling, e.g. "textures/entity/cow/cow.png".
@@ -5286,7 +5494,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
         }
         if (stat.isDirectory()) {
           if (name === '__brarchive') walkArchives(full, '');
-          else if (!rel ? /^(entity|models|render_controllers|animations|animation_controllers|attachables|textures|texts)$/i.test(name) : true) walk(full, relPath);
+          else if (!rel ? /^(entity|models|render_controllers|animations|animation_controllers|attachables|textures|texts|particles)$/i.test(name) : true) walk(full, relPath);
         } else if (INDEXED_FOLDERS.test(relPath.toLowerCase())) {
           files.set(relPath.toLowerCase(), { plain: true, read: () => fs.readFileSync(full) });
         }
@@ -9921,7 +10129,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     return { id: idItem.slice(2), name: scene.world || '', anchor: point('A|'), player: point('P|'), locations, removed: scene.removed || [], protocol: version ? Number(version.slice(2)) : 0 };
   }
 
-  const EXPECTED_PACK_PROTOCOL = 25; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
+  const EXPECTED_PACK_PROTOCOL = 26; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
   let warnedOldPack = false;
 
   // Scene files in the scenes folders that belong to a world (their pose_world says so), as
@@ -10736,6 +10944,14 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.67.0",
+      "date": "2026-10-05",
+      "changes": [
+        "New: particles. Add smoke, wind and other effects from your packs to the scene and move them in Blockbench.",
+        "Update the Minecraft packs."
+      ]
+    },
     {
       "version": "0.66.0",
       "date": "2026-10-05",
@@ -11607,7 +11823,7 @@ ${PLUGIN_URL}`,
 
   // for the plugin's own tests only (they set this flag); nothing happens otherwise
   if (typeof globalThis !== 'undefined' && globalThis.__POSE_STUDIO_TEST) {
-    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS, sceneSpot, addLight, lightRoots, stopPath, cameraPathsOn, cameraPose, sampleCameraAnimation, playCameraAnimation, animateCamera, zoomedFov, setupClipChannel, removeClipChannel, clipKeys, clipPose, clipState, displayClips, addAnimationKey, sampleAnimation, liveRotation, liveOrigin, poseMessage, entityMessage, setContentCache: (c) => (contentCache = c) };
+    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS, sceneSpot, addLight, lightRoots, stopPath, cameraPathsOn, cameraPose, sampleCameraAnimation, playCameraAnimation, animateCamera, zoomedFov, setupClipChannel, removeClipChannel, clipKeys, clipPose, clipState, displayClips, addAnimationKey, sampleAnimation, liveRotation, liveOrigin, poseMessage, entityMessage, setContentCache: (c) => (contentCache = c), particleList, particleEntry, placeParticle, fxMessage, fxRoots };
   }
 
   Plugin.register('pose_studio', {
@@ -11631,6 +11847,7 @@ ${PLUGIN_URL}`,
         new Property(Group, 'object', 'pose_vars'),
         new Property(Group, 'number', 'pose_eq_layout'),
         new Property(Group, 'number', 'pose_light'),
+        new Property(Group, 'object', 'pose_fx'),
         new Property(Group, 'object', 'pose_mount'),
         new Property(Group, 'object', 'pose_driver'),
         new Property(Group, 'number', 'pose_skin_slot', { default: 0 }),
@@ -11805,6 +12022,14 @@ ${PLUGIN_URL}`,
         addlight: new Action('pose_studio_add_light', {
           name: 'Add Light', icon: 'lightbulb', click: () => addLight(),
           description: 'Adds a light to the scene: a marker here, an invisible light block in Minecraft. Move it where the light should be.',
+        }),
+        addfx: new Action('pose_studio_add_fx', {
+          name: 'Add Particle…', icon: 'auto_awesome', click: () => particleDialog(false),
+          description: "Places a particle effect of the world's packs (smoke, wind, dust…) or of Minecraft in the scene: a marker here, the effect in Minecraft.",
+        }),
+        editfx: new Action('pose_studio_edit_fx', {
+          name: 'Particle Settings…', icon: 'tune', click: () => particleDialog(true),
+          description: "The selected particle: which effect it is, how often it's started, and the values it reads.",
         }),
         lightlevel: new Action('pose_studio_light_level', {
           name: 'Light Level…', icon: 'brightness_medium', click: lightLevelDialog,

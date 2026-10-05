@@ -1,5 +1,13 @@
 [
   {
+    "version": "0.67.0",
+    "date": "2026-10-05",
+    "changes": [
+      "New: particles. Add smoke, wind and other effects from your packs to the scene and move them in Blockbench.",
+      "Update the Minecraft packs."
+    ]
+  },
+  {
     "version": "0.66.0",
     "date": "2026-10-05",
     "changes": [

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.67.0 (2026-10-05)
+
+- New: particles. Add smoke, wind and other effects from your packs to the scene and move them in Blockbench.
+- Update the Minecraft packs.
+
 ## 0.66.0 (2026-10-05)
 
 - New (experimental): players and mobs have an Animation track on the timeline. Keyframe which animation plays when.
