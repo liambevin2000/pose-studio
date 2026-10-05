@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.56.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.57.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -3032,6 +3032,51 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     if (which === 'clear') removeStructureMesh();
   }
 
+  // ---- Wild mobs ------------------------------------------------------------------------------------
+  // Pose Studio ▸ Remove Wild Mobs…: takes every mob out of the scene that Pose Studio didn't place
+  // (they're removed, not killed: nothing drops). Boats, minecarts, armour stands and the like stay.
+  const WILD_MOBS_KEY = 'pose_studio_wild_mobs';
+  function removeWildMobsDialog() {
+    if (!requireConnection()) return;
+    let saved = {};
+    try {
+      saved = JSON.parse(localStorage.getItem(WILD_MOBS_KEY) || '{}') || {};
+    } catch (e) {
+      saved = {};
+    }
+    new Dialog({
+      id: 'pose_studio_wild_mobs',
+      title: 'Remove Wild Mobs',
+      width: 480,
+      form: {
+        radius: { label: 'Within (blocks of the scene)', type: 'number', value: saved.radius || 64, min: 8, max: 256, step: 8 },
+        items: { label: 'Also remove dropped items and XP orbs', type: 'checkbox', value: saved.items !== false },
+        spawning: { label: 'Stop mobs spawning in this world', type: 'checkbox', value: !!saved.spawning },
+        info: { type: 'info', text: "Removes the mobs Pose Studio didn't place. They vanish without dying, so they drop nothing. Your players and mobs, boats, minecarts, armour stands and paintings are left alone." },
+      },
+      async onConfirm(form) {
+        const options = { radius: Number(form.radius) || 64, items: !!form.items, spawning: !!form.spawning };
+        try {
+          localStorage.setItem(WILD_MOBS_KEY, JSON.stringify(options));
+        } catch (e) {
+          // not remembered
+        }
+        try {
+          const items = await runGameQuery('pose:clearmobs', { r: options.radius, items: options.items ? 1 : 0, spawning: options.spawning ? 0 : 1 }, 'Removing wild mobs');
+          const counts = (items.find((i) => i.startsWith('K|')) || 'K|0|0').split('|');
+          const mobs = Number(counts[1]) || 0;
+          const dropped = Number(counts[2]) || 0;
+          Blockbench.showQuickMessage(
+            `Removed ${mobs} mob${mobs === 1 ? '' : 's'}${options.items ? ` and ${dropped} dropped item${dropped === 1 ? '' : 's'}` : ''}${options.spawning ? '. Mob spawning is off in this world' : ''}`,
+            4000
+          );
+        } catch (e) {
+          Blockbench.showMessageBox({ title: 'Pose Studio: wild mobs', message: `${e.message || e}\n\nIf Minecraft doesn't know this, update the Minecraft packs (Check for Updates, then reopen the world).` });
+        }
+      },
+    }).show();
+  }
+
   // ---- The Pose Studio panel ------------------------------------------------------------------------
   // A panel in the sidebar (movable, collapsible, floatable, like Blockbench's own) with what you use
   // all the time as buttons: connecting, adding things, what applies to the selection, the cameras,
@@ -3079,6 +3124,10 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
       pov: !!(povToggle && povToggle.value),
       cameras: hasProject ? cameraRoots().map((c) => c.name) : [],
       camera: active ? active.name : '',
+      location: (() => {
+        const l = projectLink();
+        return l ? (l.loc && l.loc !== 'main' ? l.loc : l.name || 'Main') : '';
+      })(),
       selected: cam ? cam.name : root ? root.name : '',
       kind: cam ? 'camera' : root ? (ENTITY_PREFIX.test(root.name) ? 'mob' : 'player') : '',
       structure: !!structure,
@@ -3152,6 +3201,13 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
               <i class="material-icons">content_copy</i><span>{{ s.command }}</span>
             </div>
 
+            <div class="ps-head" @click="fold('location')"><i class="material-icons">{{ folded.location ? 'chevron_right' : 'expand_more' }}</i>Location{{ s.location ? ': ' + s.location : '' }}</div>
+            <div class="ps-grid" v-show="!folded.location">
+              <div class="ps-btn ps-wide" @click="run('pose_studio_locations')" title="Every location of this world: open one, go there"><i class="material-icons">place</i><span>Locations…</span></div>
+              <div class="ps-btn" @click="run('pose_studio_save_scene')"><i class="material-icons">save</i><span>Save</span></div>
+              <div class="ps-btn" @click="run('pose_studio_new_location')" title="A new location where you're standing"><i class="material-icons">add_location_alt</i><span>New Here…</span></div>
+            </div>
+
             <div class="ps-head" @click="fold('scene')"><i class="material-icons">{{ folded.scene ? 'chevron_right' : 'expand_more' }}</i>Scene</div>
             <div class="ps-grid" v-show="!folded.scene">
               <div class="ps-btn" @click="run('pose_studio_add')"><i class="material-icons">accessibility_new</i><span>Add Player</span></div>
@@ -3160,6 +3216,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
               <div class="ps-btn" @click="run('pose_studio_savecam')" title="A camera where the Blockbench view is"><i class="material-icons">switch_video</i><span>Camera: View</span></div>
               <div class="ps-btn" @click="run('pose_studio_scan')"><i class="material-icons">travel_explore</i><span>Import World…</span></div>
               <div class="ps-btn" @click="run('pose_studio_scan_expand')"><i class="material-icons">add_location_alt</i><span>Expand World…</span></div>
+              <div class="ps-btn ps-wide" @click="run('pose_studio_clear_mobs')" title="Takes the mobs you didn't place out of the scene, without drops"><i class="material-icons">pest_control</i><span>Remove Wild Mobs…</span></div>
             </div>
 
             <div class="ps-head" @click="fold('selected')"><i class="material-icons">{{ folded.selected ? 'chevron_right' : 'expand_more' }}</i>{{ s.selected || 'Selected' }}</div>
@@ -9154,7 +9211,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     return { id: idItem.slice(2), name: scene.world || '', anchor: point('A|'), player: point('P|'), locations, removed: scene.removed || [], protocol: version ? Number(version.slice(2)) : 0 };
   }
 
-  const EXPECTED_PACK_PROTOCOL = 19; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
+  const EXPECTED_PACK_PROTOCOL = 20; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
   let warnedOldPack = false;
 
   // Scene files in the scenes folders that belong to a world (their pose_world says so), as
@@ -9930,6 +9987,16 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.57.0",
+      "date": "2026-10-05",
+      "changes": [
+        "New: Remove Wild Mobs… (on the panel under Scene, and in the menu). It takes every mob out of the scene that Pose Studio didn't place, within the distance you set. They're removed, not killed, so they drop nothing. Your players and mobs, boats, minecarts, armour stands, paintings and item frames are left alone.",
+        "Two options, remembered: also remove the dropped items and XP orbs already lying there (on by default), and stop mobs spawning in this world so the scene stays empty (off by default; it's the world's mob spawning rule).",
+        "The panel has a Location section: its title shows the location you're in, with buttons for Locations…, Save and New Here….",
+        "Update the Minecraft packs (Check for Updates, then reopen the world)."
+      ]
+    },
     {
       "version": "0.56.0",
       "date": "2026-10-05",
@@ -10966,6 +11033,10 @@ ${PLUGIN_URL}`,
           name: 'Debug Info', icon: 'bug_report', click: showDebug,
           description: 'What Blockbench is sending to Minecraft, for troubleshooting.',
         }),
+        wildmobs: new Action('pose_studio_clear_mobs', {
+          name: 'Remove Wild Mobs…', icon: 'pest_control', click: removeWildMobsDialog,
+          description: "Takes the mobs Pose Studio didn't place out of the scene, without drops (boats, minecarts and armour stands stay).",
+        }),
         comparegame: new Action('pose_studio_compare_game', {
           name: 'Compare with Game', icon: 'compare',
           click: () => captureEntities(true),
@@ -11064,6 +11135,7 @@ ${PLUGIN_URL}`,
         { name: 'Stream Deck', id: 'pose_studio_deck_menu', icon: 'grid_view', children: [a.deck, a.deckplugin] },
         '_',
         a.comparegame,
+        a.wildmobs,
         a.skin,
         a.anchor,
         a.clear,

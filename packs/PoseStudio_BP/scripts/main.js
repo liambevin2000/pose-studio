@@ -282,6 +282,67 @@ function clearAll() {
   }
 }
 
+// `pose:clearmobs {"r":64,"items":1,"spawning":0,op}` — takes the wild mobs out of the scene: every
+// mob within r blocks of the scene's anchor that Pose Studio didn't place. They're removed, not
+// killed, so nothing drops and nobody takes damage. Left alone: players, Pose Studio's own players
+// and mobs, and things that aren't creatures (boats, minecarts, armour stands, paintings, item
+// frames…). "items" also takes the dropped items and XP orbs lying there (from mobs killed before);
+// "spawning":0 switches natural mob spawning off so the scene stays empty. Answers `K|mobs|items`.
+const NOT_A_MOB = /boat|raft|skull|minecart|armor_stand|painting|item_frame|leash_knot|ender_crystal|npc|agent|tripod_camera|balloon|ice_bomb|chalkboard|shulker_bullet|fireball|arrow|trident|snowball|egg$|ender_pearl|falling_block|tnt|firework|fishing_hook|lightning|area_effect|evocation_fang|llama_spit|wind_charge|breeze_wind|xp_bottle|splash_potion|lingering_potion|eye_of_ender/;
+
+function isWildMob(e) {
+  const type = e.typeId;
+  if (!type || type === "minecraft:player" || /^pose:/.test(type)) return false;
+  if (type === "minecraft:item" || type === "minecraft:xp_orb") return false;
+  if (NOT_A_MOB.test(type.split(":").pop())) return false; // the name alone: "minecraft" has "raft" in it
+  try {
+    if (e.getTags().some((t) => t.startsWith(TAG_PREFIX))) return false;
+    if (e.matches && (e.matches({ families: ["pose_studio"] }) || e.matches({ families: ["inanimate"] }))) return false;
+  } catch {
+    // older versions: the checks above and below decide
+  }
+  try {
+    return !!e.getComponent("minecraft:health"); // creatures have health; decorations don't
+  } catch {
+    return false;
+  }
+}
+
+function clearMobs(player, data) {
+  beginResult(data.op);
+  const anchor = requireAnchor(player);
+  const dim = world.getDimension(anchor.dim);
+  const radius = Math.max(4, Math.min(256, Number(data.r) || 64));
+  const near = dim.getEntities({ location: { x: anchor.x, y: anchor.y, z: anchor.z }, maxDistance: radius });
+  let mobs = 0;
+  let items = 0;
+  for (const e of near) {
+    try {
+      if (isWildMob(e)) {
+        e.remove();
+        mobs++;
+      } else if (data.items && (e.typeId === "minecraft:item" || e.typeId === "minecraft:xp_orb")) {
+        e.remove();
+        items++;
+      }
+    } catch {
+      // gone already, or can't be removed
+    }
+  }
+  if (data.spawning === 0) {
+    try {
+      world.gameRules.doMobSpawning = false;
+    } catch {
+      try {
+        dim.runCommand("gamerule domobspawning false");
+      } catch {
+        // not allowed here
+      }
+    }
+  }
+  finishResult([`K|${mobs}|${items}`]);
+}
+
 function setCamera(player, data) {
   if (!player) return;
   const anchor = requireAnchor(player);
@@ -603,7 +664,7 @@ function debug(player) {
 // Every name looks like `PSD[op|page|item]`; page 0 always carries
 // `M|ready|<pages>|<items>|<items per page>` or `M|busy|<percent>`.
 // What this script understands; Blockbench warns when the world runs an older one.
-const PACK_PROTOCOL = 19;
+const PACK_PROTOCOL = 20;
 const IO_OBJECTIVE = "pose_io";
 const ITEMS_PER_PAGE = 30;
 const MAX_PAGES_PER_BATCH = 16;
@@ -1353,6 +1414,8 @@ function handle(ev) {
       return undoMove(player, data);
     case "pose:moveredo":
       return redoMove(player, data);
+    case "pose:clearmobs":
+      return clearMobs(player, data);
     case "pose:backdrop":
       return setBackdrop(player, data);
     case "pose:camclear":
@@ -1470,7 +1533,7 @@ system.afterEvents.scriptEventReceive.subscribe(
         waitForChunk(ev, e);
         return;
       }
-      if (ev.id === "pose:scan" || ev.id === "pose:grabcam" || ev.id === "pose:scene" || ev.id === "pose:backdrop" || ev.id === "pose:selinfo" || ev.id === "pose:move" || ev.id === "pose:moveundo" || ev.id === "pose:moveredo") failResult(e);
+      if (ev.id === "pose:scan" || ev.id === "pose:grabcam" || ev.id === "pose:scene" || ev.id === "pose:backdrop" || ev.id === "pose:selinfo" || ev.id === "pose:move" || ev.id === "pose:moveundo" || ev.id === "pose:moveredo" || ev.id === "pose:clearmobs") failResult(e);
       const msg = `${ev.id} failed: ${e}`;
       console.warn(`[Pose Studio] ${msg}`);
       if (!reportedErrors.has(msg) && ev.sourceEntity?.typeId === "minecraft:player") {

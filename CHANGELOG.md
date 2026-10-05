@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.57.0 (2026-10-05)
+
+- New: Remove Wild Mobs… (on the panel under Scene, and in the menu). It takes every mob out of the scene that Pose Studio didn't place, within the distance you set. They're removed, not killed, so they drop nothing. Your players and mobs, boats, minecarts, armour stands, paintings and item frames are left alone.
+- Two options, remembered: also remove the dropped items and XP orbs already lying there (on by default), and stop mobs spawning in this world so the scene stays empty (off by default; it's the world's mob spawning rule).
+- The panel has a Location section: its title shows the location you're in, with buttons for Locations…, Save and New Here….
+- Update the Minecraft packs (Check for Updates, then reopen the world).
+
 ## 0.56.0 (2026-10-05)
 
 - New: the Pose Studio panel. The everyday things are now buttons in a panel in the right sidebar (movable, foldable and floatable like Blockbench's own panels): connecting, adding players, entities and cameras, importing and expanding the world, capturing, and moving structures.
