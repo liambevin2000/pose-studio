@@ -1041,7 +1041,7 @@ function debug(player) {
 // Every name looks like `PSD[op|page|item]`; page 0 always carries
 // `M|ready|<pages>|<items>|<items per page>` or `M|busy|<percent>`.
 // What this script understands; Blockbench warns when the world runs an older one.
-const PACK_PROTOCOL = 28;
+const PACK_PROTOCOL = 29;
 const IO_OBJECTIVE = "pose_io";
 const ITEMS_PER_PAGE = 30;
 const MAX_PAGES_PER_BATCH = 16;
@@ -1688,7 +1688,14 @@ function selectBox(dim, min, size) {
 
 // Moves the box at `from` (min, size) so its lowest corner is at `to`, turned `rot`. Runs inside
 // whenLoaded: throws if a chunk isn't loaded, before anything is changed.
-function doMove(dimId, from, to, rot) {
+// Fills one kind of block in a box with another (in pieces a fill can take).
+function swapBlocks(dim, min, size, from, to) {
+  for (const piece of boxPieces(min, size, 32, 32)) dim.fillBlocks(new BlockVolume(piece.at, cornerOf(piece)), to, { blockFilter: { includeTypes: [from] } });
+}
+
+// skipAir: the air in the selection isn't moved, so where the selection is empty, what's at the
+// landing place stays (the air is saved as structure voids, which a structure leaves alone).
+function doMove(dimId, from, to, rot, skipAir = false) {
   const dim = world.getDimension(dimId);
   const size = from.size;
   const turned = rot === 90 || rot === 270 ? { x: size.z, y: size.y, z: size.x } : size;
@@ -1703,18 +1710,30 @@ function doMove(dimId, from, to, rot) {
     throw e;
   }
   const history = readList(LAST_MOVE_PROPERTY);
-  history.push({ dim: dimId, rot, from: { min: from.min, size, saved: lifted }, to: { min: to, size: turned, saved: covered } });
+  history.push({ dim: dimId, rot, air: skipAir ? 0 : 1, from: { min: from.min, size, saved: lifted }, to: { min: to, size: turned, saved: covered } });
   while (history.length > MAX_UNDO) {
     const old = history.shift();
     forgetStructures([].concat(old.from.saved, old.to.saved));
   }
   writeList(LAST_MOVE_PROPERTY, history);
   withoutDrops(() => {
+    // what is put down: the blocks as lifted, or a copy of them with voids for the air
+    let carried = lifted;
+    if (skipAir) {
+      swapBlocks(dim, from.min, size, "minecraft:air", "minecraft:structure_void");
+      try {
+        carried = saveBox(dim, from.min, size, `pose:move_${stamp}_c`);
+      } catch (e) {
+        swapBlocks(dim, from.min, size, "minecraft:structure_void", "minecraft:air");
+        throw e;
+      }
+    }
     clearArea(dim, from.min, size);
-    for (const piece of lifted) {
+    for (const piece of carried) {
       const off = turnedOffset(piece.off, piece.size, size, rot);
       world.structureManager.place(piece.id, dim, { x: to.x + off.x, y: to.y + off.y, z: to.z + off.z }, { includeEntities: false, rotation: ROTATIONS[rot] });
     }
+    if (skipAir) forgetStructures(carried);
   });
   // the selection is where the blocks are now
   selectBox(dimId, to, turned);
@@ -1735,7 +1754,7 @@ function moveSelection(player, data) {
   if (rot === 0 && to.x === s.min.x && to.y === s.min.y && to.z === s.min.z) throw new Error("It's already there: move it in Blockbench first");
 
   whenLoaded(dim, [{ min: s.min, size }, { min: to, size: turned }], () => {
-    doMove(s.dim, { min: s.min, size }, to, rot);
+    doMove(s.dim, { min: s.min, size }, to, rot, !!data.skip);
     writeList(REDO_PROPERTY, []); // a new move: nothing to redo any more
     return [`ok|${readList(LAST_MOVE_PROPERTY).length}|0`];
   }, "The place it's moving from or to wouldn't load. Stand closer and try again.");
@@ -1759,7 +1778,7 @@ function undoMove(player, data) {
     forgetStructures([].concat(last.from.saved, last.to.saved));
     // how to do it again: the same box, to the same place, turned the same way
     const redo = readList(REDO_PROPERTY);
-    redo.push({ dim: last.dim, rot: last.rot, from: { min: last.from.min, size: last.from.size }, to: last.to.min });
+    redo.push({ dim: last.dim, rot: last.rot, air: last.air, from: { min: last.from.min, size: last.from.size }, to: last.to.min });
     writeList(REDO_PROPERTY, redo.slice(-MAX_UNDO));
     return [`ok|${history.length}|${Math.min(redo.length, MAX_UNDO)}`];
   }, "The places of that move wouldn't load. Stand closer and try again.");
@@ -1773,7 +1792,7 @@ function redoMove(player, data) {
   const dim = world.getDimension(next.dim);
   const turned = next.rot === 90 || next.rot === 270 ? { x: next.from.size.z, y: next.from.size.y, z: next.from.size.x } : next.from.size;
   whenLoaded(dim, [{ min: next.from.min, size: next.from.size }, { min: next.to, size: turned }], () => {
-    doMove(next.dim, next.from, next.to, next.rot);
+    doMove(next.dim, next.from, next.to, next.rot, next.air === 0);
     redo.pop();
     writeList(REDO_PROPERTY, redo);
     return [`ok|${readList(LAST_MOVE_PROPERTY).length}|${redo.length}`];

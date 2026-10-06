@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.72.0 (2026-10-06)
+
+- Moving structures ignores air: empty space in the selection no longer wipes out what is at the landing place.
+- Structure ▸ Ignore Air Blocks turns this off.
+- Update the Minecraft packs.
+
 ## 0.71.0 (2026-10-06)
 
 - Fixed: Import World stopped at about 48 blocks. Bigger radii now work, up to 128.

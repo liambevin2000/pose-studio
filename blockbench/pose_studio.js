@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.71.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.72.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -3025,6 +3025,17 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     lastTarget = message;
   }
 
+  // Structure ▸ Ignore Air Blocks (on unless turned off): the empty space in the selection isn't
+  // moved, so it doesn't wipe out what's already at the landing place.
+  const IGNORE_AIR_KEY = 'pose_studio_struct_ignore_air';
+  function ignoreAir() {
+    try {
+      return localStorage.getItem(IGNORE_AIR_KEY) !== '0';
+    } catch (e) {
+      return true;
+    }
+  }
+
   async function applyStructureMove() {
     if (!requireConnection()) return;
     let target;
@@ -3039,7 +3050,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
       return;
     }
     try {
-      await runGameQuery('pose:move', { to: target.to, rot: target.rot }, 'Moving the blocks');
+      await runGameQuery('pose:move', { to: target.to, rot: target.rot, skip: ignoreAir() ? 1 : 0 }, 'Moving the blocks');
     } catch (e) {
       Blockbench.showMessageBox({ title: 'Pose Studio: structure', message: `Minecraft couldn't move it: ${e.message || e}\n\nNothing was changed.` });
       return;
@@ -3920,7 +3931,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
           a.wildmobs,
           {
             name: 'Structure', id: 'pose_studio_structure_menu', icon: 'view_in_ar',
-            children: [a.structcorner1, a.structcorner2, a.structlook1, a.structlook2, '_', a.structget, a.structapply, '_', a.structundo, a.structredo, '_', a.structclear],
+            children: [a.structcorner1, a.structcorner2, a.structlook1, a.structlook2, '_', a.structget, a.structapply, a.structair, '_', a.structundo, a.structredo, '_', a.structclear],
           },
           { name: 'Add Camera', id: 'pose_studio_add_camera', icon: 'videocam', children: [a.grabcam, a.savecam] },
           { name: 'Lights', id: 'pose_studio_light_menu', icon: 'lightbulb', children: [a.addlight, a.lightlevel] },
@@ -10365,7 +10376,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     return { id: idItem.slice(2), name: scene.world || '', anchor: point('A|'), player: point('P|'), locations, removed: scene.removed || [], protocol: version ? Number(version.slice(2)) : 0 };
   }
 
-  const EXPECTED_PACK_PROTOCOL = 28; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
+  const EXPECTED_PACK_PROTOCOL = 29; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
   let warnedOldPack = false;
 
   // Scene files in the scenes folders that belong to a world (their pose_world says so), as
@@ -11180,6 +11191,15 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.72.0",
+      "date": "2026-10-06",
+      "changes": [
+        "Moving structures ignores air: empty space in the selection no longer wipes out what is at the landing place.",
+        "Structure ▸ Ignore Air Blocks turns this off.",
+        "Update the Minecraft packs."
+      ]
+    },
     {
       "version": "0.71.0",
       "date": "2026-10-06",
@@ -12257,6 +12277,17 @@ ${PLUGIN_URL}`,
         structapply: new Action('pose_studio_struct_apply', {
           name: 'Apply Move', icon: 'open_with', click: () => applyStructureMove(),
           description: 'Moves the selected blocks in Minecraft to where the structure is in Blockbench (quarter turns around the vertical axis too).',
+        }),
+        structair: new Toggle('pose_studio_struct_air', {
+          name: 'Ignore Air Blocks', icon: 'layers_clear', value: ignoreAir(),
+          description: "The empty space in the selection isn't moved: where the selection is air, what's already at the landing place stays. Off: the whole box is moved, air included.",
+          onChange: (value) => {
+            try {
+              localStorage.setItem(IGNORE_AIR_KEY, value ? '1' : '0');
+            } catch (e) {
+              // used until Blockbench restarts
+            }
+          },
         }),
         structundo: new Action('pose_studio_struct_undo', {
           name: 'Undo Move', icon: 'undo', click: () => undoStructureMove(),

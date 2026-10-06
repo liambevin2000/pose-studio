@@ -1,5 +1,14 @@
 [
   {
+    "version": "0.72.0",
+    "date": "2026-10-06",
+    "changes": [
+      "Moving structures ignores air: empty space in the selection no longer wipes out what is at the landing place.",
+      "Structure ▸ Ignore Air Blocks turns this off.",
+      "Update the Minecraft packs."
+    ]
+  },
+  {
     "version": "0.71.0",
     "date": "2026-10-06",
     "changes": [

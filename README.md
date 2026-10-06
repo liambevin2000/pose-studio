@@ -181,6 +181,8 @@ Select a box of blocks in Minecraft, move it in Blockbench, and Minecraft moves 
 
 Mobs aren't moved. Up to 600,000 blocks at a time; above 40,000 visible blocks the piece is drawn as a plain box. Positions snap to whole blocks. After a move, Import World again if you use the terrain mesh.
 
+**Ignore Air Blocks** (Structure menu, on by default): the empty space in the selection is not moved, so it does not wipe out what is already at the landing place. Turn it off to move the whole box, air included.
+
 ## Stream Deck
 
 Pose Studio has a plugin for Elgato Stream Deck (Stream Deck 6.5 or newer, Windows).
