@@ -102,7 +102,7 @@ function findMannequins(dim, id) {
   return dim.getEntities({ tags: [TAG_PREFIX + id] });
 }
 
-function setPose(player, data) {
+function setPose(player, data, glide = null) {
   if (!finite(data.p)) throw new Error("invalid position");
   const anchor = requireAnchor(player);
   const dim = world.getDimension(anchor.dim);
@@ -113,7 +113,8 @@ function setPose(player, data) {
     entity = dim.spawnEntity(TYPE, loc);
     entity.addTag(TAG_PREFIX + data.id);
   }
-  entity.teleport(loc, { rotation: { x: 0, y: 0 } });
+  // (an animation being played can push it along instead: see glideTo)
+  if (!glide || !glideTo(glide, entity, loc, anchor)) entity.teleport(loc, { rotation: { x: 0, y: 0 } });
 
   setPoseCode(entity, data.q);
   // skin slot (0 = default Steve, 1-16 = textures/entity/pose_studio/skin_N.png) and arm type
@@ -123,6 +124,40 @@ function setPose(player, data) {
   if (data.e) wantedEquipment.set(data.id, data.e);
   const equipment = wantedEquipment.get(data.id);
   if (equipment) applyEquipment(entity, equipment);
+}
+
+// Smooth movement while an animation plays (pose:path with "smooth":1): a mannequin isn't put at
+// each tick's place (the game shows that as 20 jumps a second), it's pushed so that it arrives
+// at the next tick's place a tick from now, and the game glides it there like anything that moves
+// by itself. glide = { next: where it should be next tick (from the anchor), state: kept between
+// ticks }. Answers false when the mannequin has to be put in place after all: the first tick, a
+// jump too far to be a step, or when it isn't where the last push should have brought it. A
+// mannequin that pushes don't move (five misses) is placed the plain way from then on.
+function glideTo(glide, entity, loc, anchor) {
+  const s = glide.state;
+  if (s.off) return false;
+  let placed = false;
+  try {
+    const at = entity.location;
+    const miss = Math.hypot(at.x - loc.x, at.y - loc.y, at.z - loc.z);
+    if (!s.started || miss > 0.08 + (s.step || 0) * 0.5) {
+      if (s.started && (s.step || 0) < 2) s.misses = (s.misses || 0) + 1;
+      if (s.misses >= 5) s.off = true;
+      entity.teleport(loc, { rotation: { x: 0, y: 0 } });
+      placed = true;
+    }
+    s.started = true;
+    const from = placed ? loc : at;
+    const to = glide.next ? toWorld(anchor, glide.next) : loc;
+    const push = { x: to.x - from.x, y: to.y - from.y, z: to.z - from.z };
+    s.step = Math.hypot(push.x, push.y, push.z);
+    entity.clearVelocity();
+    if (!s.off && s.step > 0.0005 && s.step < 2) entity.applyImpulse(push);
+    return true;
+  } catch {
+    s.off = true; // pushes aren't for this entity here
+    return placed;
+  }
 }
 
 // `pose:eq {"id","e"}` — a mannequin's equipment, sent only when it changes. It's remembered, so
@@ -312,33 +347,49 @@ function setFx(player, data) {
   }, 1);
 }
 
-// `pose:rec {"on":1}` starts recording the player who ran it; `pose:rec {"on":0,op}` stops and
-// answers with the recording: `R|` items, a tick each: x.y.z (hundredths of a block from the
-// anchor), yaw.pitch (tenths of a degree, where the player looks) and flags (1 sneaking, 2
-// sprinting, 4 swimming, 8 gliding, 16 on the ground, 32 in water, 64 flying, 128 an arm swing that
-// hit or used something this tick), in base 36.
+// `pose:rec {"on":1,"count":3}` starts recording the player who ran it, after a countdown of that
+// many seconds; `pose:rec {"on":0,op}` stops and answers with the recording: `R|` items, a tick
+// each: x.y.z (hundredths of a block from the anchor), yaw.pitch (tenths of a degree, where the
+// player looks) and flags (1 sneaking, 2 sprinting, 4 swimming, 8 gliding, 16 on the ground, 32 in
+// water, 64 flying, 128 an arm swing that hit or used something this tick, 256 jumping, 512
+// climbing), in base 36; and `E|slot|item` for what the player wears and holds.
 const MAX_RECORDING_TICKS = 6000; // 5 minutes
-let recording = null; // { player, anchor, ticks, swing, run }
+let recording = null; // { player, anchor, ticks, swing, wait, run }
 
 function endRecordingRun() {
   if (recording && recording.run !== undefined) system.clearRun(recording.run);
   if (recording) recording.run = undefined;
 }
 
-function startRecording(player) {
+function startRecording(player, data) {
   if (!player) return;
   endRecordingRun();
   const anchor = requireAnchor(player);
-  recording = { player, anchor, ticks: [], swing: false, run: undefined };
+  recording = { player, anchor, ticks: [], swing: false, wait: Math.max(0, Math.min(10, Math.round(Number(data.count) || 0))) * 20, run: undefined };
   const r = recording;
+  const say = (text) => {
+    try {
+      if (r.player.onScreenDisplay) r.player.onScreenDisplay.setActionBar(text);
+    } catch {
+      // no action bar here
+    }
+  };
   r.run = system.runInterval(() => {
     try {
-      const l = r.player.location;
-      const rot = r.player.getRotation();
-      const flags = (r.player.isSneaking ? 1 : 0) | (r.player.isSprinting ? 2 : 0) | (r.player.isSwimming ? 4 : 0) | (r.player.isGliding ? 8 : 0) | (r.player.isOnGround ? 16 : 0) | (r.player.isInWater ? 32 : 0) | (r.player.isFlying ? 64 : 0) | (r.swing ? 128 : 0);
+      // the countdown: time to get to the game and into place
+      if (r.wait > 0) {
+        if (r.wait % 20 === 0) say(`§eRecording in ${r.wait / 20}…`);
+        r.wait--;
+        if (r.wait === 0) say("§c● REC");
+        return;
+      }
+      const p = r.player;
+      const l = p.location;
+      const rot = p.getRotation();
+      const flags = (p.isSneaking ? 1 : 0) | (p.isSprinting ? 2 : 0) | (p.isSwimming ? 4 : 0) | (p.isGliding ? 8 : 0) | (p.isOnGround ? 16 : 0) | (p.isInWater ? 32 : 0) | (p.isFlying ? 64 : 0) | (r.swing ? 128 : 0) | (p.isJumping ? 256 : 0) | (p.isClimbing ? 512 : 0);
       r.swing = false;
       r.ticks.push([Math.round((l.x - anchor.x) * 100), Math.round((l.y - anchor.y) * 100), Math.round((l.z - anchor.z) * 100), Math.round(rot.y * 10), Math.round(rot.x * 10), flags].map((v) => v.toString(36)).join("."));
-      if (r.ticks.length % 10 === 0 && r.player.onScreenDisplay) r.player.onScreenDisplay.setActionBar(`§c● REC§r ${(r.ticks.length / 20).toFixed(1)} s`);
+      if (r.ticks.length % 10 === 0) say(`§c● REC§r ${(r.ticks.length / 20).toFixed(1)} s`);
       if (r.ticks.length >= MAX_RECORDING_TICKS) {
         endRecordingRun();
         r.player.sendMessage("§b[Pose Studio]§r The recording is full (5 minutes). Stop it in Blockbench to bring it in.");
@@ -347,7 +398,6 @@ function startRecording(player) {
       // the player isn't there this tick
     }
   }, 1);
-  player.sendMessage("§b[Pose Studio]§r §c●§r Recording. Stop it in Blockbench (Record Player) to bring it in.");
 }
 
 function stopRecording(player, data) {
@@ -356,12 +406,19 @@ function stopRecording(player, data) {
   if (!r) return failResult("Nothing is being recorded: start it with Record Player");
   endRecordingRun();
   recording = null;
+  const items = packItems("R|", r.ticks);
   try {
-    r.player.sendMessage(`§b[Pose Studio]§r Recorded ${(r.ticks.length / 20).toFixed(1)} seconds.`);
+    if (r.player.onScreenDisplay) r.player.onScreenDisplay.setActionBar(`§aRecorded ${(r.ticks.length / 20).toFixed(1)} s`);
+    // what the player wears and holds (a new Pose Studio player gets the same)
+    const worn = r.player.getComponent("minecraft:equippable");
+    for (const [slot, name] of [["head", "Head"], ["chest", "Chest"], ["legs", "Legs"], ["feet", "Feet"], ["mainhand", "Mainhand"], ["offhand", "Offhand"]]) {
+      const item = worn && worn.getEquipment(name);
+      if (item && item.typeId && /^[a-z0-9_.:-]+$/i.test(item.typeId)) items.push(`E|${slot}|${item.typeId}`);
+    }
   } catch {
-    // gone
+    // without what's worn
   }
-  finishResult(packItems("R|", r.ticks));
+  finishResult(items);
 }
 
 // an arm swing can only be seen when it does something
@@ -616,6 +673,18 @@ let pathPlayer = null;
 function stopPath() {
   if (pathRun !== undefined) system.clearRun(pathRun);
   pathRun = undefined;
+  if (cameraPath && cameraPath.smooth && cameraPath.tracks) {
+    const anchor = getAnchor();
+    for (const [id, track] of cameraPath.tracks) {
+      if (!track.glide || !anchor) continue;
+      track.glide = null;
+      try {
+        for (const e of findMannequins(world.getDimension(anchor.dim), id)) e.clearVelocity();
+      } catch {
+        // gone
+      }
+    }
+  }
   if (pathPlayer && cameraPath && cameraPath.hud) {
     try {
       pathPlayer.runCommand("hud @s reset all");
@@ -644,7 +713,10 @@ function playPath(player, data) {
       if (!d) continue;
       try {
         if (track.k === "e") setEntity(player, d);
-        else setPose(player, d);
+        else if (cameraPath.smooth) {
+          const next = track.frames.get(tick + 1);
+          setPose(player, d, { next: next && finite(next.p) ? next.p : null, state: track.glide || (track.glide = {}) });
+        } else setPose(player, d);
       } catch {
         // not there right now (unloaded, or removed)
       }
@@ -693,7 +765,7 @@ function playPath(player, data) {
 function setPath(data) {
   stopPath();
   const n = Math.max(0, Math.min(6000, Number(data.n) || 0)); // 5 minutes of samples at most
-  cameraPath = { keys: new Array(n).fill(null), ramp: Array.isArray(data.ramp) ? data.ramp.map(Number) : [0, 0, 1, 1], loop: !!data.loop, hud: !!data.hud, step: Math.max(0.01, Number(data.step) || 0.05), cam: data.cam === undefined || !!data.cam, tracks: new Map() };
+  cameraPath = { keys: new Array(n).fill(null), ramp: Array.isArray(data.ramp) ? data.ramp.map(Number) : [0, 0, 1, 1], loop: !!data.loop, hud: !!data.hud, step: Math.max(0.01, Number(data.step) || 0.05), cam: data.cam === undefined || !!data.cam, smooth: !!data.smooth, tracks: new Map() };
 }
 
 // `pose:pathsamples {"i":index,"s":[x,y,z, dx,dy,dz, fov, …]}` — an animation sampled every `step`
@@ -1107,7 +1179,7 @@ function debug(player) {
 // Every name looks like `PSD[op|page|item]`; page 0 always carries
 // `M|ready|<pages>|<items>|<items per page>` or `M|busy|<percent>`.
 // What this script understands; Blockbench warns when the world runs an older one.
-const PACK_PROTOCOL = 30;
+const PACK_PROTOCOL = 31;
 const IO_OBJECTIVE = "pose_io";
 const ITEMS_PER_PAGE = 30;
 const MAX_PAGES_PER_BATCH = 16;
@@ -1956,7 +2028,7 @@ function handle(ev) {
     case "pose:fx":
       return setFx(player, data);
     case "pose:rec":
-      return data.on ? startRecording(player) : stopRecording(player, data);
+      return data.on ? startRecording(player, data) : stopRecording(player, data);
     case "pose:light":
       return setLight(player, data);
     case "pose:path":

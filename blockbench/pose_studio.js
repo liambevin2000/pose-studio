@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.76.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.77.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -3240,7 +3240,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
         },
         displayFrame: (animator) => {
           try {
-            displayClips(animator);
+            displayClipRoot(animator);
           } catch (e) {
             console.warn('[Pose Studio] animation track', e);
           }
@@ -3299,6 +3299,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
       const anim = key.id ? state.byId.get(key.id) : null;
       if (!anim) return state.current; // "None": as posed
       let t = (key.start || 0) + Math.max(0, (time - key.time) * key.speed);
+      if (anim.recording) return composePose(state.target, content, state.base, state.held.concat([{ anim, frame: (key.loop ? t % anim.length : Math.min(t, anim.length)) * ANIM_FPS }]));
       // walk cycles and the like run on for as long as they play; keyframed ones repeat or hold
       if (anim.keyframed) t = key.loop ? t % anim.length : Math.min(t, anim.length);
       else if (!key.loop) t = Math.min(t, anim.length);
@@ -3318,7 +3319,45 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     return out;
   }
 
-  // Blockbench showing a frame: the Animation track of this player or mob poses its bones.
+  // Where in its animation a keyframe of the Animation track is at a time of the timeline.
+  const clipTime = (key, now, length, loops) => {
+    const t = (key.start || 0) + Math.max(0, (now - key.time) * key.speed);
+    return loops ? t % length : Math.min(t, length);
+  };
+
+  // Blockbench drawing a player's or mob's own animator: a recording walks its player along. Only
+  // the player itself is moved here, nothing in it: Blockbench also runs this for every point of
+  // the motion trail of what's selected, without putting the bones back in between.
+  function displayClipRoot(animator) {
+    const root = animator.getGroup ? animator.getGroup() : animator.group;
+    if (!root || !root.pose_recording || !isClipRoot(root) || (animator.muted && animator.muted[CLIP_CHANNEL])) return;
+    const content = contentCache && contentCache.content;
+    if (!content) return;
+    const now = typeof Timeline !== 'undefined' ? Number(Timeline.time) || 0 : 0;
+    const playing = clipKeys(animator).filter((k) => k.time <= now + 1e-6).pop();
+    if (!playing || playing.id !== REC_ID) return;
+    const recorded = clipState(root, content).byId.get(REC_ID);
+    if (recorded) showRecordedWalk(root, recorded, clipTime(playing, now, recorded.length, playing.loop));
+  }
+
+  // Blockbench has drawn a frame: every Animation track of the animations playing poses its
+  // player's or mob's bones, once, on top of what Blockbench's own keyframes did.
+  function displayClipBones() {
+    const Anim = blockbenchAnimation();
+    if (!Anim || !clipChannelOn) return;
+    const playing = (Anim.all || []).filter((a) => a.playing);
+    for (const anim of playing.length ? playing : Anim.selected ? [Anim.selected] : []) {
+      for (const animator of Object.values(anim.animators || {})) {
+        if (!animator || !animator[CLIP_CHANNEL] || !animator[CLIP_CHANNEL].length) continue;
+        try {
+          displayClips(animator);
+        } catch (e) {
+          console.warn('[Pose Studio] animation track', e);
+        }
+      }
+    }
+  }
+
   function displayClips(animator) {
     const root = animator.getGroup ? animator.getGroup() : animator.group;
     if (!root || !isClipRoot(root) || (animator.muted && animator.muted[CLIP_CHANNEL])) return;
@@ -3334,13 +3373,8 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
       return;
     }
     const state = clipState(root, content);
-    const now = typeof Timeline !== 'undefined' ? Number(Timeline.time) || 0 : 0;
-    const pose = clipPose(state, content, keys, now);
+    const pose = clipPose(state, content, keys, typeof Timeline !== 'undefined' ? Number(Timeline.time) || 0 : 0);
     if (!pose) return;
-    // a recording also walks the player along
-    const playing = keys.filter((k) => k.time <= now + 1e-6).pop();
-    const recorded = playing && playing.id === REC_ID ? state.byId.get(REC_ID) : null;
-    if (recorded) showRecordedWalk(root, recorded, Math.min(recorded.length, (playing.start || 0) + Math.max(0, (now - playing.time) * playing.speed)));
     for (const [key, group] of state.target.groups) {
       const r = pose.get(key);
       const now = state.current.get(key);
@@ -3356,6 +3390,17 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
       const group = state.target.groups.get(key);
       const m = group && group.mesh;
       if (m && m.position) AXES.forEach((a, i) => (m.position[a] += want[i] - now[i]));
+    }
+    // what an animation does to the model as a whole (a walk's bob, a swim's lean): on the player itself
+    const m = root.mesh;
+    const lean = pose.get('root');
+    const bob = pose.get('root@p');
+    if (m && m.rotation && m.position && (lean || bob)) {
+      if (bob) {
+        const move = new THREE.Vector3().fromArray(bob).applyEuler(new THREE.Euler(0, m.rotation.y, 0));
+        AXES.forEach((a) => (m.position[a] += move[a]));
+      }
+      if (lean) AXES.forEach((a, i) => (m.rotation[a] += lean[i] * DEG));
     }
   }
 
@@ -3440,73 +3485,229 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
   }
 
   // ---- Recording a player ----------------------------------------------------------------------------
-  // Animate ▸ Record Player: Minecraft notes where you are and where you look, every game tick,
-  // while you play; stopping brings that into Blockbench as a recording on a Pose Studio player
-  // (the selected one, else a new one). It's an animation of that player like any other: it sits
-  // on the player's Animation track as a keyframe ("● Recording"), plays when the timeline does
-  // and in Play Animation in Minecraft, and can be started later, slowed or started part-way in.
-  // The player walks the recorded way from wherever the player stands in the scene: move or turn
-  // the player in the Edit tab and the whole recording moves and turns with it.
-  // What's recorded is the path, the look and the state (sneaking, sprinting, swimming, swings that
-  // hit something). The body is worked out from that with the player's own animations, as the game
-  // does: legs and arms by the distance walked, the body turning after the head.
+  // Record Player: Minecraft notes where you are, where you look and what you're doing (on the
+  // ground, sneaking, sprinting, swimming…), every game tick, while you play your part. Stopping
+  // brings that into Blockbench as a recording on a Pose Studio player. It's an animation of that
+  // player like any other ("● Recording" on its Animation track): it plays with the timeline and
+  // in Play Animation in Minecraft, and can be started later, slowed, or started part-way in.
+  //
+  // The player walks the recorded way from wherever it stands in the scene, so moving or turning
+  // the player in the Edit tab moves and turns the whole recording (a line in the viewport shows
+  // the way it goes).
+  //
+  // A script can't see the limbs of a real player, so the body is played the way the game plays it
+  // for everyone else: from the player's own animations in the world's packs, picked by what the
+  // player is doing. A pack with a walk animation of its own (DragonCraft: idle, walk, sprint,
+  // sneaking, jump, jump_land, sprint_jump, swimming, fly…) gets those, cross-faded as the state
+  // changes; otherwise Minecraft's own (arms and legs swinging by the distance walked, the sneak
+  // and swim poses, the attack swing). The head looks where the player looked.
   const REC_ID = '@recording';
   const REC = { X: 0, Y: 1, Z: 2, YAW: 3, PITCH: 4, FLAGS: 5, SIZE: 6 };
-  const REC_FLAG = { sneak: 1, sprint: 2, swim: 4, glide: 8, ground: 16, water: 32, fly: 64, swing: 128 };
-  const recordingMath = new WeakMap(); // recording -> what's worked out from it, per tick
+  const REC_FLAG = { sneak: 1, sprint: 2, swim: 4, glide: 8, ground: 16, water: 32, fly: 64, swing: 128, jump: 256, climb: 512 };
+  const REC_ACTIVE = REC_FLAG.sneak | REC_FLAG.sprint | REC_FLAG.swim | REC_FLAG.glide | REC_FLAG.swing | REC_FLAG.jump;
+  // the player's animations a recording plays, by what they're called in the player's entity file
+  const REC_CLIPS = { idle: 'idle', walk: 'walk', sprint: 'sprint', sneak: 'sneaking', swim: 'swimming', glide: 'glide', fly_move: 'fly_move', fly_idle: 'fly_idle', sprint_jump: 'sprint_jump', jump: 'jump', land: 'jump_land' };
+  const REC_BLEND = { jump: 0.14, land: 0.15 }; // seconds to fade in or out (the rest: REC_FADE)
+  const REC_FADE = 0.28;
+  const recordingMath = new WeakMap(); // recording -> Map(which clips there are -> what's worked out, per tick)
   let recordingOn = false;
   let recordToggle = null;
 
-  // R| items from the game -> { n, t: [x, y, z (hundredths of a block from the anchor), yaw, pitch (tenths of a degree), flags, …] }
+  // What the game sent -> { n, t: [x, y, z (hundredths of a block from the anchor), yaw, pitch (tenths of a degree), flags, …], eq }
   function parseRecording(items) {
     const t = [];
+    const eq = {};
     for (const item of items) {
+      if (item.startsWith('E|')) {
+        const [, slot, id] = item.split('|');
+        if (slot && id) eq[slot] = id;
+      }
       if (!item.startsWith('R|')) continue;
       for (const tick of item.slice(2).split(';')) {
         const v = tick.split('.').map((s) => parseInt(s, 36));
         if (v.length === REC.SIZE && v.every(Number.isFinite)) t.push(...v);
       }
     }
-    return { v: 1, n: t.length / REC.SIZE, t };
+    return { v: 1, n: t.length / REC.SIZE, t, eq };
   }
 
-  // Per tick: the body's yaw (it follows the way you walk, and the head within reach), the distance
-  // and pace the walk cycle runs on, and how far through a swing the arm is.
-  function recordingTicks(rec) {
-    let math = recordingMath.get(rec);
-    if (math) return math;
-    const n = rec.n;
-    const at = (i, k) => rec.t[i * REC.SIZE + k];
-    const body = new Array(n), walked = new Array(n), pace = new Array(n), attack = new Array(n), speed = new Array(n), rise = new Array(n);
-    let b = n ? at(0, REC.YAW) / 10 : 0;
-    let dist = 0, amount = 0, swing = -1;
-    for (let i = 0; i < n; i++) {
-      const head = at(i, REC.YAW) / 10;
-      const dx = i ? (at(i, REC.X) - at(i - 1, REC.X)) / 100 : 0;
-      const dz = i ? (at(i, REC.Z) - at(i - 1, REC.Z)) / 100 : 0;
-      const moved = Math.hypot(dx, dz);
-      if (moved > 0.02 && moved < 3) {
-        // towards the way it walks (or straight away from it, walking backwards)
-        let way = (Math.atan2(-dx, dz) * 180) / Math.PI;
-        if (Math.abs(wrap(way - head)) > 95) way += 180;
-        b += wrap(way - b) * 0.3;
+  // A recording as it's kept: the standing-about at both ends gone (getting to the game and back),
+  // and the path and the look smoothed a little. The game notes a player's place when the game
+  // ticks, not when the player moved, so raw steps come out uneven (none, then two at once); played
+  // back as they are, the player stutters.
+  const REC_KEEP_STILL = 5; // ticks of standing still kept at each end
+  function tidyRecording(raw) {
+    const S = REC.SIZE;
+    const at = (i, k) => raw.t[i * S + k];
+    const n = raw.n;
+    if (!n) return { v: 2, n: 0, t: [], eq: raw.eq || {} };
+    const differs = (i, j) =>
+      [REC.X, REC.Y, REC.Z].some((k) => Math.abs(at(i, k) - at(j, k)) > 3) ||
+      Math.abs(wrap((at(i, REC.YAW) - at(j, REC.YAW)) / 10)) > 3 || Math.abs(at(i, REC.PITCH) - at(j, REC.PITCH)) > 30 ||
+      (at(i, REC.FLAGS) & REC_ACTIVE) !== (at(j, REC.FLAGS) & REC_ACTIVE);
+    let first = 0, last = n - 1;
+    while (first < n && !differs(first, 0)) first++;
+    while (last >= 0 && !differs(last, n - 1)) last--;
+    const moved = first < n; // (never moved: all of it is kept)
+    const start = moved ? Math.max(0, first - REC_KEEP_STILL) : 0;
+    const end = moved ? Math.min(n - 1, Math.max(last, first) + REC_KEEP_STILL) : n - 1;
+    const count = end - start + 1;
+    // the look as one continuous turn (no jump from 180 to -180)
+    const yaw = new Array(count);
+    for (let i = 0; i < count; i++) yaw[i] = i ? yaw[i - 1] + wrap((at(start + i, REC.YAW) - at(start + i - 1, REC.YAW)) / 10) * 10 : at(start, REC.YAW);
+    // a teleport isn't smoothed over: each stretch between teleports is smoothed by itself
+    const stretch = new Array(count).fill(0);
+    for (let i = 1; i < count; i++) {
+      const far = [REC.X, REC.Y, REC.Z].some((k) => Math.abs(at(start + i, k) - at(start + i - 1, k)) > 250);
+      stretch[i] = stretch[i - 1] + (far ? 1 : 0);
+    }
+    const KERNEL = [1, 4, 6, 4, 1];
+    const smooth = (values) => values.map((own, i) => {
+      let sum = 0;
+      for (let d = -2; d <= 2; d++) {
+        let j = Math.max(0, Math.min(count - 1, i + d));
+        while (stretch[j] !== stretch[i]) j += j > i ? -1 : 1;
+        sum += values[j] * KERNEL[d + 2];
       }
-      // never further from the head than a neck allows
-      b = head - Math.max(-50, Math.min(50, wrap(head - b)));
-      body[i] = b;
-      const step = moved < 3 ? Math.min(moved * 4, 1) : 0; // (a teleport isn't a step)
+      return sum / 16;
+    });
+    const column = (k) => Array.from({ length: count }, (unused, i) => at(start + i, k));
+    // the path twice over (a quarter second's worth), the look once
+    const channel = [REC.X, REC.Y, REC.Z].map((k) => smooth(smooth(column(k))));
+    const look = smooth(yaw);
+    const pitch = smooth(column(REC.PITCH));
+    const t = [];
+    for (let i = 0; i < count; i++) {
+      t.push(round(channel[0][i], 2), round(channel[1][i], 2), round(channel[2][i], 2), round(look[i], 2), round(pitch[i], 2), at(start + i, REC.FLAGS));
+    }
+    return { v: 2, n: count, t, eq: raw.eq || {} };
+  }
+
+  // What's worked out from a recording, per tick: how fast the player goes, the body's turn, and
+  // for each of the player's animations how much of it shows and where in it it is.
+  function recordingTicks(rec, clips) {
+    const style = Object.keys(clips).sort().join();
+    let byStyle = recordingMath.get(rec);
+    if (!byStyle) recordingMath.set(rec, (byStyle = new Map()));
+    if (byStyle.has(style)) return byStyle.get(style);
+    const n = rec.n;
+    const dt = 1 / ANIM_FPS;
+    const at = (i, k) => rec.t[i * REC.SIZE + k];
+    const body = new Array(n), speed = new Array(n), rise = new Array(n), pace = new Array(n), walked = new Array(n), attack = new Array(n);
+    const names = Object.keys(clips);
+    const weight = {}, time = {};
+    for (const c of names) {
+      weight[c] = new Float32Array(n);
+      time[c] = new Float64Array(n);
+    }
+    const w = Object.fromEntries(names.map((c) => [c, 0]));
+    const tm = Object.fromEntries(names.map((c) => [c, 0]));
+    const has = (c) => c in clips;
+    let b = n ? at(0, REC.YAW) / 10 : 0;
+    let main = 'idle', layer = '', layerTime = 0, airtime = 0, jumping = false, wasGround = true;
+    let amount = 0, dist = 0, swing = -1;
+    for (let i = 0; i < n; i++) {
+      const flags = at(i, REC.FLAGS);
+      const is = (flag) => !!(flags & flag);
+      // how fast (blocks a second), from the tick before to this one (the first: to the next)
+      const from = i ? i - 1 : 0, to = i ? i : Math.min(1, n - 1);
+      let dx = (at(to, REC.X) - at(from, REC.X)) / 100, dy = (at(to, REC.Y) - at(from, REC.Y)) / 100, dz = (at(to, REC.Z) - at(from, REC.Z)) / 100;
+      if (Math.hypot(dx, dy, dz) > 2.5) dx = dy = dz = 0; // a teleport isn't a step
+      const v = Math.hypot(dx, dz) * ANIM_FPS;
+      const up = dy * ANIM_FPS;
+      speed[i] = v;
+      rise[i] = up;
+      // the limb swing Minecraft's own walk runs on
+      const step = Math.min(Math.hypot(dx, dz) * 4, 1);
       amount += (step - amount) * 0.4;
       dist += amount;
-      walked[i] = dist;
       pace[i] = amount;
-      speed[i] = moved * 20;
-      rise[i] = i ? ((at(i, REC.Y) - at(i - 1, REC.Y)) / 100) * 20 : 0;
-      if (at(i, REC.FLAGS) & REC_FLAG.swing) swing = 0;
+      walked[i] = dist;
+      if (is(REC_FLAG.swing)) swing = 0;
       attack[i] = swing >= 0 ? swing / 6 : 0;
       if (swing >= 0 && ++swing > 6) swing = -1;
+      // the body turns to where the player looks while it walks (or swings); standing, the head
+      // turns alone until it has turned as far as a neck goes, then takes the body with it
+      const head = at(i, REC.YAW) / 10;
+      if (v > 0.5 || attack[i] > 0) b += wrap(head - b) * 0.35;
+      b = head - Math.max(-50, Math.min(50, wrap(head - b)));
+      body[i] = b;
+
+      // ---- which animations play ----
+      const ground = is(REC_FLAG.ground), water = is(REC_FLAG.water), sprinting = is(REC_FLAG.sprint);
+      airtime = ground ? 0 : airtime + dt;
+      const tookOff = wasGround && !ground && !water && (up > 2 || is(REC_FLAG.jump));
+      if (tookOff) jumping = true;
+      if (ground || water || is(REC_FLAG.swim) || is(REC_FLAG.glide)) jumping = false;
+      let want = is(REC_FLAG.sneak) ? 'sneak' : sprinting && v > (main === 'sprint' ? 2 : 3) ? 'sprint' : v > (main === 'walk' || main === 'sprint' ? 0.6 : 1) ? 'walk' : 'idle';
+      const onFoot = want;
+      if (is(REC_FLAG.glide)) want = 'glide';
+      else if (is(REC_FLAG.swim)) want = 'swim';
+      else if (!ground && !water && (is(REC_FLAG.fly) || airtime > 1)) want = 'fly';
+      else if (!ground && !water && jumping) {
+        // (a jump shows as the pack's jump; a pack without one keeps walking through the air)
+        if (sprinting && v > 3 && has('sprint_jump')) want = 'sprint_jump';
+        else if (has('jump')) want = 'air';
+      }
+      main = onFoot;
+      // a jump and its landing play on top of that
+      layerTime += dt;
+      const enter = (state) => {
+        layer = state;
+        layerTime = 0;
+        if (state && has(state)) tm[state] = 0;
+      };
+      if (tookOff && want === 'air') enter('jump');
+      else if (layer === 'jump' && ground && layerTime > 0.1) enter('land');
+      else if (layer === 'jump' && want !== 'air' && !ground) enter('');
+      else if (layer === 'land' && layerTime >= (has('land') ? clips.land.length : 0.4)) enter('');
+      // what should show now
+      const target = {};
+      const show = (c, amountShown = 1) => {
+        if (has(c)) target[c] = amountShown;
+        return has(c);
+      };
+      if (want === 'idle') show('idle');
+      else if (want === 'walk') show('walk') || show('idle');
+      else if (want === 'sprint') show('sprint') || show('walk');
+      else if (want === 'sneak') show('sneak') || show(v > 0.6 ? 'walk' : 'idle');
+      else if (want === 'swim') show('swim') || show('idle');
+      else if (want === 'glide') show('glide') || show('idle');
+      else if (want === 'sprint_jump') show('sprint_jump');
+      else if (want === 'fly') {
+        const moving = Math.max(0, Math.min(1, amount));
+        if (has('fly_move') || has('fly_idle')) {
+          show('fly_move', moving);
+          show('fly_idle', 1 - moving);
+        } else show('idle');
+      }
+      if (layer) show(layer);
+      for (const c of names) {
+        const goal = target[c] || 0;
+        if (w[c] <= 0 && goal > 0) tm[c] = c === layer ? tm[c] : 0; // it starts from its beginning
+        const most = i ? dt / (REC_BLEND[c] || REC_FADE) : 1; // (it starts as it is: nothing to fade from)
+        w[c] += Math.max(-most, Math.min(most, goal - w[c]));
+        if (w[c] > 0 || goal > 0) {
+          // how fast each plays: walks keep step with the pace, a sneak only moves while you do
+          let rate = 1;
+          if (c === 'walk') rate = 1.82 * Math.max(0.4, Math.min(1.5, v / 4.317));
+          else if (c === 'sprint') rate = Math.max(0.6, Math.min(1.4, v / 5.612));
+          else if (c === 'sneak') rate = Math.max(0, Math.min(1, v / 0.4));
+          else if (c === 'sprint_jump') {
+            // (as the pack times it: each half of the leap waits for the rise, then the fall)
+            const cycle = (tm[c] / 0.75) % 1;
+            const next = cycle < 0.5 ? up > 0 : up < 0;
+            rate = 1.1 * (next ? 1.64 : 0.4 - MOLANG_MATH.atan(((cycle * 2) % 1) * 10 - 6) / 200);
+          }
+          tm[c] += dt * rate;
+        }
+        weight[c][i] = w[c];
+        time[c][i] = tm[c];
+      }
+      wasGround = ground;
     }
-    math = { body, walked, pace, attack, speed, rise };
-    recordingMath.set(rec, math);
+    const math = { body, speed, rise, pace, walked, attack, weight, time, names };
+    byStyle.set(style, math);
     return math;
   }
 
@@ -3515,22 +3716,30 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     const rec = root.pose_recording;
     if (!rec || !rec.n || !Array.isArray(rec.t)) return null;
     const byName = new Map(animations.map((a) => [a.name, a]));
+    // a pack with a walk animation of its own plays the player its way
+    const clips = {};
+    if (byName.has(REC_CLIPS.walk) && byName.get(REC_CLIPS.walk).keyframed) {
+      for (const [c, name] of Object.entries(REC_CLIPS)) if (byName.has(name)) clips[c] = byName.get(name);
+    }
+    const own = Object.keys(clips).length > 0;
     const parts = (names) => names.map((name) => byName.get(name)).filter(Boolean);
-    const always = parts(['move.arms', 'move.legs', 'bob']);
-    const sneaking = parts(['sneaking']);
-    const swimming = parts(['swimming', 'swimming.legs']);
-    const attacking = parts(['attack.rotations']);
+    const always = own ? [] : parts(['move.arms', 'move.legs', 'bob']);
+    const sneaking = own ? [] : parts(['sneaking']);
+    const swimming = own ? [] : parts(['swimming', 'swimming.legs']);
+    const attacking = own ? [] : parts(['attack.rotations']);
+    const bare = !own && !always.length; // no animations to go by: Minecraft's walk, worked out here
     const lerp = (a, b, f) => a + (b - a) * f;
     return {
       name: '● Recording', id: REC_ID, def: { bones: {} }, length: Math.max(0.05, (rec.n - 1) / ANIM_FPS), keyframed: true, recording: rec,
-      // how far each bone is turned at time t (see animationDelta)
+      plays: own ? Object.keys(clips) : bare ? ['(built-in walk)'] : always.concat(sneaking, swimming, attacking).map((a) => a.name),
+      // how far each bone is turned and moved at time t (see animationDelta); 'root' is the player itself
       poseAt(target, t, base) {
-        const math = recordingTicks(rec);
+        const math = recordingTicks(rec, clips);
         const f = Math.max(0, Math.min(rec.n - 1, t * ANIM_FPS));
         const i = Math.floor(f), j = Math.min(rec.n - 1, i + 1), k = f - i;
         const flags = rec.t[i * REC.SIZE + REC.FLAGS];
         const has = (flag) => (flags & flag ? 1 : 0);
-        const override = {
+        const doing = {
           modified_distance_moved: lerp(math.walked[i], math.walked[j], k), walk_distance: lerp(math.walked[i], math.walked[j], k),
           modified_move_speed: lerp(math.pace[i], math.pace[j], k), ground_speed: lerp(math.speed[i], math.speed[j], k), vertical_speed: lerp(math.rise[i], math.rise[j], k),
           is_moving: math.speed[i] > 0.4 ? 1 : 0, is_sneaking: has(REC_FLAG.sneak), is_sprinting: has(REC_FLAG.sprint), is_swimming: has(REC_FLAG.swim), is_gliding: has(REC_FLAG.glide),
@@ -3538,27 +3747,48 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
           attack_time: lerp(math.attack[i], math.attack[j], k), anim_time: t, life_time: t,
         };
         const delta = new Map();
-        const add = (key, d) => {
-          const had = delta.get(key);
-          delta.set(key, had ? had.map((v, n) => v + d[n]) : d.slice());
-        };
-        const playing = always.concat(has(REC_FLAG.sneak) ? sneaking : [], has(REC_FLAG.swim) ? swimming : [], override.attack_time > 0 ? attacking : []);
-        for (const part of playing) {
-          const d = animationDelta(target, content, part, t, base, override);
-          for (const [key, value] of d) add(key, value);
+        const add = (d, amount = 1) => {
+          for (const [key, value] of d) {
+            const had = delta.get(key);
+            delta.set(key, had ? had.map((v, n) => v + value[n] * amount) : value.map((v) => v * amount));
+          }
           for (const key of d.relative || []) (delta.relative || (delta.relative = new Set())).add(key);
+        };
+        if (own) {
+          const vars = { smooth_ground_speed: doing.modified_move_speed, sideway_move_component: 0, gliding_speed_value: 1, attack_time: 0 };
+          for (const c of math.names) {
+            const amount = lerp(math.weight[c][i], math.weight[c][j], k);
+            if (amount < 0.002) continue;
+            const anim = clips[c];
+            // (it started again between these two ticks: no sweeping back through it)
+            const from = math.time[c][i], to = math.time[c][j];
+            let tau = to >= from && math.weight[c][i] > 0 ? lerp(from, to, k) : to;
+            if (anim.keyframed) tau = anim.def.loop === true ? tau % anim.length : Math.min(tau, anim.length);
+            add(clipDelta(target, anim, tau, base, vars, Object.assign({}, doing, { anim_time: tau }), 1, true), amount);
+          }
+        } else if (bare) {
+          // Minecraft's walk: legs and arms swing against each other with the distance walked
+          const swingBy = Math.cos(doing.modified_distance_moved * 0.6662) * doing.modified_move_speed * 57.3;
+          add(new Map([['rightleg', [-1.4 * swingBy, 0, 0]], ['leftleg', [1.4 * swingBy, 0, 0]], ['rightarm', [swingBy, 0, 0]], ['leftarm', [-swingBy, 0, 0]]].filter(([key]) => target.groups.has(key))));
+          if (has(REC_FLAG.sneak) && target.groups.has('body')) add(new Map([['body', [-28.6, 0, 0]]]));
+        } else {
+          const playing = always.concat(has(REC_FLAG.sneak) ? sneaking : [], has(REC_FLAG.swim) ? swimming : [], doing.attack_time > 0 ? attacking : []);
+          for (const part of playing) add(animationDelta(target, content, part, t, base, doing));
         }
-        // the head: where the player looked, from the body (Blockbench turns x and y the other way)
-        const yaw = rec.t[i * REC.SIZE + REC.YAW] / 10 + wrap(rec.t[j * REC.SIZE + REC.YAW] / 10 - rec.t[i * REC.SIZE + REC.YAW] / 10) * k;
+        // the head: where the player looked, whatever the body under it is doing
+        const yaw = lerp(rec.t[i * REC.SIZE + REC.YAW], rec.t[j * REC.SIZE + REC.YAW], k) / 10;
         const pitch = lerp(rec.t[i * REC.SIZE + REC.PITCH], rec.t[j * REC.SIZE + REC.PITCH], k) / 10;
         const bodyYaw = math.body[i] + wrap(math.body[j] - math.body[i]) * k;
-        if (target.groups.has('head')) add('head', [-pitch, -wrap(yaw - bodyYaw), 0]);
+        if (target.groups.has('head')) {
+          add(new Map([['head', [-pitch, -wrap(yaw - bodyYaw), 0]]]));
+          (delta.relative || (delta.relative = new Set())).add('head');
+        }
         return delta;
       },
       // where the player has got to at time t, from where the recording starts: [x, y, z] in
       // Blockbench pixels (as recorded: not yet turned with the player), and the body's turn in degrees
       rootAt(t) {
-        const math = recordingTicks(rec);
+        const math = recordingTicks(rec, clips);
         const f = Math.max(0, Math.min(rec.n - 1, t * ANIM_FPS));
         const i = Math.floor(f), j = Math.min(rec.n - 1, i + 1), k = f - i;
         const p = (n, axis) => (rec.t[n * REC.SIZE + axis] - rec.t[axis]) / 100;
@@ -3568,7 +3798,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     };
   }
 
-  // The recorded walk, shown on the player (Blockbench drawing a frame; see displayClips).
+  // The recorded walk, shown on the player (Blockbench drawing a frame; see displayClipRoot).
   function showRecordedWalk(root, anim, t) {
     const m = root.mesh;
     if (!m || !m.position || !m.rotation || !anim.rootAt) return;
@@ -3582,11 +3812,55 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     m.rotation.y += at.turn * DEG;
   }
 
-  // Puts a recording on a player: the selected one, else a new one, stood where the recording starts.
-  function importRecording(rec) {
-    if (!rec.n) throw new Error("Nothing was recorded (the recording has to run for a moment).");
-    let root = selectedPoseRoot();
-    if (!root || !MANNEQUIN_PREFIX.test(root.name)) {
+  // The way a recorded player goes, drawn in the viewport: it starts at the player and moves and
+  // turns with it, so it shows where the recording will play before it does.
+  const recordingLines = new Map(); // root uuid -> { line, rec }
+  let recordingLineTimer = null;
+  function updateRecordingLines() {
+    const space = typeof Project !== 'undefined' && Project ? modelSpace() : null;
+    const alive = new Set();
+    if (space && space.add && typeof THREE !== 'undefined' && THREE.Line && THREE.BufferGeometry) {
+      for (const root of mannequinRoots()) {
+        const rec = root.pose_recording;
+        if (!rec || !rec.n || !Array.isArray(rec.t)) continue;
+        alive.add(root.uuid);
+        let entry = recordingLines.get(root.uuid);
+        if (!entry || entry.rec !== rec || entry.line.parent !== space) {
+          if (entry && entry.line.parent) entry.line.parent.remove(entry.line);
+          const points = [];
+          for (let i = 0; i < rec.n; i++) {
+            points.push(new THREE.Vector3().fromArray(toModel([REC.X, REC.Y, REC.Z].map((axis) => (rec.t[i * REC.SIZE + axis] - rec.t[axis]) / 100))).setY((rec.t[i * REC.SIZE + REC.Y] - rec.t[REC.Y]) * 0.16 + 0.5));
+          }
+          const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(points), new THREE.LineBasicMaterial({ color: 0xffd23f, depthTest: false, transparent: true, opacity: 0.85 }));
+          line.no_export = true;
+          line.renderOrder = 20;
+          line.raycast = () => {};
+          space.add(line);
+          entry = { line, rec };
+          recordingLines.set(root.uuid, entry);
+        }
+        entry.line.position.fromArray(root.origin);
+        entry.line.rotation.set(0, (root.rotation[1] - (Number(rec.rot) || 0)) * DEG, 0);
+        entry.line.visible = root.visibility !== false;
+      }
+    }
+    for (const [uuid, entry] of recordingLines) {
+      if (alive.has(uuid)) continue;
+      if (entry.line.parent) entry.line.parent.remove(entry.line);
+      recordingLines.delete(uuid);
+    }
+  }
+  function removeRecordingLines() {
+    for (const entry of recordingLines.values()) if (entry.line.parent) entry.line.parent.remove(entry.line);
+    recordingLines.clear();
+  }
+
+  // Puts a recording on a player (the one given, else a new one), stood where the recording starts.
+  function importRecording(rec, onto = null) {
+    if (!rec.n) throw new Error('Nothing was recorded (the recording has to run for a moment).');
+    let root = onto;
+    const fresh = !root;
+    if (!root) {
       const before = new Set(mannequinRoots());
       addMannequin();
       root = mannequinRoots().find((g) => !before.has(g)) || null;
@@ -3602,11 +3876,15 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     // facing the way it looked at the start (a Blockbench turn is a Minecraft yaw the other way)
     rec.rot = round(-rec.t[REC.YAW] / 10, 2);
     root.rotation = [0, rec.rot, 0];
-    root.pose_recording = rec;
+    root.pose_recording = { v: rec.v, n: rec.n, t: rec.t, rot: rec.rot };
+    // a new player wears and holds what you did
+    if (fresh && rec.eq && Object.keys(rec.eq).length) root.pose_equipment = Object.assign({}, rec.eq);
     Undo.finishEdit('Player recording', { outliner: true, groups, elements: cubes });
     refreshGroups(groups);
     Canvas.updateAll();
+    if (fresh && root.pose_equipment && Object.values(root.pose_equipment).some(Boolean)) refreshEquipmentPreview(root);
     clipStates.delete(root.uuid);
+    lastSent.delete(mannequinId(root.name));
     return root;
   }
 
@@ -3630,6 +3908,32 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     return kf;
   }
 
+  // A recording that just came in: kept on a player, and on the timeline.
+  function keepRecording(rec, onto) {
+    const root = importRecording(rec, onto);
+    const placed = placeRecording(root);
+    Blockbench.showQuickMessage(
+      placed
+        ? `${root.name}: ${(rec.n / ANIM_FPS).toFixed(1)} s recorded. Play in Game shows it in Minecraft. To move it all, move or turn ${root.name} in the Edit tab`
+        : `${root.name}: ${(rec.n / ANIM_FPS).toFixed(1)} s recorded. Open Animation… in the Animate tab to put it on the timeline`,
+      8000
+    );
+    return root;
+  }
+
+  // Animate ▸ Smooth Movement in Minecraft (experimental, off unless ticked): in Play Animation in
+  // Minecraft, players are pushed from place to place instead of being put there each tick, so the
+  // game glides them the way it does anything that moves (see the pack's playPath).
+  const SMOOTH_KEY = 'pose_studio_smooth_playback';
+  function smoothPlayback() {
+    try {
+      return localStorage.getItem(SMOOTH_KEY) === '1';
+    } catch (e) {
+      return false;
+    }
+  }
+
+  const RECORD_COUNTDOWN = 3; // seconds, to get to the game and into place
   async function setRecording(value) {
     if (value) {
       if (!requireConnection()) {
@@ -3637,8 +3941,16 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
         return;
       }
       recordingOn = true;
-      send('scriptevent pose:rec {"on":1}');
-      Blockbench.showQuickMessage('Recording you in Minecraft: play your part, then click Record Player again to stop', 5000);
+      // you're the one in the shot: shown while it records, also if the camera view had hidden you
+      if (playerHidden) send('scriptevent pose:hideplayer {"hide":false}');
+      send(`scriptevent pose:rec ${JSON.stringify({ on: 1, count: RECORD_COUNTDOWN })}`);
+      try {
+        // over to the game: that's where the part is played
+        if (!(globalThis.__POSE_STUDIO_TEST && globalThis.__POSE_STUDIO_TEST.noFocus)) focusWindow('minecraft');
+      } catch (e) {
+        // click the game yourself
+      }
+      Blockbench.showQuickMessage(`Recording starts in Minecraft in ${RECORD_COUNTDOWN} seconds. Play your part, then come back and click Stop Recording`, 6000);
       return;
     }
     if (!recordingOn) return;
@@ -3649,21 +3961,39 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     } catch (e) {
       showError('Pose Studio: recording', e);
       return;
+    } finally {
+      if (playerHidden && link.connected) send('scriptevent pose:hideplayer {"hide":true}');
     }
+    let rec;
     try {
-      const rec = parseRecording(items);
-      const root = importRecording(rec);
-      const placed = placeRecording(root);
-      Blockbench.showMessageBox({
-        title: 'Pose Studio: recording',
-        message:
-          `${(rec.n / ANIM_FPS).toFixed(1)} seconds recorded onto ${root.name}.\n\n` +
-          (placed ? "It's on the player's Animation track, from the start of the timeline: play the timeline to watch it, or Animate ▸ Play Animation in Minecraft.\n\n" : '') +
-          'To move it: in the Edit tab, move or turn the player. The whole recording moves and turns with it.',
-      });
+      rec = tidyRecording(parseRecording(items));
+      if (rec.n < 3) throw new Error('Nothing was recorded: let it run for a moment after the countdown.');
     } catch (e) {
       showError('Pose Studio: recording', e);
+      return;
     }
+    // onto the player that's selected, or a new one? (or not at all: a take that didn't work out)
+    const selected = selectedPoseRoot();
+    const onto = selected && MANNEQUIN_PREFIX.test(selected.name) ? selected : null;
+    const seconds = (rec.n / ANIM_FPS).toFixed(1);
+    const buttons = onto ? ['New player', `Onto ${onto.name}`, 'Discard'] : ['Keep', 'Discard'];
+    Blockbench.showMessageBox(
+      {
+        title: 'Pose Studio: recording',
+        message: onto
+          ? `${seconds} seconds recorded.\n\nPut it on a new player, or on ${onto.name} (which moves to where you started, and loses the recording it had)?`
+          : `${seconds} seconds recorded.\n\nKeep it? It goes on a new player, stood where you started.`,
+        buttons, confirm: 0, cancel: buttons.length - 1,
+      },
+      (button) => {
+        if (button === buttons.length - 1 || button === undefined || button < 0) return;
+        try {
+          keepRecording(rec, onto && button === 1 ? onto : null);
+        } catch (e) {
+          showError('Pose Studio: recording', e);
+        }
+      }
+    );
   }
 
   // Whether an animation has keyframes of Blockbench's own on a group.
@@ -3761,7 +4091,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     pathPlaying = true;
     Blockbench.showQuickMessage(`Sending the animation to Minecraft (${lines.length} updates)…`, 2500);
     try {
-      await link.command(`scriptevent pose:path ${JSON.stringify({ n: count, step: 0.05, ramp: [0, 0, 1, 1], loop: anim.loop === 'loop' ? 1 : 0, hud: 1, cam: camera ? 1 : 0 })}`);
+      await link.command(`scriptevent pose:path ${JSON.stringify({ n: count, step: 0.05, ramp: [0, 0, 1, 1], loop: anim.loop === 'loop' ? 1 : 0, hud: 1, cam: camera ? 1 : 0, smooth: smoothPlayback() ? 1 : 0 })}`);
       const TOGETHER = 6;
       for (let i = 0; i < lines.length; i += TOGETHER) await Promise.all(lines.slice(i, i + TOGETHER).map((line) => link.command(line)));
       await link.command('scriptevent pose:pathplay {"t":0}');
@@ -4275,7 +4605,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
           '_',
           locations,
           { name: 'Camera Settings', id: 'pose_studio_camera_menu', icon: 'photo_camera_front', children: [aspect, a.timeweather, a.follow] },
-          ...(cameraPathsOn() ? [{ name: 'Animate (experimental)', id: 'pose_studio_animate_menu', icon: 'movie_filter', children: [a.camanimate, a.animkey, a.record, '_', a.camanimplay, a.camanimstop] }] : []),
+          ...(cameraPathsOn() ? [{ name: 'Animate (experimental)', id: 'pose_studio_animate_menu', icon: 'movie_filter', children: [a.record, '_', a.camanimate, a.animkey, '_', a.camanimplay, a.camanimstop, a.smoothplay] }] : []),
           { name: 'Stream Deck', id: 'pose_studio_deck_menu', icon: 'grid_view', children: [a.deck, a.deckplugin] },
           '_',
           a.comparegame,
@@ -4307,7 +4637,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
           { name: 'Lights', id: 'pose_studio_light_menu', icon: 'lightbulb', children: [a.addlight, a.lightlevel] },
           { name: 'Particles', id: 'pose_studio_fx_menu', icon: 'auto_awesome', children: [a.addfx, a.editfx] },
           { name: 'Camera', id: 'pose_studio_camera_menu', icon: 'photo_camera_front', children: [a.pov, a.camera, a.playerview, '_', a.fov, aspect, a.timeweather, '_', a.lookcam, a.follow] },
-          ...(cameraPathsOn() ? [{ name: 'Animate (experimental)', id: 'pose_studio_animate_menu', icon: 'movie_filter', children: [a.camanimate, a.animkey, a.record, '_', a.camanimplay, a.camanimstop] }] : []),
+          ...(cameraPathsOn() ? [{ name: 'Animate (experimental)', id: 'pose_studio_animate_menu', icon: 'movie_filter', children: [a.record, '_', a.camanimate, a.animkey, '_', a.camanimplay, a.camanimstop, a.smoothplay] }] : []),
           '_',
           a.scan,
           a.scanmore,
@@ -7925,17 +8255,24 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     // walk cycles run on distance moved rather than time ("anim_time_update")
     if (anim.def.anim_time_update !== undefined) queries.anim_time = idleValue(anim.def.anim_time_update, 0, vars, queries);
     const weight = entity ? animationWeight(content, entity.description, anim.name, vars, queries) : 1;
+    return clipDelta(target, anim, queries.anim_time, base, vars, queries, weight);
+  }
+
+  // What one animation does to each bone at one moment of it (Blockbench rotations and moves to
+  // add). withRoot: also what it does to the model as a whole (its "root" bone), as 'root'.
+  function clipDelta(target, anim, time, base, vars, queries, weight = 1, withRoot = false) {
     const delta = new Map();
     for (const [name, channels] of Object.entries(anim.def.bones)) {
       const key = name.toLowerCase();
-      if (!channels || !target.groups.has(key)) continue;
+      const whole = withRoot && key === 'root';
+      if (!channels || (!whole && !target.groups.has(key))) continue;
       const before = base.get(key) || target.rest.get(key) || [0, 0, 0];
-      const r = channelAt(channels.rotation, queries.anim_time, toBedrockRot(before), vars, queries);
+      const r = channelAt(channels.rotation, time, toBedrockRot(before), vars, queries);
       if (r) delta.set(key, [-r[0] * weight, -r[1] * weight, r[2] * weight]);
       if (channels.relative_to && channels.relative_to.rotation === 'entity') (delta.relative || (delta.relative = new Set())).add(key);
-      if (target.movable && target.movable.has(key) && channels.position !== undefined) {
+      if ((whole || (target.movable && target.movable.has(key))) && channels.position !== undefined) {
         const at = base.get(`${key}@p`) || [0, 0, 0];
-        const p = channelAt(channels.position, queries.anim_time, [-at[0], at[1], at[2]], vars, queries);
+        const p = channelAt(channels.position, time, [-at[0], at[1], at[2]], vars, queries);
         if (p) delta.set(`${key}@p`, [-p[0] * weight, p[1] * weight, p[2] * weight]);
       }
     }
@@ -10827,7 +11164,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     return { id: idItem.slice(2), name: scene.world || '', anchor: point('A|'), player: point('P|'), locations, removed: scene.removed || [], protocol: version ? Number(version.slice(2)) : 0 };
   }
 
-  const EXPECTED_PACK_PROTOCOL = 30; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
+  const EXPECTED_PACK_PROTOCOL = 31; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
   let warnedOldPack = false;
 
   // Scene files in the scenes folders that belong to a world (their pose_world says so), as
@@ -11662,6 +11999,17 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.77.0",
+      "date": "2026-10-06",
+      "changes": [
+        "Record Player rebuilt. The recorded player now plays the pack's own idle, walk, sprint, sneak, jump and landing animations, and no longer jitters or twists.",
+        "You stay visible while recording, a 3 second countdown starts it, and at the end you keep or discard the take.",
+        "A line in the viewport shows the way a recorded player goes. A new player gets what you were wearing and holding.",
+        "New option to try: Animate ▸ Smooth Movement in Minecraft.",
+        "Update the Minecraft packs."
+      ]
+    },
     {
       "version": "0.76.0",
       "date": "2026-10-06",
@@ -12639,7 +12987,7 @@ ${PLUGIN_URL}`,
 
   // for the plugin's own tests only (they set this flag); nothing happens otherwise
   if (typeof globalThis !== 'undefined' && globalThis.__POSE_STUDIO_TEST) {
-    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS, sceneSpot, addLight, lightRoots, stopPath, cameraPathsOn, cameraPose, sampleCameraAnimation, playCameraAnimation, animateCamera, zoomedFov, setupClipChannel, removeClipChannel, clipKeys, clipPose, clipState, displayClips, addAnimationKey, placeClipKey, clipKeyAt, parseRecording, recordingTicks, recordingAnimation, importRecording, placeRecording, setRecording, poseState, showRecordedWalk, sampleAnimation, liveRotation, liveOrigin, poseMessage, entityMessage, setContentCache: (c) => (contentCache = c), liveWorldName, turnedEffect, turnVector, fxTurn, prepareTurned, turnedId, saddleParts, entityMessages, entityIds, flatParts, packFlat, partPlace, proxyModelFor, anyPartOn, prepareProxy, particleList, particleEntry, placeParticle, fxMessage, fxRoots };
+    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS, sceneSpot, addLight, lightRoots, stopPath, cameraPathsOn, cameraPose, sampleCameraAnimation, playCameraAnimation, animateCamera, zoomedFov, setupClipChannel, removeClipChannel, clipKeys, clipPose, clipState, displayClips, addAnimationKey, placeClipKey, clipKeyAt, parseRecording, tidyRecording, recordingTicks, recordingAnimation, importRecording, placeRecording, keepRecording, setRecording, poseState, showRecordedWalk, displayClipBones, displayClipRoot, updateRecordingLines, entityAnimations, clipDelta, sampleAnimation, liveRotation, liveOrigin, poseMessage, entityMessage, setContentCache: (c) => (contentCache = c), liveWorldName, turnedEffect, turnVector, fxTurn, prepareTurned, turnedId, saddleParts, entityMessages, entityIds, flatParts, packFlat, partPlace, proxyModelFor, anyPartOn, prepareProxy, particleList, particleEntry, placeParticle, fxMessage, fxRoots };
   }
 
   Plugin.register('pose_studio', {
@@ -12676,6 +13024,14 @@ ${PLUGIN_URL}`,
       if (Blockbench.on) Blockbench.on('load_project', refreshOnLoad);
       if (Blockbench.on) Blockbench.on('undo', onBlockbenchUndo);
       if (Blockbench.on) Blockbench.on('display_default_pose', onDefaultPose);
+      if (Blockbench.on) Blockbench.on('display_animation_frame', displayClipBones);
+      recordingLineTimer = setInterval(() => {
+        try {
+          updateRecordingLines();
+        } catch (e) {
+          // drawn again next time
+        }
+      }, 300);
       if (cameraPathsOn()) setupClipChannel();
       if (Blockbench.on) Blockbench.on('redo', onBlockbenchRedo);
 
@@ -12869,8 +13225,19 @@ ${PLUGIN_URL}`,
         }),
         record: (recordToggle = new Toggle('pose_studio_record', {
           name: 'Record Player (in Minecraft)', icon: 'fiber_manual_record', value: false, onChange: (value) => setRecording(value),
-          description: 'On: Minecraft records where you go and look. Off: the recording comes in on the selected Pose Studio player (or a new one) and goes on its Animation track. Move or turn that player to move the whole recording.',
+          description: "On: after a 3 second countdown, Minecraft records what you do. Off: you choose to keep the take (on a new Pose Studio player, or the selected one) or discard it. It goes on the player's Animation track; move or turn that player in the Edit tab to move the whole recording.",
         })),
+        smoothplay: new Toggle('pose_studio_smooth_playback', {
+          name: 'Smooth Movement in Minecraft (experimental)', icon: 'gesture', value: smoothPlayback(),
+          description: 'In Play Animation in Minecraft, players are pushed along instead of being placed 20 times a second, so they glide. Experimental: if a player drifts or turns oddly, untick it.',
+          onChange: (value) => {
+            try {
+              localStorage.setItem(SMOOTH_KEY, value ? '1' : '0');
+            } catch (e) {
+              // used until Blockbench restarts
+            }
+          },
+        }),
         camanimate: new Action('pose_studio_cam_animate', {
           name: 'Animate Camera (Timeline)', icon: 'movie_filter', click: () => animateCamera(),
           description: "Opens the Animate tab with the active camera ready to keyframe: position, rotation and zoom on Blockbench's timeline, with its graph editor for the curves.",
@@ -13031,6 +13398,10 @@ ${PLUGIN_URL}`,
       if (Blockbench.removeListener) Blockbench.removeListener('load_project', refreshOnLoad);
       if (Blockbench.removeListener) Blockbench.removeListener('undo', onBlockbenchUndo);
       if (Blockbench.removeListener) Blockbench.removeListener('display_default_pose', onDefaultPose);
+      if (Blockbench.removeListener) Blockbench.removeListener('display_animation_frame', displayClipBones);
+      if (recordingLineTimer) clearInterval(recordingLineTimer);
+      recordingLineTimer = null;
+      removeRecordingLines();
       removeClipChannel();
       if (Blockbench.removeListener) Blockbench.removeListener('redo', onBlockbenchRedo);
       deck.stop();

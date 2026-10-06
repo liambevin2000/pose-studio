@@ -1,6 +1,6 @@
 {
-  "version": "0.76.0",
-  "revision": "57d81f1d40fe",
+  "version": "0.77.0",
+  "revision": "e5f43b6fd57b",
   "files": [
     {
       "path": "PoseStudio_BP/entities/backdrop.json",
@@ -9,8 +9,8 @@
     },
     {
       "path": "PoseStudio_BP/entities/mannequin.json",
-      "size": 6906,
-      "sha1": "e05c8b0cde8535feb44d903b13f3ecd4096d251d"
+      "size": 6951,
+      "sha1": "b3a739694a4b225a8d876a3553f9d2d9ddefbf84"
     },
     {
       "path": "PoseStudio_BP/manifest.json",
@@ -19,8 +19,8 @@
     },
     {
       "path": "PoseStudio_BP/scripts/main.js",
-      "size": 88025,
-      "sha1": "b93fc0cbe6b8a19e1a9dc808171b732b3411d4a8"
+      "size": 91402,
+      "sha1": "c0a82f9107d116d60773843687e078a2d8ee8df5"
     },
     {
       "path": "PoseStudio_RP/animations/backdrop.animation.json",

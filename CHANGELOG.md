@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.77.0 (2026-10-06)
+
+- Record Player rebuilt. The recorded player now plays the pack's own idle, walk, sprint, sneak, jump and landing animations, and no longer jitters or twists.
+- You stay visible while recording, a 3 second countdown starts it, and at the end you keep or discard the take.
+- A line in the viewport shows the way a recorded player goes. A new player gets what you were wearing and holding.
+- New option to try: Animate ▸ Smooth Movement in Minecraft.
+- Update the Minecraft packs.
+
 ## 0.76.0 (2026-10-06)
 
 - New (experimental): Record Player. Play your part in Minecraft and it comes in as a recording on a Pose Studio player.
