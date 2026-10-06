@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.73.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.74.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -1636,6 +1636,7 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
       const id = mannequinId(fx.name);
       if (seen.has(id) || !fxInfo(fx).id) continue;
       seen.add(id);
+      if (fxInfo(fx).turn) ensureTurned(fxInfo(fx).id);
       const msg = fxMessage(fx);
       if (lastSent.get(id) === msg) continue;
       if (link.inFlight >= MAX_IN_FLIGHT) return;
@@ -3720,7 +3721,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     // a direction (a wind's, a cloud's): the marker can point it
     for (const input of inputs.values()) input.aim = input.vector && /dir|wind|vel|heading|flow|motion/i.test(input.name);
     return {
-      id, source, looping, instant,
+      id, source, looping, instant, effect,
       name: id.replace(/^[^:]*:/, '').replace(/_/g, ' '),
       // a steady burst is started again as it ends; a puff once a second; a looping one only once
       every: looping ? 0 : instant ? 1 : Math.max(0.05, round(active || 1, 2)),
@@ -3746,6 +3747,117 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     }
     content.particles = [...found.values()].sort((a, b) => (a.source === 'Minecraft') - (b.source === 'Minecraft') || a.id.localeCompare(b.id));
     return content.particles;
+  }
+
+  // ---- turning a whole effect ----
+  // Most effects have their motion written into their file (smoke rises, dust falls), so nothing
+  // can aim them from outside. For an effect with "Turn the whole effect with the marker" ticked,
+  // Pose Studio writes a copy of its file into its own pack in which every direction of the effect
+  // (where it comes out, which way it's thrown, what pulls on it) is turned by three values Pose
+  // Studio gives it when it starts it: the marker's rotation. Unturned, the copy is the original;
+  // turned upside down, what fell now rises. Minecraft needs one pack reload to learn a new copy.
+  const TURN_PREFIX = 'pose_fx:';
+  const turnedId = (id) => TURN_PREFIX + String(id).toLowerCase().replace(/[^a-z0-9_]+/g, '_');
+  const turnedFile = (id) => `${devPackDir('resource')}\\particles\\pose_studio\\${turnedId(id).slice(TURN_PREFIX.length)}.particle.json`;
+
+  // [x, y, z] (numbers or Molang) turned: each part of the result takes its share of all three.
+  function turnVector(v) {
+    if (!Array.isArray(v) || v.length !== 3) return v;
+    if (v.some((c) => typeof c === 'string' && /;|\breturn\b/.test(c))) return v; // more than one expression: left as it is
+    if (v.every((c) => c === 0 || c === '0')) return v;
+    return ['x', 'y', 'z'].map((row) => {
+      const terms = [];
+      v.forEach((c, i) => {
+        if (c === 0 || c === '0') return;
+        terms.push(`(${c}) * v.ps_${'xyz'[i]}.${row}`);
+      });
+      return terms.join(' + ');
+    });
+  }
+
+  // A copy of an effect in which its directions are turned (see above).
+  function turnedEffect(effect, id) {
+    const copy = JSON.parse(JSON.stringify(effect));
+    copy.description = Object.assign({}, copy.description, { identifier: turnedId(id) });
+    const c = copy.components || {};
+    const axis = { x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+    for (const [name, part] of Object.entries(c)) {
+      if (!part || typeof part !== 'object') continue;
+      if (/^minecraft:emitter_shape_/.test(name)) {
+        if (Array.isArray(part.offset)) part.offset = turnVector(part.offset);
+        if (Array.isArray(part.direction)) part.direction = turnVector(part.direction);
+        if (typeof part.plane_normal === 'string' && axis[part.plane_normal.toLowerCase()]) part.plane_normal = axis[part.plane_normal.toLowerCase()];
+        if (Array.isArray(part.plane_normal)) part.plane_normal = turnVector(part.plane_normal);
+        // a disc lies flat unless told otherwise
+        if (name === 'minecraft:emitter_shape_disc' && part.plane_normal === undefined) part.plane_normal = turnVector([0, 1, 0]);
+      } else if (name === 'minecraft:particle_motion_dynamic') {
+        if (Array.isArray(part.linear_acceleration)) part.linear_acceleration = turnVector(part.linear_acceleration);
+      } else if (name === 'minecraft:particle_motion_parametric') {
+        if (Array.isArray(part.relative_position)) part.relative_position = turnVector(part.relative_position);
+        if (Array.isArray(part.direction)) part.direction = turnVector(part.direction);
+      } else if (name === 'minecraft:particle_appearance_billboard') {
+        if (part.direction && Array.isArray(part.direction.custom_direction)) part.direction.custom_direction = turnVector(part.direction.custom_direction);
+      }
+    }
+    if (Array.isArray(c['minecraft:particle_initial_speed'])) c['minecraft:particle_initial_speed'] = turnVector(c['minecraft:particle_initial_speed']);
+    return { format_version: '1.10.0', particle_effect: copy };
+  }
+
+  // Makes sure the turnable copy of an effect is in the pack. True when it was (re)written: then
+  // Minecraft has to reload its packs before it can show it.
+  function prepareTurned(entry) {
+    if (!entry.effect) throw new Error("This effect's file couldn't be read again: reopen Add Particle…");
+    const fs = bedrockFs();
+    const file = turnedFile(entry.id);
+    const text = JSON.stringify(turnedEffect(entry.effect, entry.id));
+    try {
+      if (String(fs.readFileSync(file, 'utf8')) === text) return false;
+    } catch (e) {
+      // not there yet
+    }
+    const dir = file.replace(/\\[^\\]*$/, '');
+    if (!fs.existsSync(devPackDir('resource'))) throw new Error('The Pose Studio resource pack is not in development_resource_packs (Install Minecraft Packs).');
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(file, text);
+    return true;
+  }
+
+  // A scene opened on another PC (or after the packs were reinstalled) can have turned effects whose
+  // copies aren't in this PC's pack yet: they're made when the scene is first sent, once each.
+  const turnedChecked = new Set();
+  let turnedContentAsked = false;
+  function ensureTurned(id) {
+    if (turnedChecked.has(id)) return;
+    const content = contentCache && contentCache.content;
+    if (!content) {
+      if (!turnedContentAsked) {
+        turnedContentAsked = true;
+        previewContent().catch(() => {});
+      }
+      return;
+    }
+    turnedChecked.add(id);
+    try {
+      const entry = particleList(content).find((x) => x.id === id);
+      if (entry && prepareTurned(entry) && link.connected) {
+        Blockbench.showMessageBox(
+          { title: 'Pose Studio: particles', message: `This scene turns ${entry.name} with its marker. Pose Studio made the copy of the effect that needs; Minecraft has to reload its packs once before it can show it.`, buttons: ['Reload now', 'Later'], confirm: 0, cancel: 1 },
+          (button) => button === 0 && reloadMinecraftPacks()
+        );
+      }
+    } catch (e) {
+      console.warn('[Pose Studio] turned particle', e);
+    }
+  }
+
+  // The marker's rotation for the game: where the effect's own x, y and z point now (game axes).
+  function fxTurn(group) {
+    const q = eulerQuaternion(group.rotation);
+    const image = (v) => {
+      const out = new THREE.Vector3(-v[0], v[1], -v[2]).applyQuaternion(q);
+      return [-out.x, out.y, -out.z].map((n) => round(n, 3) || 0);
+    };
+    return { ps_x: image([1, 0, 0]), ps_y: image([0, 1, 0]), ps_z: image([0, 0, 1]) };
   }
 
   // A particle whose direction follows its marker has an arrow on the marker: turn the marker (the
@@ -3783,13 +3895,13 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
       const f = (settings.follow || {})[input.name];
       if (input.vector && f !== undefined && f !== null && f !== false) follow[input.name] = round(Number(f) || 1, 3);
     }
-    const info = { id: entry.id, every: Math.max(0, round(Number(settings.every) || 0, 2)), vars, follow };
+    const info = { id: entry.id, every: Math.max(0, round(Number(settings.every) || 0, 2)), vars, follow, turn: !!settings.turn };
     if (existing) {
       const arrow = (existing.children || []).find((c) => c instanceof Cube && c.name === FX_ARROW);
       const elements = arrow ? [arrow] : [];
       Undo.initEdit({ outliner: true, elements });
       existing.pose_fx = info;
-      setFxArrow(existing, Object.keys(follow).length > 0);
+      setFxArrow(existing, Object.keys(follow).length > 0 || info.turn);
       Undo.finishEdit('Change particle', { outliner: true, elements: (existing.children || []).filter((c) => c instanceof Cube && c.name === FX_ARROW) });
       Canvas.updateAll();
       return existing;
@@ -3803,7 +3915,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     const group = new Group({ name: `fx_${n}`, origin: at.slice() }).init();
     group.pose_fx = info;
     const cube = new Cube({ name: entry.name || 'particle', from: at.map((v) => v - 2), to: at.map((v) => v + 2), color: 1 }).addTo(group).init();
-    const arrow = setFxArrow(group, Object.keys(follow).length > 0);
+    const arrow = setFxArrow(group, Object.keys(follow).length > 0 || info.turn);
     Undo.finishEdit('Add particle', { outliner: true, elements: arrow ? [cube, arrow] : [cube] });
     Canvas.updateAll();
     try {
@@ -3853,6 +3965,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
           every: had ? had.every : 1,
           vars: had ? JSON.parse(JSON.stringify(had.vars || {})) : {},
           follow: had && byId.has(had.id) ? follows(byId.get(had.id), had.follow || {}) : {},
+          turn: !!(had && had.turn),
           list: list.map((p) => ({ id: p.id, name: p.name, source: p.source })),
         }),
         computed: {
@@ -3889,6 +4002,9 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
             <div v-if="entry" style="margin-top: 10px;">
               <label>Start it every <input type="number" class="dark_bordered" v-model.number="every" min="0" step="0.05" style="width: 70px;"> seconds</label>
               <span style="opacity: 0.7; margin-left: 8px;">(0: only once)</span>
+              <div style="margin-top: 6px;">
+                <label title="Turn the marker with the rotate tool and the whole effect turns with it: sideways, towards something, or upside down so what falls rises. Pose Studio makes its own copy of the effect for this; Minecraft reloads its packs once."><input type="checkbox" v-model="turn"> Turn the whole effect with the marker</label>
+              </div>
               <div v-if="entry.looping" style="margin-top: 6px; color: var(--color-subtle_text);">This effect repeats by itself: it's started once, and stays where it was started until the world is reopened.</div>
               <div v-for="input in entry.inputs" :key="input.name" style="margin-top: 6px; display: flex; gap: 6px; align-items: center;">
                 <span style="min-width: 130px;">{{ input.name }}</span>
@@ -3907,8 +4023,23 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
       onConfirm() {
         if (!vm || !vm.entry) return;
         const follow = Object.fromEntries(Object.entries(vm.follow || {}).filter(([, f]) => f && f.on).map(([name, f]) => [name, Number(f.strength) || 1]));
-        const group = placeParticle(vm.entry, { every: vm.every, vars: vm.vars, follow }, existing);
-        const aimed = Object.keys(follow).length > 0;
+        let fresh = false;
+        if (vm.turn) {
+          try {
+            fresh = prepareTurned(vm.entry);
+          } catch (e) {
+            showError('Pose Studio: particles', e);
+            return;
+          }
+        }
+        const group = placeParticle(vm.entry, { every: vm.every, vars: vm.vars, follow, turn: vm.turn }, existing);
+        const aimed = Object.keys(follow).length > 0 || vm.turn;
+        if (fresh && link.connected) {
+          Blockbench.showMessageBox(
+            { title: 'Pose Studio: particles', message: `Pose Studio made a turnable copy of ${vm.entry.name}. Minecraft has to reload its packs once before it can show it.`, buttons: ['Reload now', 'Later'], confirm: 0, cancel: 1 },
+            (button) => button === 0 && reloadMinecraftPacks()
+          );
+        }
         if (!existing) Blockbench.showQuickMessage(`${group.name} added (${vm.entry.name}). Move it where the particles should be${aimed ? ', and turn it to point them' : ''}`, 3500);
       },
     }).show();
@@ -3918,7 +4049,8 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     const info = fxInfo(group);
     const vars = Object.assign({}, info.vars);
     for (const [name, strength] of Object.entries(info.follow || {})) vars[name] = fxDirection(group, strength);
-    return JSON.stringify({ id: mannequinId(group.name), p: toWorld(group.origin), t: info.id, n: Math.round(info.every * 20), v: vars });
+    if (info.turn) Object.assign(vars, fxTurn(group));
+    return JSON.stringify({ id: mannequinId(group.name), p: toWorld(group.origin), t: info.turn ? turnedId(info.id) : info.id, n: Math.round(info.every * 20), v: vars });
   }
 
   // ---- Classic menu or the panel (experimental) ------------------------------------------------------
@@ -11303,6 +11435,14 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // <changelog>
   const CHANGELOG = [
     {
+      "version": "0.74.0",
+      "date": "2026-10-06",
+      "changes": [
+        "Any particle effect can be turned with its marker: sideways, towards something, or upside down so what falls rises.",
+        "Tick \"Turn the whole effect with the marker\" in its settings. Minecraft reloads its packs once per effect."
+      ]
+    },
+    {
       "version": "0.73.0",
       "date": "2026-10-06",
       "changes": [
@@ -12253,7 +12393,7 @@ ${PLUGIN_URL}`,
 
   // for the plugin's own tests only (they set this flag); nothing happens otherwise
   if (typeof globalThis !== 'undefined' && globalThis.__POSE_STUDIO_TEST) {
-    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS, sceneSpot, addLight, lightRoots, stopPath, cameraPathsOn, cameraPose, sampleCameraAnimation, playCameraAnimation, animateCamera, zoomedFov, setupClipChannel, removeClipChannel, clipKeys, clipPose, clipState, displayClips, addAnimationKey, sampleAnimation, liveRotation, liveOrigin, poseMessage, entityMessage, setContentCache: (c) => (contentCache = c), liveWorldName, saddleParts, entityMessages, entityIds, flatParts, packFlat, partPlace, proxyModelFor, anyPartOn, prepareProxy, particleList, particleEntry, placeParticle, fxMessage, fxRoots };
+    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS, sceneSpot, addLight, lightRoots, stopPath, cameraPathsOn, cameraPose, sampleCameraAnimation, playCameraAnimation, animateCamera, zoomedFov, setupClipChannel, removeClipChannel, clipKeys, clipPose, clipState, displayClips, addAnimationKey, sampleAnimation, liveRotation, liveOrigin, poseMessage, entityMessage, setContentCache: (c) => (contentCache = c), liveWorldName, turnedEffect, turnVector, fxTurn, prepareTurned, turnedId, saddleParts, entityMessages, entityIds, flatParts, packFlat, partPlace, proxyModelFor, anyPartOn, prepareProxy, particleList, particleEntry, placeParticle, fxMessage, fxRoots };
   }
 
   Plugin.register('pose_studio', {

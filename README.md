@@ -161,6 +161,7 @@ Place particle effects from the world's packs (DragonCraft's smoke, wind, dustâ€
 - Most effects are one short burst, so the marker starts it again **every** so many seconds (0: only once). Lower is denser.
 - Some effects read values a script normally gives them (a wind's direction and intensity). Those appear as fields in the same window.
 - **Direction:** an effect that reads a direction (a wind, clouds) has **Point with the marker** ticked. Its marker gets an arrow: turn the marker with the rotate tool and the effect points that way; *strength* is how strong. Untick it to type the numbers yourself. Effects that do not read a direction cannot be aimed.
+- **Turn the whole effect with the marker** works for any effect: turn the marker and the effect turns with it, sideways, towards something, or upside down so what falls rises. Pose Studio makes its own copy of the effect for this, and Minecraft reloads its packs once for each effect you turn.
 - **Particle Settingsâ€¦** changes the selected marker. Deleting the marker stops the effect.
 
 An effect that repeats by itself can't be stopped by Pose Studio once started: it stays until the world is reopened.

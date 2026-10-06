@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.74.0 (2026-10-06)
+
+- Any particle effect can be turned with its marker: sideways, towards something, or upside down so what falls rises.
+- Tick "Turn the whole effect with the marker" in its settings. Minecraft reloads its packs once per effect.
+
 ## 0.73.0 (2026-10-06)
 
 - Particles with a direction (wind, clouds) can follow their marker: turn the marker and the effect points that way.
