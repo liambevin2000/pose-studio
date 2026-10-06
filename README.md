@@ -160,6 +160,7 @@ Place particle effects from the world's packs (DragonCraft's smoke, wind, dust�
 - **Particles ▸ Add Particle…** lists them, the packs' own first. Pick one and it becomes an `fx_N` marker: move it like anything else and Minecraft shows the effect there.
 - Most effects are one short burst, so the marker starts it again **every** so many seconds (0: only once). Lower is denser.
 - Some effects read values a script normally gives them (a wind's direction and intensity). Those appear as fields in the same window.
+- **Direction:** an effect that reads a direction (a wind, clouds) has **Point with the marker** ticked. Its marker gets an arrow: turn the marker with the rotate tool and the effect points that way; *strength* is how strong. Untick it to type the numbers yourself. Effects that do not read a direction cannot be aimed.
 - **Particle Settings…** changes the selected marker. Deleting the marker stops the effect.
 
 An effect that repeats by itself can't be stopped by Pose Studio once started: it stays until the world is reopened.

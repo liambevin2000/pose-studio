@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.72.3'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.73.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -3717,6 +3717,8 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
       if (set.has(name) || PARTICLE_OWN.test(name)) continue;
       inputs.set(name, { name, vector: !!m[2] || !!(inputs.get(name) && inputs.get(name).vector) });
     }
+    // a direction (a wind's, a cloud's): the marker can point it
+    for (const input of inputs.values()) input.aim = input.vector && /dir|wind|vel|heading|flow|motion/i.test(input.name);
     return {
       id, source, looping, instant,
       name: id.replace(/^[^:]*:/, '').replace(/_/g, ' '),
@@ -3746,7 +3748,28 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     return content.particles;
   }
 
-  // Puts a particle in the scene, or changes the one given. settings: { every, vars }.
+  // A particle whose direction follows its marker has an arrow on the marker: turn the marker (the
+  // rotate tool) and the arrow, and the effect in Minecraft, point that way.
+  const FX_ARROW = 'direction';
+  function setFxArrow(group, on) {
+    let arrow = (group.children || []).find((c) => c instanceof Cube && c.name === FX_ARROW) || null;
+    if (on && !arrow) {
+      const o = group.origin;
+      // (cubes sit in the marker's own unturned space: along -Z is "forward", as for cameras)
+      arrow = new Cube({ name: FX_ARROW, from: [o[0] - 0.5, o[1] - 0.5, o[2] - 14], to: [o[0] + 0.5, o[1] + 0.5, o[2] - 2], color: 4 }).addTo(group).init();
+    } else if (!on && arrow) {
+      arrow.remove();
+      arrow = null;
+    }
+    return arrow;
+  }
+  // The way a marker points, in the game's axes, at a strength.
+  function fxDirection(group, strength) {
+    const f = cameraForward(group);
+    return [-f.x, f.y, -f.z].map((v) => round(v * strength, 3) || 0);
+  }
+
+  // Puts a particle in the scene, or changes the one given. settings: { every, vars, follow }.
   function placeParticle(entry, settings, existing) {
     if (typeof Project === 'undefined' || !Project) newProject(Formats.free);
     const vars = {};
@@ -3754,11 +3777,21 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
       const v = (settings.vars || {})[input.name];
       vars[input.name] = input.vector ? [0, 1, 2].map((i) => round(Number(Array.isArray(v) ? v[i] : 0) || 0, 3)) : round(Number(v) || 0, 3);
     }
-    const info = { id: entry.id, every: Math.max(0, round(Number(settings.every) || 0, 2)), vars };
+    // directions the marker points: name -> strength (the length of the direction)
+    const follow = {};
+    for (const input of entry.inputs || []) {
+      const f = (settings.follow || {})[input.name];
+      if (input.vector && f !== undefined && f !== null && f !== false) follow[input.name] = round(Number(f) || 1, 3);
+    }
+    const info = { id: entry.id, every: Math.max(0, round(Number(settings.every) || 0, 2)), vars, follow };
     if (existing) {
-      Undo.initEdit({ outliner: true, elements: [] });
+      const arrow = (existing.children || []).find((c) => c instanceof Cube && c.name === FX_ARROW);
+      const elements = arrow ? [arrow] : [];
+      Undo.initEdit({ outliner: true, elements });
       existing.pose_fx = info;
-      Undo.finishEdit('Change particle', { outliner: true, elements: [] });
+      setFxArrow(existing, Object.keys(follow).length > 0);
+      Undo.finishEdit('Change particle', { outliner: true, elements: (existing.children || []).filter((c) => c instanceof Cube && c.name === FX_ARROW) });
+      Canvas.updateAll();
       return existing;
     }
     // beside what's selected (a player, a mob), else a little above the middle of the scene
@@ -3770,7 +3803,8 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     const group = new Group({ name: `fx_${n}`, origin: at.slice() }).init();
     group.pose_fx = info;
     const cube = new Cube({ name: entry.name || 'particle', from: at.map((v) => v - 2), to: at.map((v) => v + 2), color: 1 }).addTo(group).init();
-    Undo.finishEdit('Add particle', { outliner: true, elements: [cube] });
+    const arrow = setFxArrow(group, Object.keys(follow).length > 0);
+    Undo.finishEdit('Add particle', { outliner: true, elements: arrow ? [cube, arrow] : [cube] });
     Canvas.updateAll();
     try {
       if (typeof unselectAllElements === 'function') unselectAllElements();
@@ -3803,6 +3837,8 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     const had = existing ? fxInfo(existing) : null;
     const byId = new Map(list.map((p) => [p.id, p]));
     const defaults = (entry) => Object.fromEntries(entry.inputs.map((i) => [i.name, i.vector ? [1, 0, 0] : 1]));
+    // directions follow the marker unless told otherwise: name -> { on, strength }
+    const follows = (entry, saved) => Object.fromEntries(entry.inputs.filter((i) => i.vector).map((i) => [i.name, { on: saved ? saved[i.name] !== undefined : !!i.aim, strength: saved && saved[i.name] !== undefined ? saved[i.name] : 1 }]));
     let vm = null;
     new Dialog({
       id: 'pose_studio_particle',
@@ -3816,6 +3852,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
           pick: had && byId.has(had.id) ? had.id : '',
           every: had ? had.every : 1,
           vars: had ? JSON.parse(JSON.stringify(had.vars || {})) : {},
+          follow: had && byId.has(had.id) ? follows(byId.get(had.id), had.follow || {}) : {},
           list: list.map((p) => ({ id: p.id, name: p.name, source: p.source })),
         }),
         computed: {
@@ -3833,6 +3870,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
             const entry = byId.get(id);
             this.every = entry.every;
             this.vars = defaults(entry);
+            this.follow = follows(entry, null);
           },
         },
         mounted() {
@@ -3854,8 +3892,12 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
               <div v-if="entry.looping" style="margin-top: 6px; color: var(--color-subtle_text);">This effect repeats by itself: it's started once, and stays where it was started until the world is reopened.</div>
               <div v-for="input in entry.inputs" :key="input.name" style="margin-top: 6px; display: flex; gap: 6px; align-items: center;">
                 <span style="min-width: 130px;">{{ input.name }}</span>
-                <template v-if="input.vector">
-                  <input v-for="axis in [0, 1, 2]" :key="axis" type="number" class="dark_bordered" v-model.number="vars[input.name][axis]" step="0.1" style="width: 70px;" :title="'xyz'[axis]">
+                <template v-if="input.vector && follow[input.name]">
+                  <label title="The marker has an arrow: turn the marker with the rotate tool and this points that way"><input type="checkbox" v-model="follow[input.name].on"> Point with the marker</label>
+                  <label v-if="follow[input.name].on">strength <input type="number" class="dark_bordered" v-model.number="follow[input.name].strength" step="0.1" style="width: 60px;"></label>
+                </template>
+                <template v-if="input.vector && !(follow[input.name] && follow[input.name].on)">
+                  <input v-for="axis in [0, 1, 2]" :key="axis" type="number" class="dark_bordered" v-model.number="vars[input.name][axis]" step="0.1" style="width: 60px;" :title="'xyz'[axis]">
                 </template>
                 <input v-else type="number" class="dark_bordered" v-model.number="vars[input.name]" step="0.1" style="width: 70px;">
               </div>
@@ -3864,15 +3906,19 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
       },
       onConfirm() {
         if (!vm || !vm.entry) return;
-        const group = placeParticle(vm.entry, { every: vm.every, vars: vm.vars }, existing);
-        if (!existing) Blockbench.showQuickMessage(`${group.name} added (${vm.entry.name}). Move it where the particles should be`, 3000);
+        const follow = Object.fromEntries(Object.entries(vm.follow || {}).filter(([, f]) => f && f.on).map(([name, f]) => [name, Number(f.strength) || 1]));
+        const group = placeParticle(vm.entry, { every: vm.every, vars: vm.vars, follow }, existing);
+        const aimed = Object.keys(follow).length > 0;
+        if (!existing) Blockbench.showQuickMessage(`${group.name} added (${vm.entry.name}). Move it where the particles should be${aimed ? ', and turn it to point them' : ''}`, 3500);
       },
     }).show();
   }
 
   function fxMessage(group) {
     const info = fxInfo(group);
-    return JSON.stringify({ id: mannequinId(group.name), p: toWorld(group.origin), t: info.id, n: Math.round(info.every * 20), v: info.vars || {} });
+    const vars = Object.assign({}, info.vars);
+    for (const [name, strength] of Object.entries(info.follow || {})) vars[name] = fxDirection(group, strength);
+    return JSON.stringify({ id: mannequinId(group.name), p: toWorld(group.origin), t: info.id, n: Math.round(info.every * 20), v: vars });
   }
 
   // ---- Classic menu or the panel (experimental) ------------------------------------------------------
@@ -11256,6 +11302,14 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.73.0",
+      "date": "2026-10-06",
+      "changes": [
+        "Particles with a direction (wind, clouds) can follow their marker: turn the marker and the effect points that way.",
+        "Only effects that read a direction can be aimed."
+      ]
+    },
     {
       "version": "0.72.3",
       "date": "2026-10-06",

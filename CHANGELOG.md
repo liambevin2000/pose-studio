@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.73.0 (2026-10-06)
+
+- Particles with a direction (wind, clouds) can follow their marker: turn the marker and the effect points that way.
+- Only effects that read a direction can be aimed.
+
 ## 0.72.3 (2026-10-06)
 
 - New scene files are named after what the world is called now, also after it was renamed.
