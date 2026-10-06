@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.72.1 (2026-10-06)
+
+- The panel fits a narrow sidebar: one button per row, so labels are no longer cut off.
+- Every panel button shows its name when you point at it.
+
 ## 0.72.0 (2026-10-06)
 
 - Moving structures ignores air: empty space in the selection no longer wipes out what is at the landing place.

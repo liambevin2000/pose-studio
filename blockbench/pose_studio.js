@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.72.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.72.1'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -4015,7 +4015,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
   const PANEL_FOLDED_KEY = 'pose_studio_panel_folded';
 
   const PANEL_CSS = `
-    .pose_studio_panel { padding: 6px 8px 10px; overflow-y: auto; height: 100%; box-sizing: border-box; }
+    .pose_studio_panel { padding: 6px 8px 10px; overflow-y: auto; height: 100%; box-sizing: border-box; container-type: inline-size; }
     .pose_studio_panel .ps-head { display: flex; align-items: center; gap: 4px; margin: 8px 0 4px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--color-subtle_text); cursor: pointer; user-select: none; }
     .pose_studio_panel .ps-head i { font-size: 16px; }
     .pose_studio_panel .ps-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
@@ -4034,6 +4034,16 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     .pose_studio_panel .ps-cam:hover { background: var(--color-button); }
     .pose_studio_panel .ps-cam.ps-on { background: var(--color-accent); color: var(--color-accent_text, #fff); }
     .pose_studio_panel .ps-cam i { font-size: 16px; }
+    /* a narrow sidebar (Blockbench beside Minecraft on one screen): one button a row */
+    @container (max-width: 270px) {
+      .pose_studio_panel .ps-grid { grid-template-columns: 1fr; }
+      .pose_studio_panel .ps-btn { min-height: 28px; }
+    }
+    @container (max-width: 170px) {
+      .pose_studio_panel .ps-btn { white-space: normal; line-height: 1.15; padding: 4px 6px; }
+      .pose_studio_panel .ps-btn span { overflow: visible; }
+    }
+    .pose_studio_panel.ps-narrow .ps-grid { grid-template-columns: 1fr; }
   `;
 
   function panelState() {
@@ -4085,8 +4095,38 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
         data: () => ({ s: panelState(), folded }),
         mounted() {
           vm = this;
+          this.nameButtons();
+          // (for a Blockbench whose browser has no container queries)
+          try {
+            if (typeof ResizeObserver !== 'undefined' && !(typeof CSS !== 'undefined' && CSS.supports && CSS.supports('container-type: inline-size'))) {
+              this.watcher = new ResizeObserver(() => this.$el.classList.toggle('ps-narrow', this.$el.clientWidth <= 270));
+              this.watcher.observe(this.$el);
+            }
+          } catch (e) {
+            // two buttons a row, as before
+          }
+        },
+        updated() {
+          this.nameButtons();
+        },
+        beforeDestroy() {
+          if (this.watcher) this.watcher.disconnect();
         },
         methods: {
+          // every button says what it is when pointed at, also when its label doesn't fit
+          nameButtons() {
+            if (!this.$el || !this.$el.querySelectorAll) return;
+            for (const button of this.$el.querySelectorAll('.ps-btn')) {
+              const label = button.querySelector('span');
+              const text = label ? label.textContent.trim() : '';
+              const now = button.getAttribute('title') || '';
+              if (now !== button.dataset.shown) button.dataset.hint = now || ' '; // its own hint (it can change)
+              const hint = button.dataset.hint.trim();
+              const title = hint && hint !== text ? `${text}: ${hint}` : text;
+              button.dataset.shown = title;
+              if (now !== title) button.setAttribute('title', title);
+            }
+          },
           run(id) {
             const item = typeof BarItems !== 'undefined' && BarItems[id];
             if (item && typeof item.trigger === 'function') item.trigger();
@@ -4147,7 +4187,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
               <div class="ps-btn" @click="run('pose_studio_savecam')" title="A camera where the Blockbench view is"><i class="material-icons">switch_video</i><span>Camera: View</span></div>
               <div class="ps-btn ps-wide" @click="run('pose_studio_add_light')" title="A light: a marker here, an invisible light block in Minecraft"><i class="material-icons">lightbulb</i><span>Add Light</span></div>
               <div class="ps-btn" @click="run('pose_studio_add_fx')" title="A particle effect of the world's packs (smoke, wind…), placed in the scene"><i class="material-icons">auto_awesome</i><span>Add Particle…</span></div>
-              <div class="ps-btn" @click="run('pose_studio_edit_fx')" title="What the selected particle is, how often it's started, and its values"><i class="material-icons">tune</i><span>Particle Settings…</span></div>
+              <div class="ps-btn" @click="run('pose_studio_edit_fx')" title="What the selected particle is, how often it's started, and its values"><i class="material-icons">tune</i><span>Edit Particle…</span></div>
               <div class="ps-btn" @click="run('pose_studio_scan')"><i class="material-icons">travel_explore</i><span>Import World…</span></div>
               <div class="ps-btn" @click="run('pose_studio_scan_expand')"><i class="material-icons">add_location_alt</i><span>Expand World…</span></div>
               <div class="ps-btn ps-wide" @click="run('pose_studio_clear_mobs')" title="Takes the mobs you didn't place out of the scene, without drops"><i class="material-icons">pest_control</i><span>Remove Wild Mobs…</span></div>
@@ -11191,6 +11231,14 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.72.1",
+      "date": "2026-10-06",
+      "changes": [
+        "The panel fits a narrow sidebar: one button per row, so labels are no longer cut off.",
+        "Every panel button shows its name when you point at it."
+      ]
+    },
     {
       "version": "0.72.0",
       "date": "2026-10-06",

@@ -1,5 +1,13 @@
 [
   {
+    "version": "0.72.1",
+    "date": "2026-10-06",
+    "changes": [
+      "The panel fits a narrow sidebar: one button per row, so labels are no longer cut off.",
+      "Every panel button shows its name when you point at it."
+    ]
+  },
+  {
     "version": "0.72.0",
     "date": "2026-10-06",
     "changes": [
