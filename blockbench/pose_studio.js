@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.72.2'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.72.3'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -10477,6 +10477,26 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   }
 
   // The world's name, from the most recently played world folder (the one that's open).
+  // The name the open world has now. A world keeps the name it had when Pose Studio first saw it,
+  // and it can have been renamed (or copied and renamed) since: its folder says what it's called
+  // today. Only when it's clear which folder is the open world's: the one picked by hand, or the
+  // one Minecraft is writing to right now. Otherwise '' (and the remembered name is used).
+  const WORLD_OPEN_WINDOW = 15 * 60 * 1000;
+  function liveWorldName() {
+    try {
+      const picked = pickedWorldInfo();
+      if (picked) return picked.name || '';
+      const worlds = listWorlds(bedrockFs(), bedrockRoot());
+      const top = worlds[0];
+      if (!top || !(Date.now() - top.lastActive < WORLD_OPEN_WINDOW)) return '';
+      // two worlds written to within a minute of each other: not clear which is open
+      if (worlds[1] && top.lastActive - worlds[1].lastActive < 60000) return '';
+      return top.name || '';
+    } catch (e) {
+      return '';
+    }
+  }
+
   function currentWorldName() {
     try {
       const picked = pickedWorldInfo();
@@ -10502,7 +10522,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   function tellWorldLocation() {
     const l = projectLink();
     if (!link.connected || !l || !connectedWorld || l.id !== connectedWorld.id) return;
-    const msg = { loc: l.loc || 'main', p: forwardSlashes(projectPath()), n: l.locName || 'Main', w: l.name || connectedWorld.name || '' };
+    const msg = { loc: l.loc || 'main', p: forwardSlashes(projectPath()), n: l.locName || 'Main', w: connectedWorld.name || l.name || '' };
     if (l.anchor) {
       msg.a = [l.anchor.x, l.anchor.y, l.anchor.z];
       msg.d = l.anchor.dim || undefined;
@@ -10764,7 +10784,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     }
     if (link.connected) {
       const fresh = await readWorldScene().catch(() => null);
-      if (fresh) connectedWorld = Object.assign(connectedWorld || {}, fresh, { name: fresh.name || (connectedWorld && connectedWorld.name) || currentWorldName() });
+      if (fresh) connectedWorld = Object.assign(connectedWorld || {}, fresh, { name: liveWorldName() || fresh.name || (connectedWorld && connectedWorld.name) || currentWorldName() });
     }
     const world = connectedWorld;
     const old = projectLink();
@@ -10826,7 +10846,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
       Blockbench.showMessageBox({ title: 'Pose Studio', message: "Couldn't read the world. Is the Pose Studio behavior pack up to date?" });
       return;
     }
-    connectedWorld = Object.assign(connectedWorld || {}, world, { name: world.name || (connectedWorld && connectedWorld.name) || currentWorldName() });
+    connectedWorld = Object.assign(connectedWorld || {}, world, { name: liveWorldName() || world.name || (connectedWorld && connectedWorld.name) || currentWorldName() });
     Project.pose_world = { id: world.id, name: connectedWorld.name, loc: newLocationId(), locName: String(name).trim(), anchor: world.anchor };
     resync();
     await saveScene();
@@ -10843,7 +10863,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
       Blockbench.showMessageBox({ title: 'Pose Studio', message: "Couldn't read the world. Is the Pose Studio behavior pack up to date?" });
       return;
     }
-    connectedWorld = Object.assign(connectedWorld || {}, world, { name: world.name || (connectedWorld && connectedWorld.name) || currentWorldName() });
+    connectedWorld = Object.assign(connectedWorld || {}, world, { name: liveWorldName() || world.name || (connectedWorld && connectedWorld.name) || currentWorldName() });
     const current = projectLink() && projectLink().id === world.id ? projectLocation() : '';
     const rows = () =>
       (connectedWorld.locations || [])
@@ -11145,7 +11165,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     }
     adoptPickedWorld(world.id);
     connectedWorld = world;
-    const worldName = world.name || currentWorldName();
+    const worldName = liveWorldName() || world.name || currentWorldName(); // what it's called now, if it was renamed
     connectedWorld.name = worldName;
     const project = typeof Project !== 'undefined' && Project ? Project : null;
     const linked = projectLink();
@@ -11236,6 +11256,14 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.72.3",
+      "date": "2026-10-06",
+      "changes": [
+        "New scene files are named after what the world is called now, also after it was renamed.",
+        "Existing scene files keep their names and keep working."
+      ]
+    },
     {
       "version": "0.72.2",
       "date": "2026-10-06",
@@ -12171,7 +12199,7 @@ ${PLUGIN_URL}`,
 
   // for the plugin's own tests only (they set this flag); nothing happens otherwise
   if (typeof globalThis !== 'undefined' && globalThis.__POSE_STUDIO_TEST) {
-    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS, sceneSpot, addLight, lightRoots, stopPath, cameraPathsOn, cameraPose, sampleCameraAnimation, playCameraAnimation, animateCamera, zoomedFov, setupClipChannel, removeClipChannel, clipKeys, clipPose, clipState, displayClips, addAnimationKey, sampleAnimation, liveRotation, liveOrigin, poseMessage, entityMessage, setContentCache: (c) => (contentCache = c), saddleParts, entityMessages, entityIds, flatParts, packFlat, partPlace, proxyModelFor, anyPartOn, prepareProxy, particleList, particleEntry, placeParticle, fxMessage, fxRoots };
+    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS, sceneSpot, addLight, lightRoots, stopPath, cameraPathsOn, cameraPose, sampleCameraAnimation, playCameraAnimation, animateCamera, zoomedFov, setupClipChannel, removeClipChannel, clipKeys, clipPose, clipState, displayClips, addAnimationKey, sampleAnimation, liveRotation, liveOrigin, poseMessage, entityMessage, setContentCache: (c) => (contentCache = c), liveWorldName, saddleParts, entityMessages, entityIds, flatParts, packFlat, partPlace, proxyModelFor, anyPartOn, prepareProxy, particleList, particleEntry, placeParticle, fxMessage, fxRoots };
   }
 
   Plugin.register('pose_studio', {

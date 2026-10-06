@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.72.3 (2026-10-06)
+
+- New scene files are named after what the world is called now, also after it was renamed.
+- Existing scene files keep their names and keep working.
+
 ## 0.72.2 (2026-10-06)
 
 - Narrow panel: back to two buttons per row, with smaller labels on two lines so they read in full.
