@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.74.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.75.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -3225,6 +3225,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
           new Property(KeyframeDataPoint, 'number', 'pose_speed', { default: 1, exposed: false, condition: here }),
           new Property(KeyframeDataPoint, 'boolean', 'pose_loop', { default: true, exposed: false, condition: here }),
           new Property(KeyframeDataPoint, 'number', 'pose_blend', { default: 0.2, exposed: false, condition: here }),
+          new Property(KeyframeDataPoint, 'number', 'pose_start', { default: 0, exposed: false, condition: here }),
         ];
       }
     } catch (e) {
@@ -3273,7 +3274,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
   function clipKeys(animator) {
     return (animator[CLIP_CHANNEL] || []).map((kf) => {
       const d = (kf.data_points && kf.data_points[0]) || {};
-      return { time: Number(kf.time) || 0, id: String(d.pose_anim || ''), speed: Number(d.pose_speed) > 0 ? Number(d.pose_speed) : 1, loop: d.pose_loop !== false, blend: Math.max(0, Number(d.pose_blend) || 0) };
+      return { time: Number(kf.time) || 0, id: String(d.pose_anim || ''), speed: Number(d.pose_speed) > 0 ? Number(d.pose_speed) : 1, loop: d.pose_loop !== false, blend: Math.max(0, Number(d.pose_blend) || 0), start: Math.max(0, Number(d.pose_start) || 0) };
     }).sort((a, b) => a.time - b.time);
   }
 
@@ -3297,7 +3298,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     const poseOf = (key) => {
       const anim = key.id ? state.byId.get(key.id) : null;
       if (!anim) return state.current; // "None": as posed
-      let t = Math.max(0, (time - key.time) * key.speed);
+      let t = (key.start || 0) + Math.max(0, (time - key.time) * key.speed);
       // walk cycles and the like run on for as long as they play; keyframed ones repeat or hold
       if (anim.keyframed) t = key.loop ? t % anim.length : Math.min(t, anim.length);
       else if (!key.loop) t = Math.min(t, anim.length);
@@ -3365,113 +3366,72 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     return anim;
   }
 
-  // Animate ▸ Add Animation Keyframe…: for the selected player or mob, at the playhead. With one of
-  // its Animation keyframes selected (or one already at the playhead), that keyframe is edited.
-  async function addAnimationKey() {
-    const root = selectedPoseRoot();
+  // Where an Animation keyframe for this player or mob would go now: the open animation, its
+  // track for the model, the playhead, and the keyframe already there (or the selected one).
+  function clipKeyAt(root) {
     const Anim = blockbenchAnimation();
-    if (!root) {
-      Blockbench.showQuickMessage('Select a player (Player_) or mob (ent_) first', 2500);
-      return null;
-    }
-    if (!Anim || typeof Modes === 'undefined' || !Modes.options || !Modes.options.animate || !setupClipChannel()) {
-      Blockbench.showMessageBox({ title: 'Pose Studio: animation keyframe', message: "This Blockbench doesn't offer the Animate tab for this project, or can't add an Animation track to it." });
-      return null;
-    }
-    let content;
-    try {
-      content = await previewContent();
-    } catch (e) {
-      showError('Pose Studio: animations', e);
-      return null;
-    }
-    ensureRig(root);
-    const { animations } = poseState(root, content);
-    const anim = shotAnimation(Anim);
-    try {
-      if (root.select) root.select();
-    } catch (e) {
-      // select it in the outliner
-    }
-    const animator = anim.getBoneAnimator(root);
+    if (!Anim || !clipChannelOn) return null;
+    const anim = Anim.selected || (Anim.all || []).find((a) => a.name === CAMERA_ANIMATION);
+    const animator = anim && anim.getBoneAnimator ? anim.getBoneAnimator(root) : null;
     if (!animator) return null;
     if (!animator[CLIP_CHANNEL]) animator[CLIP_CHANNEL] = [];
     const playhead = typeof Timeline !== 'undefined' ? Number(Timeline.time) || 0 : 0;
     const picked = typeof Timeline !== 'undefined' && Array.isArray(Timeline.selected) ? Timeline.selected.find((kf) => kf.channel === CLIP_CHANNEL && kf.animator === animator) : null;
     const existing = picked || animator[CLIP_CHANNEL].find((kf) => Math.abs(kf.time - playhead) < 0.026) || null;
-    const time = existing ? existing.time : playhead;
-    const had = (existing && existing.data_points && existing.data_points[0]) || {};
-    const apply = (values) => {
-      const data = { pose_anim: String(values.pick || ''), pose_speed: Math.max(0.05, Number(values.speed) || 1), pose_loop: !!values.loop, pose_blend: Math.max(0, Number(values.blend) || 0) };
-      let kf = existing;
-      try {
-        Undo.initEdit({ keyframes: kf ? [kf] : [] });
-      } catch (e) {
-        // not undoable in this Blockbench
-      }
-      if (!kf) kf = animator.createKeyframe(data, time, CLIP_CHANNEL, false, false);
-      if (kf) {
-        if (!kf.data_points || !kf.data_points[0]) kf.data_points = [{}];
-        Object.assign(kf.data_points[0], data);
-      }
-      try {
-        Undo.finishEdit('Animation keyframe', { keyframes: kf ? [kf] : [] });
-      } catch (e) {
-        // as above
-      }
-      // room for the animation to play out
-      const clip = animations.find((a) => a.id === data.pose_anim);
-      const until = time + (clip && !data.pose_loop ? clip.length / data.pose_speed : 0);
-      if (Number(anim.length) < until && anim.setLength) anim.setLength(Math.ceil(until * 20) / 20);
-      clipStates.delete(root.uuid);
-      if (typeof Animator !== 'undefined' && Animator.preview) Animator.preview();
-      return kf;
-    };
-    let vm = null;
-    new Dialog({
-      id: 'pose_studio_anim_key',
-      title: `${existing ? 'Animation keyframe' : 'Add animation keyframe'}: ${root.name} at ${time.toFixed(2)} s`,
-      width: 480,
-      buttons: [existing ? 'Save' : 'Add', 'Cancel'],
-      cancelIndex: 1,
-      component: {
-        data: () => ({
-          search: '',
-          pick: String(had.pose_anim || ''),
-          speed: Number(had.pose_speed) > 0 ? Number(had.pose_speed) : 1,
-          loop: had.pose_loop !== false,
-          blend: had.pose_blend === undefined ? 0.2 : Number(had.pose_blend) || 0,
-          animations: [{ id: '', name: 'None (as posed)', length: 0 }].concat(animations.map((a) => ({ id: a.id, name: a.name, length: a.keyframed ? a.length : 0 }))),
-        }),
-        computed: {
-          shown() {
-            const q = this.search.trim().toLowerCase();
-            return q ? this.animations.filter((a) => a.name.toLowerCase().includes(q) || a.id.toLowerCase().includes(q)) : this.animations;
-          },
-        },
-        mounted() {
-          vm = this;
-        },
-        template: `
-          <div>
-            <input type="text" class="dark_bordered" v-model="search" placeholder="Search animations" style="width: 100%; margin-bottom: 6px;">
-            <div style="max-height: 300px; overflow-y: auto; border: 1px solid var(--color-border);">
-              <div v-for="a in shown" :key="a.id" @click="pick = a.id" :style="{ padding: '3px 8px', cursor: 'pointer', background: pick === a.id ? 'var(--color-accent)' : '', color: pick === a.id ? 'var(--color-accent_text)' : '' }">
-                {{ a.name }} <span style="opacity: 0.6;" v-if="a.length">{{ a.length.toFixed(2) }} s</span>
-              </div>
-            </div>
-            <div style="display: flex; gap: 14px; align-items: center; margin-top: 10px;">
-              <label>Speed <input type="number" class="dark_bordered" v-model.number="speed" min="0.05" step="0.05" style="width: 70px;"></label>
-              <label title="Seconds to ease in from what was playing before">Blend in (s) <input type="number" class="dark_bordered" v-model.number="blend" min="0" step="0.05" style="width: 70px;"></label>
-              <label><input type="checkbox" v-model="loop"> Loop</label>
-            </div>
-          </div>`,
-      },
-      onConfirm() {
-        if (vm) apply(vm);
-      },
-    }).show();
-    return { apply, existing, time }; // (used by tests)
+    return { anim, animator, existing, time: existing ? existing.time : playhead };
+  }
+
+  // Puts an Animation keyframe there (or changes the one that is). values: { pick: animation id
+  // ('' = none, as posed), speed, loop, blend, start: seconds into the animation it begins at }.
+  function placeClipKey(root, values, animations, at = clipKeyAt(root)) {
+    if (!at) return null;
+    const { anim, animator, time } = at;
+    const data = { pose_anim: String(values.pick || ''), pose_speed: Math.max(0.05, Number(values.speed) || 1), pose_loop: !!values.loop, pose_blend: Math.max(0, Number(values.blend) || 0), pose_start: Math.max(0, round(Number(values.start) || 0, 3)) };
+    let kf = at.existing;
+    try {
+      Undo.initEdit({ keyframes: kf ? [kf] : [] });
+    } catch (e) {
+      // not undoable in this Blockbench
+    }
+    if (!kf) kf = animator.createKeyframe(data, time, CLIP_CHANNEL, false, false);
+    if (kf) {
+      if (!kf.data_points || !kf.data_points[0]) kf.data_points = [{}];
+      Object.assign(kf.data_points[0], data);
+    }
+    try {
+      Undo.finishEdit('Animation keyframe', { keyframes: kf ? [kf] : [] });
+    } catch (e) {
+      // as above
+    }
+    // room for the animation to play out
+    const clip = (animations || []).find((a) => a.id === data.pose_anim);
+    const until = time + (clip && !data.pose_loop ? Math.max(0, clip.length - data.pose_start) / data.pose_speed : 0);
+    if (Number(anim.length) < until && anim.setLength) anim.setLength(Math.ceil(until * 20) / 20);
+    clipStates.delete(root.uuid);
+    if (typeof Animator !== 'undefined' && Animator.preview) Animator.preview();
+    return kf;
+  }
+
+  // Animate ▸ Add Animation Keyframe…: opens the Animate tab on the selected player or mob, then
+  // the Animation window, which places keyframes there ("Place keyframe").
+  async function addAnimationKey() {
+    const root = selectedPoseRoot();
+    const Anim = blockbenchAnimation();
+    if (!root) {
+      Blockbench.showQuickMessage('Select a player (Player_) or mob (ent_) first', 2500);
+      return;
+    }
+    if (!Anim || typeof Modes === 'undefined' || !Modes.options || !Modes.options.animate || !setupClipChannel()) {
+      Blockbench.showMessageBox({ title: 'Pose Studio: animation keyframe', message: "This Blockbench doesn't offer the Animate tab for this project, or can't add an Animation track to it." });
+      return;
+    }
+    shotAnimation(Anim);
+    try {
+      if (root.select) root.select();
+    } catch (e) {
+      // select it in the outliner
+    }
+    await openAnimationFrames();
   }
 
   // Whether an animation has keyframes of Blockbench's own on a group.
@@ -4385,7 +4345,6 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
               <div class="ps-grid" v-if="s.kind === 'player'">
                 <div class="ps-btn ps-wide" @click="run('pose_studio_outfit')"><i class="material-icons">checkroom</i><span>Skin &amp; Equipment<b class="ps-dots">…</b></span></div>
                 <div class="ps-btn" @click="run('pose_studio_animation')"><i class="material-icons">animation</i><span>Animation<b class="ps-dots">…</b></span></div>
-                <div class="ps-btn" v-if="s.paths" @click="run('pose_studio_anim_key')" title="A keyframe on the timeline: from the playhead, play an animation"><i class="material-icons">movie_filter</i><span>Animation Key<b class="ps-dots">…</b></span></div>
                 <div class="ps-btn" @click="run('pose_studio_drop')"><i class="material-icons">vertical_align_bottom</i><span>Drop to Ground</span></div>
                 <div class="ps-btn" @click="run('pose_studio_ride')"><i class="material-icons">airline_seat_recline_normal</i><span>Ride</span></div>
               </div>
@@ -4393,7 +4352,6 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
                 <div class="ps-btn" @click="run('pose_studio_variant')"><i class="material-icons">palette</i><span>Variant<b class="ps-dots">…</b></span></div>
                 <div class="ps-btn" @click="run('pose_studio_equipment')"><i class="material-icons">shield</i><span>Equipment<b class="ps-dots">…</b></span></div>
                 <div class="ps-btn" @click="run('pose_studio_animation')"><i class="material-icons">animation</i><span>Animation<b class="ps-dots">…</b></span></div>
-                <div class="ps-btn" v-if="s.paths" @click="run('pose_studio_anim_key')" title="A keyframe on the timeline: from the playhead, play an animation"><i class="material-icons">movie_filter</i><span>Animation Key<b class="ps-dots">…</b></span></div>
                 <div class="ps-btn" @click="run('pose_studio_drop')"><i class="material-icons">vertical_align_bottom</i><span>Drop to Ground</span></div>
               </div>
               <div class="ps-grid" v-if="s.kind === 'camera'">
@@ -8124,6 +8082,10 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
       Blockbench.showMessageBox({ title: 'Pose Studio', message: `No animations found that move ${root.name}'s bones.` });
       return;
     }
+    // In the Animate tab (with the timeline's Animation track on) this window places keyframes:
+    // the animation showing goes on the track at the playhead, instead of into the pose.
+    const keyAt = cameraPathsOn() && animating() && setupClipChannel() ? clipKeyAt(root) : null;
+    const keyHad = keyAt && keyAt.existing ? clipKeys({ [CLIP_CHANNEL]: [keyAt.existing] })[0] : null;
     const groups = [...target.groups.values()];
     // the pose it has now (restored on Cancel): `current`
     Undo.initEdit({ groups: [root].concat(groups), elements: carriedCubes(root) });
@@ -8170,8 +8132,17 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
           weaponName: weapon ? weapon.name : '',
           notShown: '',
           search: '',
-          layers: savedLayers.map((l) => ({ uid: ++uid, id: l.id, name: byId.get(l.id).name, frames: frameCount(byId.get(l.id)), frame: Math.min(l.frame, frameCount(byId.get(l.id))), hold: !!l.hold })),
+          // (placing a keyframe: what's held stays, and the keyframe's own animation shows, if it has one)
+          layers: (keyAt ? savedLayers.filter((l) => l.hold) : savedLayers).map((l) => ({ uid: ++uid, id: l.id, name: byId.get(l.id).name, frames: frameCount(byId.get(l.id)), frame: Math.min(l.frame, frameCount(byId.get(l.id))), hold: !!l.hold }))
+            .concat(keyHad && byId.has(keyHad.id) ? [{ uid: ++uid, id: keyHad.id, name: byId.get(keyHad.id).name, frames: frameCount(byId.get(keyHad.id)), frame: Math.min(Math.round(keyHad.start * ANIM_FPS), frameCount(byId.get(keyHad.id))) }] : []),
           active: uid,
+          canKey: !!keyAt,
+          place: !!keyAt,
+          keyTime: keyAt ? keyAt.time : 0,
+          keyThere: !!(keyAt && keyAt.existing),
+          keySpeed: keyHad ? keyHad.speed : 1,
+          keyLoop: keyHad ? keyHad.loop : true,
+          keyBlend: keyHad ? keyHad.blend : 0.2,
           playing: false,
           fromRest: false,
           hasPreview: false,
@@ -8179,6 +8150,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
         }),
         mounted() {
           vm = this;
+          if (this.layers.length) update(); // (a keyframe being changed: its animation shows)
           preview = createAnimationPreview(root);
           if (preview && this.$refs && this.$refs.preview) {
             this.$refs.preview.appendChild(preview.canvas);
@@ -8296,7 +8268,18 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
                   <span style="flex: none; width: 52px; text-align: right; font-size: 0.85em;">{{ l.frame }} / {{ l.frames }}</span>
                 </div>
               </div>
-              <label style="display: flex; gap: 6px; align-items: center;" title="Off: animations add to the pose you've already made. On: start from the model's default pose.">
+              <div v-if="canKey" style="border: 1px solid var(--color-accent); border-radius: 4px; padding: 6px 8px;">
+                <label style="display: flex; gap: 6px; align-items: center;" title="On: the animation showing goes on this model's Animation track at the playhead, and plays from there. Off: its frame becomes the model's pose, as in the Edit tab.">
+                  <input type="checkbox" v-model="place"> <b>Place keyframe</b> <span style="opacity: 0.7;">at {{ keyTime.toFixed(2) }} s{{ keyThere ? ' (changes the one there)' : '' }}</span>
+                </label>
+                <div v-if="place" style="display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; margin-top: 6px;">
+                  <label>Speed <input type="number" class="dark_bordered" v-model.number="keySpeed" min="0.05" step="0.05" style="width: 62px;"></label>
+                  <label title="Seconds to ease in from what was playing before">Blend in <input type="number" class="dark_bordered" v-model.number="keyBlend" min="0" step="0.05" style="width: 62px;"></label>
+                  <label><input type="checkbox" v-model="keyLoop"> Loop</label>
+                </div>
+                <p v-if="place" style="opacity: 0.7; margin: 6px 0 0; font-size: 0.85em;">The selected animation in the stack plays from the playhead, starting at the frame its slider is on. With none showing, the keyframe goes back to the pose from the Edit tab.</p>
+              </div>
+              <label v-if="!place" style="display: flex; gap: 6px; align-items: center;" title="Off: animations add to the pose you've already made. On: start from the model's default pose.">
                 <input type="checkbox" v-model="fromRest" @change="changedBase()"> Reset pose (start from the default pose)
               </label>
               <p v-if="notShown" style="margin: 0; font-size: 0.85em; color: var(--color-warning, #e8a33d);" title="Minecraft's copy of a mob can pose 19 bones; this model has more. The ones its animations use most are posable.">Minecraft won't show these bones moving (the model has more bones than a copy can pose): {{ notShown }}</p>
@@ -8305,7 +8288,14 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
           </div>`,
       },
       onButton(index) {
-        if (index === 0 && vm) {
+        if (index === 0 && vm && vm.place && keyAt) {
+          // a keyframe on the timeline: the pose itself stays as it was
+          const plain = vm.layers.filter((l) => !l.hold && !l.ride);
+          const layer = (vm.activeLayer && plain.includes(vm.activeLayer) ? vm.activeLayer : plain[plain.length - 1]) || null;
+          const values = { pick: layer ? layer.id : '', speed: vm.keySpeed, loop: vm.keyLoop, blend: vm.keyBlend, start: layer ? layer.frame / ANIM_FPS : 0 };
+          finish(false);
+          placeClipKey(root, values, animations, keyAt);
+        } else if (index === 0 && vm) {
           const b = baseNow();
           root.pose_animation = vm.layers.length
             ? { base: Object.fromEntries([...b].map(([k, r]) => [k, r.slice()])), layers: vm.layers.map((l) => (l.hold ? { id: l.id, frame: l.frame, hold: true } : { id: l.id, frame: l.frame })) }
@@ -11435,6 +11425,15 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // <changelog>
   const CHANGELOG = [
     {
+      "version": "0.75.0",
+      "date": "2026-10-06",
+      "changes": [
+        "In the Animate tab, the Animation window places timeline keyframes: tick Place keyframe. You can preview the animation there first.",
+        "A keyframe can start part-way into its animation (the frame slider).",
+        "The separate Animation Key button is gone."
+      ]
+    },
+    {
       "version": "0.74.0",
       "date": "2026-10-06",
       "changes": [
@@ -12393,7 +12392,7 @@ ${PLUGIN_URL}`,
 
   // for the plugin's own tests only (they set this flag); nothing happens otherwise
   if (typeof globalThis !== 'undefined' && globalThis.__POSE_STUDIO_TEST) {
-    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS, sceneSpot, addLight, lightRoots, stopPath, cameraPathsOn, cameraPose, sampleCameraAnimation, playCameraAnimation, animateCamera, zoomedFov, setupClipChannel, removeClipChannel, clipKeys, clipPose, clipState, displayClips, addAnimationKey, sampleAnimation, liveRotation, liveOrigin, poseMessage, entityMessage, setContentCache: (c) => (contentCache = c), liveWorldName, turnedEffect, turnVector, fxTurn, prepareTurned, turnedId, saddleParts, entityMessages, entityIds, flatParts, packFlat, partPlace, proxyModelFor, anyPartOn, prepareProxy, particleList, particleEntry, placeParticle, fxMessage, fxRoots };
+    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS, sceneSpot, addLight, lightRoots, stopPath, cameraPathsOn, cameraPose, sampleCameraAnimation, playCameraAnimation, animateCamera, zoomedFov, setupClipChannel, removeClipChannel, clipKeys, clipPose, clipState, displayClips, addAnimationKey, placeClipKey, clipKeyAt, sampleAnimation, liveRotation, liveOrigin, poseMessage, entityMessage, setContentCache: (c) => (contentCache = c), liveWorldName, turnedEffect, turnVector, fxTurn, prepareTurned, turnedId, saddleParts, entityMessages, entityIds, flatParts, packFlat, partPlace, proxyModelFor, anyPartOn, prepareProxy, particleList, particleEntry, placeParticle, fxMessage, fxRoots };
   }
 
   Plugin.register('pose_studio', {
@@ -12626,7 +12625,7 @@ ${PLUGIN_URL}`,
         }),
         animkey: new Action('pose_studio_anim_key', {
           name: 'Add Animation Keyframe…', icon: 'animation', click: () => addAnimationKey(),
-          description: "For the selected player or mob: a keyframe on its Animation track at the playhead, saying which animation plays from there (speed, loop, blend in). Edits the keyframe when one is there or selected.",
+          description: "Opens the Animate tab on the selected player or mob and the Animation window, where Place keyframe puts the animation showing on its Animation track at the playhead (speed, loop, blend in).",
         }),
         camanimplay: new Action('pose_studio_cam_anim_play', {
           name: 'Play Animation in Minecraft', icon: 'smart_display', click: () => playCameraAnimation(),

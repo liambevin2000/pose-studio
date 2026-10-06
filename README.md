@@ -128,8 +128,10 @@ Animate the camera, players and mobs on Blockbench's timeline and have the game 
 
 **Players and mobs.** Each has an **Animation** track on the timeline.
 
-- Select a player or mob, put the playhead where an animation should start, and choose **Add Animation Keyframe…**. Pick the animation (the same list as Animation…), its speed, whether it loops, and how long it blends in from what was playing before.
-- The keyframe is a normal timeline keyframe: drag it to change when the animation starts, copy it, delete it. Run Add Animation Keyframe… with it selected (or the playhead on it) to change it. "None" goes back to the pose from the Edit tab.
+- In the Animate tab, select a player or mob, put the playhead where an animation should start, and open **Animation…** (the same window as in the Edit tab). Click an animation to preview it, with Play and the frame slider.
+- **Place keyframe** is ticked there: Apply puts the animation showing on the track at the playhead. Set its speed, whether it loops, and how long it blends in from what was playing before. The frame the slider is on is where the animation starts. With no animation showing, the keyframe goes back to the pose from the Edit tab.
+- Untick Place keyframe to use the window as in the Edit tab (the frame becomes the pose).
+- The keyframe is a normal timeline keyframe: drag it to change when the animation starts, copy it, delete it. Open Animation… with it selected (or the playhead on it) to change it.
 - Move and turn the player or mob itself with Blockbench's own Position and Rotation keyframes on it. Rotation keyframes on single bones add to the animation.
 - The pose you made in the Edit tab is not changed by any of this.
 

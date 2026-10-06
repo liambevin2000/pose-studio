@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.75.0 (2026-10-06)
+
+- In the Animate tab, the Animation window places timeline keyframes: tick Place keyframe. You can preview the animation there first.
+- A keyframe can start part-way into its animation (the frame slider).
+- The separate Animation Key button is gone.
+
 ## 0.74.0 (2026-10-06)
 
 - Any particle effect can be turned with its marker: sideways, towards something, or upside down so what falls rises.
