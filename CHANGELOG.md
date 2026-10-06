@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.72.2 (2026-10-06)
+
+- Narrow panel: back to two buttons per row, with smaller labels on two lines so they read in full.
+
 ## 0.72.1 (2026-10-06)
 
 - The panel fits a narrow sidebar: one button per row, so labels are no longer cut off.

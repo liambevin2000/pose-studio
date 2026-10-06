@@ -1,5 +1,12 @@
 [
   {
+    "version": "0.72.2",
+    "date": "2026-10-06",
+    "changes": [
+      "Narrow panel: back to two buttons per row, with smaller labels on two lines so they read in full."
+    ]
+  },
+  {
     "version": "0.72.1",
     "date": "2026-10-06",
     "changes": [

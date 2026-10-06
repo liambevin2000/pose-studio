@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.72.1'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.72.2'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -4034,16 +4034,21 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     .pose_studio_panel .ps-cam:hover { background: var(--color-button); }
     .pose_studio_panel .ps-cam.ps-on { background: var(--color-accent); color: var(--color-accent_text, #fff); }
     .pose_studio_panel .ps-cam i { font-size: 16px; }
-    /* a narrow sidebar (Blockbench beside Minecraft on one screen): one button a row */
+    /* a narrow sidebar (Blockbench beside Minecraft on one screen): still two buttons a row, their
+       labels smaller and on two lines so they can be read in full */
+    .pose_studio_panel .ps-dots { font-weight: inherit; }
     @container (max-width: 270px) {
-      .pose_studio_panel .ps-grid { grid-template-columns: 1fr; }
-      .pose_studio_panel .ps-btn { min-height: 28px; }
+    .pose_studio_panel .ps-dots { display: none; }
+    .pose_studio_panel .ps-btn { white-space: normal; font-size: 12px; line-height: 1.1; gap: 4px; padding: 2px 5px; }
+    .pose_studio_panel .ps-btn i { font-size: 16px; }
+    .pose_studio_panel .ps-btn span { overflow: hidden; overflow-wrap: break-word; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+    .pose_studio_panel .ps-btn.ps-big { font-size: 13px; }
     }
-    @container (max-width: 170px) {
-      .pose_studio_panel .ps-btn { white-space: normal; line-height: 1.15; padding: 4px 6px; }
-      .pose_studio_panel .ps-btn span { overflow: visible; }
-    }
-    .pose_studio_panel.ps-narrow .ps-grid { grid-template-columns: 1fr; }
+      .pose_studio_panel.ps-narrow .ps-btn { white-space: normal; font-size: 12px; line-height: 1.1; gap: 4px; padding: 2px 5px; }
+      .pose_studio_panel.ps-narrow .ps-dots { display: none; }
+      .pose_studio_panel.ps-narrow .ps-btn i { font-size: 16px; }
+      .pose_studio_panel.ps-narrow .ps-btn span { overflow: hidden; overflow-wrap: break-word; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+      .pose_studio_panel.ps-narrow .ps-btn.ps-big { font-size: 13px; }
   `;
 
   function panelState() {
@@ -4173,24 +4178,24 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
 
             <div class="ps-head" @click="fold('location')"><i class="material-icons">{{ folded.location ? 'chevron_right' : 'expand_more' }}</i>Location{{ s.location ? ': ' + s.location : '' }}</div>
             <div class="ps-grid" v-show="!folded.location">
-              <div class="ps-btn" @click="run('pose_studio_locations')" title="Every location of this world: open one, go there"><i class="material-icons">place</i><span>Locations…</span></div>
+              <div class="ps-btn" @click="run('pose_studio_locations')" title="Every location of this world: open one, go there"><i class="material-icons">place</i><span>Locations<b class="ps-dots">…</b></span></div>
               <div class="ps-btn" @click="run('pose_studio_go_scene')" title="Takes you to where this scene's players, mobs and cameras are"><i class="material-icons">near_me</i><span>Go to Scene</span></div>
               <div class="ps-btn" @click="run('pose_studio_save_scene')"><i class="material-icons">save</i><span>Save</span></div>
-              <div class="ps-btn" @click="run('pose_studio_new_location')" title="A new location where you're standing"><i class="material-icons">add_location_alt</i><span>New Here…</span></div>
+              <div class="ps-btn" @click="run('pose_studio_new_location')" title="A new location where you're standing"><i class="material-icons">add_location_alt</i><span>New Here<b class="ps-dots">…</b></span></div>
             </div>
 
             <div class="ps-head" @click="fold('scene')"><i class="material-icons">{{ folded.scene ? 'chevron_right' : 'expand_more' }}</i>Scene</div>
             <div class="ps-grid" v-show="!folded.scene">
               <div class="ps-btn" @click="run('pose_studio_add')"><i class="material-icons">accessibility_new</i><span>Add Player</span></div>
-              <div class="ps-btn" @click="run('pose_studio_entity')"><i class="material-icons">pets</i><span>Add Entity…</span></div>
+              <div class="ps-btn" @click="run('pose_studio_entity')"><i class="material-icons">pets</i><span>Add Entity<b class="ps-dots">…</b></span></div>
               <div class="ps-btn" @click="run('pose_studio_grabcam')" title="A camera where you're looking from in Minecraft"><i class="material-icons">add_a_photo</i><span>Camera: Game</span></div>
               <div class="ps-btn" @click="run('pose_studio_savecam')" title="A camera where the Blockbench view is"><i class="material-icons">switch_video</i><span>Camera: View</span></div>
               <div class="ps-btn ps-wide" @click="run('pose_studio_add_light')" title="A light: a marker here, an invisible light block in Minecraft"><i class="material-icons">lightbulb</i><span>Add Light</span></div>
-              <div class="ps-btn" @click="run('pose_studio_add_fx')" title="A particle effect of the world's packs (smoke, wind…), placed in the scene"><i class="material-icons">auto_awesome</i><span>Add Particle…</span></div>
-              <div class="ps-btn" @click="run('pose_studio_edit_fx')" title="What the selected particle is, how often it's started, and its values"><i class="material-icons">tune</i><span>Edit Particle…</span></div>
-              <div class="ps-btn" @click="run('pose_studio_scan')"><i class="material-icons">travel_explore</i><span>Import World…</span></div>
-              <div class="ps-btn" @click="run('pose_studio_scan_expand')"><i class="material-icons">add_location_alt</i><span>Expand World…</span></div>
-              <div class="ps-btn ps-wide" @click="run('pose_studio_clear_mobs')" title="Takes the mobs you didn't place out of the scene, without drops"><i class="material-icons">pest_control</i><span>Remove Wild Mobs…</span></div>
+              <div class="ps-btn" @click="run('pose_studio_add_fx')" title="A particle effect of the world's packs (smoke, wind…), placed in the scene"><i class="material-icons">auto_awesome</i><span>Add Particle<b class="ps-dots">…</b></span></div>
+              <div class="ps-btn" @click="run('pose_studio_edit_fx')" title="What the selected particle is, how often it's started, and its values"><i class="material-icons">tune</i><span>Edit Particle<b class="ps-dots">…</b></span></div>
+              <div class="ps-btn" @click="run('pose_studio_scan')"><i class="material-icons">travel_explore</i><span>Import World<b class="ps-dots">…</b></span></div>
+              <div class="ps-btn" @click="run('pose_studio_scan_expand')"><i class="material-icons">add_location_alt</i><span>Expand World<b class="ps-dots">…</b></span></div>
+              <div class="ps-btn ps-wide" @click="run('pose_studio_clear_mobs')" title="Takes the mobs you didn't place out of the scene, without drops"><i class="material-icons">pest_control</i><span>Remove Wild Mobs<b class="ps-dots">…</b></span></div>
             </div>
 
             <div class="ps-head" @click="fold('selected')"><i class="material-icons">{{ folded.selected ? 'chevron_right' : 'expand_more' }}</i>{{ s.selected || 'Selected' }}</div>
@@ -4200,21 +4205,21 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
                 <div class="ps-btn ps-wide" @click="run('pose_studio_light_level')"><i class="material-icons">brightness_medium</i><span>Light Level… ({{ s.light === 0 ? 'off' : s.light }})</span></div>
               </div>
               <div class="ps-grid" v-if="s.kind === 'player'">
-                <div class="ps-btn ps-wide" @click="run('pose_studio_outfit')"><i class="material-icons">checkroom</i><span>Skin &amp; Equipment…</span></div>
-                <div class="ps-btn" @click="run('pose_studio_animation')"><i class="material-icons">animation</i><span>Animation…</span></div>
-                <div class="ps-btn" v-if="s.paths" @click="run('pose_studio_anim_key')" title="A keyframe on the timeline: from the playhead, play an animation"><i class="material-icons">movie_filter</i><span>Animation Key…</span></div>
+                <div class="ps-btn ps-wide" @click="run('pose_studio_outfit')"><i class="material-icons">checkroom</i><span>Skin &amp; Equipment<b class="ps-dots">…</b></span></div>
+                <div class="ps-btn" @click="run('pose_studio_animation')"><i class="material-icons">animation</i><span>Animation<b class="ps-dots">…</b></span></div>
+                <div class="ps-btn" v-if="s.paths" @click="run('pose_studio_anim_key')" title="A keyframe on the timeline: from the playhead, play an animation"><i class="material-icons">movie_filter</i><span>Animation Key<b class="ps-dots">…</b></span></div>
                 <div class="ps-btn" @click="run('pose_studio_drop')"><i class="material-icons">vertical_align_bottom</i><span>Drop to Ground</span></div>
                 <div class="ps-btn" @click="run('pose_studio_ride')"><i class="material-icons">airline_seat_recline_normal</i><span>Ride</span></div>
               </div>
               <div class="ps-grid" v-if="s.kind === 'mob'">
-                <div class="ps-btn" @click="run('pose_studio_variant')"><i class="material-icons">palette</i><span>Variant…</span></div>
-                <div class="ps-btn" @click="run('pose_studio_equipment')"><i class="material-icons">shield</i><span>Equipment…</span></div>
-                <div class="ps-btn" @click="run('pose_studio_animation')"><i class="material-icons">animation</i><span>Animation…</span></div>
-                <div class="ps-btn" v-if="s.paths" @click="run('pose_studio_anim_key')" title="A keyframe on the timeline: from the playhead, play an animation"><i class="material-icons">movie_filter</i><span>Animation Key…</span></div>
+                <div class="ps-btn" @click="run('pose_studio_variant')"><i class="material-icons">palette</i><span>Variant<b class="ps-dots">…</b></span></div>
+                <div class="ps-btn" @click="run('pose_studio_equipment')"><i class="material-icons">shield</i><span>Equipment<b class="ps-dots">…</b></span></div>
+                <div class="ps-btn" @click="run('pose_studio_animation')"><i class="material-icons">animation</i><span>Animation<b class="ps-dots">…</b></span></div>
+                <div class="ps-btn" v-if="s.paths" @click="run('pose_studio_anim_key')" title="A keyframe on the timeline: from the playhead, play an animation"><i class="material-icons">movie_filter</i><span>Animation Key<b class="ps-dots">…</b></span></div>
                 <div class="ps-btn" @click="run('pose_studio_drop')"><i class="material-icons">vertical_align_bottom</i><span>Drop to Ground</span></div>
               </div>
               <div class="ps-grid" v-if="s.kind === 'camera'">
-                <div class="ps-btn" @click="run('pose_studio_fov')"><i class="material-icons">camera</i><span>FOV…</span></div>
+                <div class="ps-btn" @click="run('pose_studio_fov')"><i class="material-icons">camera</i><span>FOV<b class="ps-dots">…</b></span></div>
                 <div class="ps-btn" @click="run('pose_studio_lookcam')"><i class="material-icons">visibility</i><span>Look Through</span></div>
               </div>
             </div>
@@ -4243,7 +4248,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
             <div class="ps-grid" v-show="!folded.capture">
               <div class="ps-btn ps-big ps-wide" :class="{ 'ps-off': s.shooting }" @click="run('pose_studio_capture')"><i class="material-icons">photo_camera</i><span>Capture Screenshot</span></div>
               <div class="ps-btn ps-big ps-wide" :class="{ 'ps-off': s.shooting }" @click="run('pose_studio_capture_entities')"><i class="material-icons">person_outline</i><span>{{ s.shooting ? 'Shooting…' : 'Capture Entities Only' }}</span></div>
-              <div class="ps-btn ps-wide" @click="run('pose_studio_entity_shot_options')"><i class="material-icons">tune</i><span>Entity Shot Options…</span></div>
+              <div class="ps-btn ps-wide" @click="run('pose_studio_entity_shot_options')"><i class="material-icons">tune</i><span>Entity Shot Options<b class="ps-dots">…</b></span></div>
             </div>
 
             <div class="ps-head" @click="fold('structure')"><i class="material-icons">{{ folded.structure ? 'chevron_right' : 'expand_more' }}</i>Move Structure</div>
@@ -11231,6 +11236,13 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.72.2",
+      "date": "2026-10-06",
+      "changes": [
+        "Narrow panel: back to two buttons per row, with smaller labels on two lines so they read in full."
+      ]
+    },
     {
       "version": "0.72.1",
       "date": "2026-10-06",
