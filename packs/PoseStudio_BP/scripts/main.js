@@ -312,6 +312,72 @@ function setFx(player, data) {
   }, 1);
 }
 
+// `pose:rec {"on":1}` starts recording the player who ran it; `pose:rec {"on":0,op}` stops and
+// answers with the recording: `R|` items, a tick each: x.y.z (hundredths of a block from the
+// anchor), yaw.pitch (tenths of a degree, where the player looks) and flags (1 sneaking, 2
+// sprinting, 4 swimming, 8 gliding, 16 on the ground, 32 in water, 64 flying, 128 an arm swing that
+// hit or used something this tick), in base 36.
+const MAX_RECORDING_TICKS = 6000; // 5 minutes
+let recording = null; // { player, anchor, ticks, swing, run }
+
+function endRecordingRun() {
+  if (recording && recording.run !== undefined) system.clearRun(recording.run);
+  if (recording) recording.run = undefined;
+}
+
+function startRecording(player) {
+  if (!player) return;
+  endRecordingRun();
+  const anchor = requireAnchor(player);
+  recording = { player, anchor, ticks: [], swing: false, run: undefined };
+  const r = recording;
+  r.run = system.runInterval(() => {
+    try {
+      const l = r.player.location;
+      const rot = r.player.getRotation();
+      const flags = (r.player.isSneaking ? 1 : 0) | (r.player.isSprinting ? 2 : 0) | (r.player.isSwimming ? 4 : 0) | (r.player.isGliding ? 8 : 0) | (r.player.isOnGround ? 16 : 0) | (r.player.isInWater ? 32 : 0) | (r.player.isFlying ? 64 : 0) | (r.swing ? 128 : 0);
+      r.swing = false;
+      r.ticks.push([Math.round((l.x - anchor.x) * 100), Math.round((l.y - anchor.y) * 100), Math.round((l.z - anchor.z) * 100), Math.round(rot.y * 10), Math.round(rot.x * 10), flags].map((v) => v.toString(36)).join("."));
+      if (r.ticks.length % 10 === 0 && r.player.onScreenDisplay) r.player.onScreenDisplay.setActionBar(`§c● REC§r ${(r.ticks.length / 20).toFixed(1)} s`);
+      if (r.ticks.length >= MAX_RECORDING_TICKS) {
+        endRecordingRun();
+        r.player.sendMessage("§b[Pose Studio]§r The recording is full (5 minutes). Stop it in Blockbench to bring it in.");
+      }
+    } catch {
+      // the player isn't there this tick
+    }
+  }, 1);
+  player.sendMessage("§b[Pose Studio]§r §c●§r Recording. Stop it in Blockbench (Record Player) to bring it in.");
+}
+
+function stopRecording(player, data) {
+  beginResult(data.op);
+  const r = recording;
+  if (!r) return failResult("Nothing is being recorded: start it with Record Player");
+  endRecordingRun();
+  recording = null;
+  try {
+    r.player.sendMessage(`§b[Pose Studio]§r Recorded ${(r.ticks.length / 20).toFixed(1)} seconds.`);
+  } catch {
+    // gone
+  }
+  finishResult(packItems("R|", r.ticks));
+}
+
+// an arm swing can only be seen when it does something
+function noteSwing(entity) {
+  if (recording && entity && recording.player && entity.id === recording.player.id) recording.swing = true;
+}
+try {
+  const after = world.afterEvents || {};
+  if (after.entityHitEntity) after.entityHitEntity.subscribe((ev) => noteSwing(ev.damagingEntity));
+  if (after.entityHitBlock) after.entityHitBlock.subscribe((ev) => noteSwing(ev.damagingEntity));
+  if (after.playerBreakBlock) after.playerBreakBlock.subscribe((ev) => noteSwing(ev.player));
+  if (after.itemUse) after.itemUse.subscribe((ev) => noteSwing(ev.source));
+} catch (e) {
+  console.warn(`[Pose Studio] swings aren't recorded here: ${e}`);
+}
+
 function removeMannequin(data) {
   if (effects.delete(String(data.id))) return;
   if (removeLight(String(data.id))) return;
@@ -1041,7 +1107,7 @@ function debug(player) {
 // Every name looks like `PSD[op|page|item]`; page 0 always carries
 // `M|ready|<pages>|<items>|<items per page>` or `M|busy|<percent>`.
 // What this script understands; Blockbench warns when the world runs an older one.
-const PACK_PROTOCOL = 29;
+const PACK_PROTOCOL = 30;
 const IO_OBJECTIVE = "pose_io";
 const ITEMS_PER_PAGE = 30;
 const MAX_PAGES_PER_BATCH = 16;
@@ -1889,6 +1955,8 @@ function handle(ev) {
       return clearMobs(player, data);
     case "pose:fx":
       return setFx(player, data);
+    case "pose:rec":
+      return data.on ? startRecording(player) : stopRecording(player, data);
     case "pose:light":
       return setLight(player, data);
     case "pose:path":

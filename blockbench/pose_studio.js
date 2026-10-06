@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.75.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.76.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -3334,8 +3334,13 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
       return;
     }
     const state = clipState(root, content);
-    const pose = clipPose(state, content, keys, typeof Timeline !== 'undefined' ? Number(Timeline.time) || 0 : 0);
+    const now = typeof Timeline !== 'undefined' ? Number(Timeline.time) || 0 : 0;
+    const pose = clipPose(state, content, keys, now);
     if (!pose) return;
+    // a recording also walks the player along
+    const playing = keys.filter((k) => k.time <= now + 1e-6).pop();
+    const recorded = playing && playing.id === REC_ID ? state.byId.get(REC_ID) : null;
+    if (recorded) showRecordedWalk(root, recorded, Math.min(recorded.length, (playing.start || 0) + Math.max(0, (now - playing.time) * playing.speed)));
     for (const [key, group] of state.target.groups) {
       const r = pose.get(key);
       const now = state.current.get(key);
@@ -3432,6 +3437,233 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
       // select it in the outliner
     }
     await openAnimationFrames();
+  }
+
+  // ---- Recording a player ----------------------------------------------------------------------------
+  // Animate ▸ Record Player: Minecraft notes where you are and where you look, every game tick,
+  // while you play; stopping brings that into Blockbench as a recording on a Pose Studio player
+  // (the selected one, else a new one). It's an animation of that player like any other: it sits
+  // on the player's Animation track as a keyframe ("● Recording"), plays when the timeline does
+  // and in Play Animation in Minecraft, and can be started later, slowed or started part-way in.
+  // The player walks the recorded way from wherever the player stands in the scene: move or turn
+  // the player in the Edit tab and the whole recording moves and turns with it.
+  // What's recorded is the path, the look and the state (sneaking, sprinting, swimming, swings that
+  // hit something). The body is worked out from that with the player's own animations, as the game
+  // does: legs and arms by the distance walked, the body turning after the head.
+  const REC_ID = '@recording';
+  const REC = { X: 0, Y: 1, Z: 2, YAW: 3, PITCH: 4, FLAGS: 5, SIZE: 6 };
+  const REC_FLAG = { sneak: 1, sprint: 2, swim: 4, glide: 8, ground: 16, water: 32, fly: 64, swing: 128 };
+  const recordingMath = new WeakMap(); // recording -> what's worked out from it, per tick
+  let recordingOn = false;
+  let recordToggle = null;
+
+  // R| items from the game -> { n, t: [x, y, z (hundredths of a block from the anchor), yaw, pitch (tenths of a degree), flags, …] }
+  function parseRecording(items) {
+    const t = [];
+    for (const item of items) {
+      if (!item.startsWith('R|')) continue;
+      for (const tick of item.slice(2).split(';')) {
+        const v = tick.split('.').map((s) => parseInt(s, 36));
+        if (v.length === REC.SIZE && v.every(Number.isFinite)) t.push(...v);
+      }
+    }
+    return { v: 1, n: t.length / REC.SIZE, t };
+  }
+
+  // Per tick: the body's yaw (it follows the way you walk, and the head within reach), the distance
+  // and pace the walk cycle runs on, and how far through a swing the arm is.
+  function recordingTicks(rec) {
+    let math = recordingMath.get(rec);
+    if (math) return math;
+    const n = rec.n;
+    const at = (i, k) => rec.t[i * REC.SIZE + k];
+    const body = new Array(n), walked = new Array(n), pace = new Array(n), attack = new Array(n), speed = new Array(n), rise = new Array(n);
+    let b = n ? at(0, REC.YAW) / 10 : 0;
+    let dist = 0, amount = 0, swing = -1;
+    for (let i = 0; i < n; i++) {
+      const head = at(i, REC.YAW) / 10;
+      const dx = i ? (at(i, REC.X) - at(i - 1, REC.X)) / 100 : 0;
+      const dz = i ? (at(i, REC.Z) - at(i - 1, REC.Z)) / 100 : 0;
+      const moved = Math.hypot(dx, dz);
+      if (moved > 0.02 && moved < 3) {
+        // towards the way it walks (or straight away from it, walking backwards)
+        let way = (Math.atan2(-dx, dz) * 180) / Math.PI;
+        if (Math.abs(wrap(way - head)) > 95) way += 180;
+        b += wrap(way - b) * 0.3;
+      }
+      // never further from the head than a neck allows
+      b = head - Math.max(-50, Math.min(50, wrap(head - b)));
+      body[i] = b;
+      const step = moved < 3 ? Math.min(moved * 4, 1) : 0; // (a teleport isn't a step)
+      amount += (step - amount) * 0.4;
+      dist += amount;
+      walked[i] = dist;
+      pace[i] = amount;
+      speed[i] = moved * 20;
+      rise[i] = i ? ((at(i, REC.Y) - at(i - 1, REC.Y)) / 100) * 20 : 0;
+      if (at(i, REC.FLAGS) & REC_FLAG.swing) swing = 0;
+      attack[i] = swing >= 0 ? swing / 6 : 0;
+      if (swing >= 0 && ++swing > 6) swing = -1;
+    }
+    math = { body, walked, pace, attack, speed, rise };
+    recordingMath.set(rec, math);
+    return math;
+  }
+
+  // The recording as one of the player's animations (for the Animation window and the timeline).
+  function recordingAnimation(root, content, animations) {
+    const rec = root.pose_recording;
+    if (!rec || !rec.n || !Array.isArray(rec.t)) return null;
+    const byName = new Map(animations.map((a) => [a.name, a]));
+    const parts = (names) => names.map((name) => byName.get(name)).filter(Boolean);
+    const always = parts(['move.arms', 'move.legs', 'bob']);
+    const sneaking = parts(['sneaking']);
+    const swimming = parts(['swimming', 'swimming.legs']);
+    const attacking = parts(['attack.rotations']);
+    const lerp = (a, b, f) => a + (b - a) * f;
+    return {
+      name: '● Recording', id: REC_ID, def: { bones: {} }, length: Math.max(0.05, (rec.n - 1) / ANIM_FPS), keyframed: true, recording: rec,
+      // how far each bone is turned at time t (see animationDelta)
+      poseAt(target, t, base) {
+        const math = recordingTicks(rec);
+        const f = Math.max(0, Math.min(rec.n - 1, t * ANIM_FPS));
+        const i = Math.floor(f), j = Math.min(rec.n - 1, i + 1), k = f - i;
+        const flags = rec.t[i * REC.SIZE + REC.FLAGS];
+        const has = (flag) => (flags & flag ? 1 : 0);
+        const override = {
+          modified_distance_moved: lerp(math.walked[i], math.walked[j], k), walk_distance: lerp(math.walked[i], math.walked[j], k),
+          modified_move_speed: lerp(math.pace[i], math.pace[j], k), ground_speed: lerp(math.speed[i], math.speed[j], k), vertical_speed: lerp(math.rise[i], math.rise[j], k),
+          is_moving: math.speed[i] > 0.4 ? 1 : 0, is_sneaking: has(REC_FLAG.sneak), is_sprinting: has(REC_FLAG.sprint), is_swimming: has(REC_FLAG.swim), is_gliding: has(REC_FLAG.glide),
+          is_on_ground: has(REC_FLAG.ground), is_in_water: has(REC_FLAG.water), can_fly: has(REC_FLAG.fly), is_jumping: has(REC_FLAG.ground) ? 0 : 1,
+          attack_time: lerp(math.attack[i], math.attack[j], k), anim_time: t, life_time: t,
+        };
+        const delta = new Map();
+        const add = (key, d) => {
+          const had = delta.get(key);
+          delta.set(key, had ? had.map((v, n) => v + d[n]) : d.slice());
+        };
+        const playing = always.concat(has(REC_FLAG.sneak) ? sneaking : [], has(REC_FLAG.swim) ? swimming : [], override.attack_time > 0 ? attacking : []);
+        for (const part of playing) {
+          const d = animationDelta(target, content, part, t, base, override);
+          for (const [key, value] of d) add(key, value);
+          for (const key of d.relative || []) (delta.relative || (delta.relative = new Set())).add(key);
+        }
+        // the head: where the player looked, from the body (Blockbench turns x and y the other way)
+        const yaw = rec.t[i * REC.SIZE + REC.YAW] / 10 + wrap(rec.t[j * REC.SIZE + REC.YAW] / 10 - rec.t[i * REC.SIZE + REC.YAW] / 10) * k;
+        const pitch = lerp(rec.t[i * REC.SIZE + REC.PITCH], rec.t[j * REC.SIZE + REC.PITCH], k) / 10;
+        const bodyYaw = math.body[i] + wrap(math.body[j] - math.body[i]) * k;
+        if (target.groups.has('head')) add('head', [-pitch, -wrap(yaw - bodyYaw), 0]);
+        return delta;
+      },
+      // where the player has got to at time t, from where the recording starts: [x, y, z] in
+      // Blockbench pixels (as recorded: not yet turned with the player), and the body's turn in degrees
+      rootAt(t) {
+        const math = recordingTicks(rec);
+        const f = Math.max(0, Math.min(rec.n - 1, t * ANIM_FPS));
+        const i = Math.floor(f), j = Math.min(rec.n - 1, i + 1), k = f - i;
+        const p = (n, axis) => (rec.t[n * REC.SIZE + axis] - rec.t[axis]) / 100;
+        const world = [REC.X, REC.Y, REC.Z].map((axis) => lerp(p(i, axis), p(j, axis), k));
+        return { move: toModel(world), turn: -(math.body[i] + wrap(math.body[j] - math.body[i]) * k - math.body[0]) };
+      },
+    };
+  }
+
+  // The recorded walk, shown on the player (Blockbench drawing a frame; see displayClips).
+  function showRecordedWalk(root, anim, t) {
+    const m = root.mesh;
+    if (!m || !m.position || !m.rotation || !anim.rootAt) return;
+    const at = anim.rootAt(t);
+    // the player may have been turned since it was recorded: the path turns with it
+    const extra = (root.rotation[1] - (Number(anim.recording.rot) || 0)) * DEG;
+    const move = new THREE.Vector3().fromArray(at.move).applyEuler(new THREE.Euler(0, extra, 0));
+    m.position.x += move.x;
+    m.position.y += move.y;
+    m.position.z += move.z;
+    m.rotation.y += at.turn * DEG;
+  }
+
+  // Puts a recording on a player: the selected one, else a new one, stood where the recording starts.
+  function importRecording(rec) {
+    if (!rec.n) throw new Error("Nothing was recorded (the recording has to run for a moment).");
+    let root = selectedPoseRoot();
+    if (!root || !MANNEQUIN_PREFIX.test(root.name)) {
+      const before = new Set(mannequinRoots());
+      addMannequin();
+      root = mannequinRoots().find((g) => !before.has(g)) || null;
+    }
+    if (!root) throw new Error("Couldn't add a player for the recording.");
+    ensureRig(root);
+    const first = toModel([rec.t[REC.X] / 100, rec.t[REC.Y] / 100, rec.t[REC.Z] / 100]);
+    const cubes = carriedCubes(root);
+    const groups = [root];
+    root.forEachChild((c) => c instanceof Group && groups.push(c));
+    Undo.initEdit({ outliner: true, groups, elements: cubes });
+    translateTree(root, first.map((v, i) => round(v - root.origin[i], 4)));
+    // facing the way it looked at the start (a Blockbench turn is a Minecraft yaw the other way)
+    rec.rot = round(-rec.t[REC.YAW] / 10, 2);
+    root.rotation = [0, rec.rot, 0];
+    root.pose_recording = rec;
+    Undo.finishEdit('Player recording', { outliner: true, groups, elements: cubes });
+    refreshGroups(groups);
+    Canvas.updateAll();
+    clipStates.delete(root.uuid);
+    return root;
+  }
+
+  // The recording on the timeline, from the start: the Animate tab, long enough for all of it.
+  function placeRecording(root) {
+    const Anim = blockbenchAnimation();
+    if (!Anim || typeof Modes === 'undefined' || !Modes.options || !Modes.options.animate || !setupClipChannel()) return null;
+    const anim = shotAnimation(Anim);
+    try {
+      if (root.select) root.select();
+    } catch (e) {
+      // select it in the outliner
+    }
+    if (typeof Timeline !== 'undefined' && Timeline.setTime) Timeline.setTime(0);
+    const at = clipKeyAt(root);
+    if (!at) return null;
+    // it replaces what was at the start of this player's track
+    const length = (root.pose_recording.n - 1) / ANIM_FPS;
+    const kf = placeClipKey(root, { pick: REC_ID, speed: 1, loop: false, blend: 0, start: 0 }, [{ id: REC_ID, length }], at);
+    if (Number(anim.length) < length && anim.setLength) anim.setLength(Math.ceil(length * 20) / 20);
+    return kf;
+  }
+
+  async function setRecording(value) {
+    if (value) {
+      if (!requireConnection()) {
+        if (recordToggle) recordToggle.set(false);
+        return;
+      }
+      recordingOn = true;
+      send('scriptevent pose:rec {"on":1}');
+      Blockbench.showQuickMessage('Recording you in Minecraft: play your part, then click Record Player again to stop', 5000);
+      return;
+    }
+    if (!recordingOn) return;
+    recordingOn = false;
+    let items;
+    try {
+      items = await runGameQuery('pose:rec', { on: 0 }, 'Fetching the recording');
+    } catch (e) {
+      showError('Pose Studio: recording', e);
+      return;
+    }
+    try {
+      const rec = parseRecording(items);
+      const root = importRecording(rec);
+      const placed = placeRecording(root);
+      Blockbench.showMessageBox({
+        title: 'Pose Studio: recording',
+        message:
+          `${(rec.n / ANIM_FPS).toFixed(1)} seconds recorded onto ${root.name}.\n\n` +
+          (placed ? "It's on the player's Animation track, from the start of the timeline: play the timeline to watch it, or Animate ▸ Play Animation in Minecraft.\n\n" : '') +
+          'To move it: in the Edit tab, move or turn the player. The whole recording moves and turns with it.',
+      });
+    } catch (e) {
+      showError('Pose Studio: recording', e);
+    }
   }
 
   // Whether an animation has keyframes of Blockbench's own on a group.
@@ -4043,7 +4275,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
           '_',
           locations,
           { name: 'Camera Settings', id: 'pose_studio_camera_menu', icon: 'photo_camera_front', children: [aspect, a.timeweather, a.follow] },
-          ...(cameraPathsOn() ? [{ name: 'Animate (experimental)', id: 'pose_studio_animate_menu', icon: 'movie_filter', children: [a.camanimate, a.animkey, '_', a.camanimplay, a.camanimstop] }] : []),
+          ...(cameraPathsOn() ? [{ name: 'Animate (experimental)', id: 'pose_studio_animate_menu', icon: 'movie_filter', children: [a.camanimate, a.animkey, a.record, '_', a.camanimplay, a.camanimstop] }] : []),
           { name: 'Stream Deck', id: 'pose_studio_deck_menu', icon: 'grid_view', children: [a.deck, a.deckplugin] },
           '_',
           a.comparegame,
@@ -4075,7 +4307,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
           { name: 'Lights', id: 'pose_studio_light_menu', icon: 'lightbulb', children: [a.addlight, a.lightlevel] },
           { name: 'Particles', id: 'pose_studio_fx_menu', icon: 'auto_awesome', children: [a.addfx, a.editfx] },
           { name: 'Camera', id: 'pose_studio_camera_menu', icon: 'photo_camera_front', children: [a.pov, a.camera, a.playerview, '_', a.fov, aspect, a.timeweather, '_', a.lookcam, a.follow] },
-          ...(cameraPathsOn() ? [{ name: 'Animate (experimental)', id: 'pose_studio_animate_menu', icon: 'movie_filter', children: [a.camanimate, a.animkey, '_', a.camanimplay, a.camanimstop] }] : []),
+          ...(cameraPathsOn() ? [{ name: 'Animate (experimental)', id: 'pose_studio_animate_menu', icon: 'movie_filter', children: [a.camanimate, a.animkey, a.record, '_', a.camanimplay, a.camanimstop] }] : []),
           '_',
           a.scan,
           a.scanmore,
@@ -4204,6 +4436,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
       command: `/connect 127.0.0.1:${PORT}`,
       sync: !!cameraSync,
       playerView: !!playerView,
+      recording: !!recordingOn,
       pov: !!(povToggle && povToggle.value),
       cameras: hasProject ? cameraRoots().map((c) => c.name) : [],
       camera: active ? active.name : '',
@@ -4370,6 +4603,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
               <div class="ps-note" v-if="!s.cameras.length">No cameras yet: add one above.</div>
               <div class="ps-grid" style="margin-top: 4px" v-if="s.paths">
                 <div class="ps-btn ps-wide" @click="run('pose_studio_cam_animate')" title="Keyframe the active camera on Blockbench's timeline"><i class="material-icons">movie_filter</i><span>Animate Camera</span></div>
+                <div class="ps-btn ps-wide" :class="{ 'ps-on': s.recording }" @click="run('pose_studio_record')" title="Records you in Minecraft; click again to stop and bring it in on a Pose Studio player"><i class="material-icons">fiber_manual_record</i><span>{{ s.recording ? 'Stop Recording' : 'Record Player' }}</span></div>
                 <div class="ps-btn" @click="run('pose_studio_cam_anim_play')" title="The game flies the camera's animation"><i class="material-icons">smart_display</i><span>Play in Game</span></div>
                 <div class="ps-btn" @click="run('pose_studio_cam_anim_stop')" title="Stops the animation in the game"><i class="material-icons">stop</i><span>Stop</span></div>
               </div>
@@ -7659,6 +7893,8 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   function poseState(root, content) {
     const target = animationTarget(root);
     const animations = entityAnimations(content, target.entityId, new Set(target.groups.keys()));
+    const recorded = recordingAnimation(root, content, animations);
+    if (recorded) animations.unshift(recorded);
     const byId = new Map(animations.map((a) => [a.id, a]));
     const current = capturePose(target);
     const saved = root.pose_animation && Array.isArray(root.pose_animation.layers) ? root.pose_animation : null;
@@ -7680,9 +7916,11 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // How far one animation turns each bone at time t, as Blockbench rotations to add (Bedrock
   // animations turn X and Y the other way round). "this" in its Molang is the bone's rotation
   // before the animation: `base`.
-  function animationDelta(target, content, anim, t, base) {
+  function animationDelta(target, content, anim, t, base, doing = null) {
+    if (anim.poseAt) return anim.poseAt(target, t, base);
     const entity = content.entities.get(target.entityId);
     const queries = animQueries(t, anim.length);
+    if (doing) Object.assign(queries, doing);
     const vars = Object.assign({ attack_time: queries.attack_time }, entity ? idleVariables(entity.description, queries) : {});
     // walk cycles run on distance moved rather than time ("anim_time_update")
     if (anim.def.anim_time_update !== undefined) queries.anim_time = idleValue(anim.def.anim_time_update, 0, vars, queries);
@@ -10589,7 +10827,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     return { id: idItem.slice(2), name: scene.world || '', anchor: point('A|'), player: point('P|'), locations, removed: scene.removed || [], protocol: version ? Number(version.slice(2)) : 0 };
   }
 
-  const EXPECTED_PACK_PROTOCOL = 29; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
+  const EXPECTED_PACK_PROTOCOL = 30; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
   let warnedOldPack = false;
 
   // Scene files in the scenes folders that belong to a world (their pose_world says so), as
@@ -11424,6 +11662,15 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.76.0",
+      "date": "2026-10-06",
+      "changes": [
+        "New (experimental): Record Player. Play your part in Minecraft and it comes in as a recording on a Pose Studio player.",
+        "Move or turn that player afterwards and the whole recording moves with it.",
+        "Update the Minecraft packs."
+      ]
+    },
     {
       "version": "0.75.0",
       "date": "2026-10-06",
@@ -12392,7 +12639,7 @@ ${PLUGIN_URL}`,
 
   // for the plugin's own tests only (they set this flag); nothing happens otherwise
   if (typeof globalThis !== 'undefined' && globalThis.__POSE_STUDIO_TEST) {
-    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS, sceneSpot, addLight, lightRoots, stopPath, cameraPathsOn, cameraPose, sampleCameraAnimation, playCameraAnimation, animateCamera, zoomedFov, setupClipChannel, removeClipChannel, clipKeys, clipPose, clipState, displayClips, addAnimationKey, placeClipKey, clipKeyAt, sampleAnimation, liveRotation, liveOrigin, poseMessage, entityMessage, setContentCache: (c) => (contentCache = c), liveWorldName, turnedEffect, turnVector, fxTurn, prepareTurned, turnedId, saddleParts, entityMessages, entityIds, flatParts, packFlat, partPlace, proxyModelFor, anyPartOn, prepareProxy, particleList, particleEntry, placeParticle, fxMessage, fxRoots };
+    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS, sceneSpot, addLight, lightRoots, stopPath, cameraPathsOn, cameraPose, sampleCameraAnimation, playCameraAnimation, animateCamera, zoomedFov, setupClipChannel, removeClipChannel, clipKeys, clipPose, clipState, displayClips, addAnimationKey, placeClipKey, clipKeyAt, parseRecording, recordingTicks, recordingAnimation, importRecording, placeRecording, setRecording, poseState, showRecordedWalk, sampleAnimation, liveRotation, liveOrigin, poseMessage, entityMessage, setContentCache: (c) => (contentCache = c), liveWorldName, turnedEffect, turnVector, fxTurn, prepareTurned, turnedId, saddleParts, entityMessages, entityIds, flatParts, packFlat, partPlace, proxyModelFor, anyPartOn, prepareProxy, particleList, particleEntry, placeParticle, fxMessage, fxRoots };
   }
 
   Plugin.register('pose_studio', {
@@ -12417,6 +12664,7 @@ ${PLUGIN_URL}`,
         new Property(Group, 'number', 'pose_eq_layout'),
         new Property(Group, 'number', 'pose_light'),
         new Property(Group, 'object', 'pose_fx'),
+        new Property(Group, 'object', 'pose_recording'),
         new Property(Group, 'object', 'pose_mount'),
         new Property(Group, 'object', 'pose_driver'),
         new Property(Group, 'number', 'pose_skin_slot', { default: 0 }),
@@ -12619,6 +12867,10 @@ ${PLUGIN_URL}`,
           name: 'Light Level…', icon: 'brightness_medium', click: lightLevelDialog,
           description: 'How bright the selected light is (1 to 15).',
         }),
+        record: (recordToggle = new Toggle('pose_studio_record', {
+          name: 'Record Player (in Minecraft)', icon: 'fiber_manual_record', value: false, onChange: (value) => setRecording(value),
+          description: 'On: Minecraft records where you go and look. Off: the recording comes in on the selected Pose Studio player (or a new one) and goes on its Animation track. Move or turn that player to move the whole recording.',
+        })),
         camanimate: new Action('pose_studio_cam_animate', {
           name: 'Animate Camera (Timeline)', icon: 'movie_filter', click: () => animateCamera(),
           description: "Opens the Animate tab with the active camera ready to keyframe: position, rotation and zoom on Blockbench's timeline, with its graph editor for the curves.",

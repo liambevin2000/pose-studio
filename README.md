@@ -135,6 +135,14 @@ Animate the camera, players and mobs on Blockbench's timeline and have the game 
 - Move and turn the player or mob itself with Blockbench's own Position and Rotation keyframes on it. Rotation keyframes on single bones add to the animation.
 - The pose you made in the Edit tab is not changed by any of this.
 
+**Recording yourself.** **Animate ▸ Record Player** (also on the panel) records you in Minecraft: where you go, where you look, and whether you sneak, sprint or swim, every game tick, for up to 5 minutes. Click it again to stop.
+
+- The recording lands on the selected Pose Studio player, or a new one, stood where you started. It goes on that player's Animation track as "● Recording", from the start of the timeline.
+- **To move it afterwards:** in the Edit tab, move or turn the player. The whole recording moves and turns with it.
+- It is an animation like the others: drag its keyframe to start it later, slow it down, start it part-way in, or put it on the track again from the Animation window.
+- Record again with another player selected to build a scene with several actors.
+- The body is worked out from the path (legs and arms from the distance walked, the body turning after the head), so it is close to what you did, not a copy of every limb. Arm swings are only recorded when they hit or use something. What you hold and wear is not recorded: set it on the player.
+
 **Watching it.** The camera view follows the playhead, and with Minecraft connected so do the game's players and mobs (and the camera, with Sync Game Camera on). **Play Animation in Minecraft** sends the whole animation first and the game plays it a frame every tick; **Stop Animation in Minecraft** ends it.
 
 Limits: Minecraft's camera can't roll. Bones in the game update 20 times a second. Items held by mobs follow the playhead but not Play Animation in Minecraft. Position keyframes on single bones are not sent to the game.

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.76.0 (2026-10-06)
+
+- New (experimental): Record Player. Play your part in Minecraft and it comes in as a recording on a Pose Studio player.
+- Move or turn that player afterwards and the whole recording moves with it.
+- Update the Minecraft packs.
+
 ## 0.75.0 (2026-10-06)
 
 - In the Animate tab, the Animation window places timeline keyframes: tick Place keyframe. You can preview the animation there first.
