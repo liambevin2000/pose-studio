@@ -662,13 +662,68 @@ function setPathKey(data) {
   cameraPath.keys[Number(data.i)] = { p: v.slice(0, 3), dir: v.slice(3, 6), f: v[6], d: v[7], e: v.slice(8, 12), o: v.length >= 18 ? v.slice(12, 15) : [0, 0, 0], i: v.length >= 18 ? v.slice(15, 18) : [0, 0, 0] };
 }
 
+// Player view (`pose:cam` with "v":1): instead of a free camera, the player stands with their eyes
+// where the camera is, looking the way it looks, so the game draws its own first-person view. They're
+// kept there every tick (no falling, no walking off), shown again if Pose Studio had hidden them (so
+// the hand is drawn), and put back where they stood when the player view ends.
+const EYE_HEIGHT = 1.62;
+let playerViewState = null; // { player, loc, rotation, from, fromRotation, hidden }
+let viewRun;
+
+function holdPlayerView() {
+  const v = playerViewState;
+  if (!v) return;
+  try {
+    v.player.teleport(v.loc, { rotation: v.rotation, keepVelocity: false });
+  } catch {
+    // not loaded right now
+  }
+}
+
+function endPlayerView() {
+  const v = playerViewState;
+  if (viewRun !== undefined) system.clearRun(viewRun);
+  viewRun = undefined;
+  playerViewState = null;
+  if (!v) return;
+  try {
+    v.player.teleport(v.from, { rotation: v.fromRotation, keepVelocity: false });
+    if (v.hidden && v.player.hasTag(HIDDEN_TAG)) v.player.addEffect("invisibility", 20000000, { amplifier: 0, showParticles: false });
+  } catch {
+    // gone
+  }
+}
+
+function setPlayerView(player, pos, target) {
+  const dx = target.x - pos.x, dy = target.y - pos.y, dz = target.z - pos.z;
+  // Minecraft turns yaw first, then pitch: yaw 0 looks south (+z), pitch is positive looking down
+  const rotation = { x: (-Math.atan2(dy, Math.hypot(dx, dz)) * 180) / Math.PI, y: (Math.atan2(-dx, dz) * 180) / Math.PI };
+  const loc = { x: pos.x, y: pos.y - EYE_HEIGHT, z: pos.z };
+  if (!playerViewState || playerViewState.player !== player) {
+    endPlayerView();
+    const r = player.getRotation ? player.getRotation() : { x: 0, y: 0 };
+    const hidden = player.hasTag(HIDDEN_TAG);
+    if (hidden) player.removeEffect("invisibility"); // the hand is part of the player
+    playerViewState = { player, from: Object.assign({}, player.location), fromRotation: { x: r.x, y: r.y }, hidden };
+    player.runCommand("camera @s clear");
+  }
+  playerViewState.loc = loc;
+  playerViewState.rotation = rotation;
+  holdPlayerView();
+  if (viewRun === undefined) viewRun = system.runInterval(holdPlayerView, 1);
+}
+
 function setCamera(player, data) {
   if (!player) return;
   stopPath();
   const anchor = requireAnchor(player);
   const pos = toWorld(anchor, data.p);
   const target = toWorld(anchor, data.t);
-  player.runCommand(`camera @s set minecraft:free pos ${fmt(pos)} facing ${fmt(target)}`);
+  if (data.v) setPlayerView(player, pos, target);
+  else {
+    endPlayerView();
+    player.runCommand(`camera @s set minecraft:free pos ${fmt(pos)} facing ${fmt(target)}`);
+  }
   if (data.f) {
     try {
       player.runCommand(`camera @s fov_set ${Number(data.f).toFixed(1)}`);
@@ -682,6 +737,7 @@ function setCamera(player, data) {
 function clearCamera(player) {
   if (!player) return;
   stopPath();
+  endPlayerView();
   player.runCommand("camera @s clear");
   try {
     player.runCommand("camera @s fov_clear");
@@ -985,7 +1041,7 @@ function debug(player) {
 // Every name looks like `PSD[op|page|item]`; page 0 always carries
 // `M|ready|<pages>|<items>|<items per page>` or `M|busy|<percent>`.
 // What this script understands; Blockbench warns when the world runs an older one.
-const PACK_PROTOCOL = 26;
+const PACK_PROTOCOL = 27;
 const IO_OBJECTIVE = "pose_io";
 const ITEMS_PER_PAGE = 30;
 const MAX_PAGES_PER_BATCH = 16;

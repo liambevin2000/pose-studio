@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.69.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.70.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -1662,7 +1662,7 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
     sendStructureTarget();
 
     if (cameraSync && !shooting && !pathPlaying && link.inFlight < MAX_IN_FLIGHT) {
-      const cam = cameraMessage();
+      const cam = viewMessage(cameraMessage());
       if (cam && cam !== lastCamera) {
         send(`scriptevent pose:cam ${cam}`);
         lastCamera = cam;
@@ -2100,6 +2100,18 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
       })
       .catch(logFailure);
   }
+
+  // Camera ▸ Player View: with Sync Game Camera on, the game doesn't fly a free camera to the active
+  // camera; it stands you there instead, eyes where the camera is, looking the way it looks. So the
+  // game shows its own first-person view: your hand and what it holds are in the shot.
+  let playerView = false;
+  let playerViewToggle = null;
+  function setPlayerView(value) {
+    playerView = !!value;
+    lastCamera = null; // sent again, the other way
+    if (playerView && cameraToggle && !cameraToggle.value) cameraToggle.set(true);
+  }
+  const viewMessage = (msg) => (msg && playerView ? msg.replace(/\}$/, ',"v":1}') : msg);
 
   function setCameraSync(value) {
     cameraSync = value;
@@ -3913,7 +3925,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
           { name: 'Add Camera', id: 'pose_studio_add_camera', icon: 'videocam', children: [a.grabcam, a.savecam] },
           { name: 'Lights', id: 'pose_studio_light_menu', icon: 'lightbulb', children: [a.addlight, a.lightlevel] },
           { name: 'Particles', id: 'pose_studio_fx_menu', icon: 'auto_awesome', children: [a.addfx, a.editfx] },
-          { name: 'Camera', id: 'pose_studio_camera_menu', icon: 'photo_camera_front', children: [a.pov, a.camera, '_', a.fov, aspect, a.timeweather, '_', a.lookcam, a.follow] },
+          { name: 'Camera', id: 'pose_studio_camera_menu', icon: 'photo_camera_front', children: [a.pov, a.camera, a.playerview, '_', a.fov, aspect, a.timeweather, '_', a.lookcam, a.follow] },
           ...(cameraPathsOn() ? [{ name: 'Animate (experimental)', id: 'pose_studio_animate_menu', icon: 'movie_filter', children: [a.camanimate, a.animkey, '_', a.camanimplay, a.camanimstop] }] : []),
           '_',
           a.scan,
@@ -4027,6 +4039,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
       world: (connectedWorld && connectedWorld.name) || '',
       command: `/connect 127.0.0.1:${PORT}`,
       sync: !!cameraSync,
+      playerView: !!playerView,
       pov: !!(povToggle && povToggle.value),
       cameras: hasProject ? cameraRoots().map((c) => c.name) : [],
       camera: active ? active.name : '',
@@ -4159,6 +4172,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
             <div v-show="!folded.cameras">
               <div class="ps-grid">
                 <div class="ps-btn" :class="{ 'ps-on': s.sync }" @click="run('pose_studio_camera')" title="The Minecraft camera follows the active camera"><i class="material-icons">videocam</i><span>Sync Game</span></div>
+                <div class="ps-btn ps-wide" :class="{ 'ps-on': s.playerView }" @click="run('pose_studio_player_view')" title="Stands you at the active camera: the game's own first-person view, hand included"><i class="material-icons">person</i><span>Player View</span></div>
                 <div class="ps-btn" :class="{ 'ps-on': s.pov }" @click="run('pose_studio_pov')" title="A second view locked to the active camera"><i class="material-icons">splitscreen</i><span>POV View</span></div>
               </div>
               <div class="ps-note" v-if="!s.cameras.length">No cameras yet: add one above.</div>
@@ -10347,7 +10361,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     return { id: idItem.slice(2), name: scene.world || '', anchor: point('A|'), player: point('P|'), locations, removed: scene.removed || [], protocol: version ? Number(version.slice(2)) : 0 };
   }
 
-  const EXPECTED_PACK_PROTOCOL = 26; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
+  const EXPECTED_PACK_PROTOCOL = 27; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
   let warnedOldPack = false;
 
   // Scene files in the scenes folders that belong to a world (their pose_world says so), as
@@ -11162,6 +11176,14 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.70.0",
+      "date": "2026-10-06",
+      "changes": [
+        "New: Player View. Stands you at the active camera so Minecraft shows its own first-person view, hand included.",
+        "Update the Minecraft packs."
+      ]
+    },
     {
       "version": "0.69.0",
       "date": "2026-10-06",
@@ -12183,6 +12205,10 @@ ${PLUGIN_URL}`,
         camera: (cameraToggle = new Toggle('pose_studio_camera', {
           name: 'Sync Game Camera', icon: 'videocam', value: false, onChange: setCameraSync,
           description: 'The Minecraft camera follows the active camera, or the viewport if there is none.',
+        })),
+        playerview: (playerViewToggle = new Toggle('pose_studio_player_view', {
+          name: 'Player View (First Person)', icon: 'person', value: false, onChange: setPlayerView,
+          description: "With Sync Game Camera on, you're stood at the active camera instead of a free camera flying there: Minecraft shows its own first-person view, with your hand and held item.",
         })),
         scan: new Action('pose_studio_scan', { name: 'Import World…', icon: 'travel_explore', click: () => scanWorldDialog(false),
           description: 'Brings the terrain around you in Minecraft into Blockbench as one mesh (replacing terrain imported before).' }),

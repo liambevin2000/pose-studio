@@ -12,6 +12,7 @@ const TOGGLES = {
 
 // The sprite (see art.js) for an action of the Pose Studio menu.
 const ACTION_ART = [
+  [/player_view/, 'face'],
   [/cam_anim_stop/, 'barrier'],
   [/cam_anim/, 'film'],
   [/light/, 'lamp_on'],

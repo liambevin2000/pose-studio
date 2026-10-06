@@ -137,6 +137,14 @@ Animate the camera, players and mobs on Blockbench's timeline and have the game 
 
 Limits: Minecraft's camera can't roll. Bones in the game update 20 times a second. Items held by mobs follow the playhead but not Play Animation in Minecraft. Position keyframes on single bones are not sent to the game.
 
+## Player View (first-person shots)
+
+**Camera ▸ Player View (First Person)** (also on the panel) changes what Sync Game Camera does: instead of flying a free camera to the active camera, Minecraft stands you there, eyes where the camera is, looking the way it looks. The game then shows its own first-person view, with your hand and what you hold.
+
+- You are kept at the camera while it is on, and put back where you stood when you turn it off.
+- If Pose Studio had hidden you, you are shown while it is on so the hand is drawn.
+- Minecraft's player view has no roll, and its eyes are 1.62 blocks above the feet.
+
 ## Move Any Part (experimental)
 
 Normally a mob with more than 9 bones can only have 19 of them turned in Minecraft, and none moved. Turn on **File ▸ Preferences ▸ Settings ▸ Pose Studio: Move Any Part (experimental)** and every part of such a mob can be moved and turned in Blockbench, and Minecraft shows it. That includes groups that only hold other parts (the rider on a horse-and-rider mob).

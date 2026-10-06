@@ -1,5 +1,13 @@
 [
   {
+    "version": "0.70.0",
+    "date": "2026-10-06",
+    "changes": [
+      "New: Player View. Stands you at the active camera so Minecraft shows its own first-person view, hand included.",
+      "Update the Minecraft packs."
+    ]
+  },
+  {
     "version": "0.69.0",
     "date": "2026-10-06",
     "changes": [
