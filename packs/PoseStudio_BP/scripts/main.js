@@ -1041,12 +1041,12 @@ function debug(player) {
 // Every name looks like `PSD[op|page|item]`; page 0 always carries
 // `M|ready|<pages>|<items>|<items per page>` or `M|busy|<percent>`.
 // What this script understands; Blockbench warns when the world runs an older one.
-const PACK_PROTOCOL = 27;
+const PACK_PROTOCOL = 28;
 const IO_OBJECTIVE = "pose_io";
 const ITEMS_PER_PAGE = 30;
 const MAX_PAGES_PER_BATCH = 16;
 const MAX_ITEM_LENGTH = 90;
-const MAX_SCAN_BLOCKS = 30000;
+const MAX_SCAN_BLOCKS = 250000;
 
 const result = { op: "none", busy: false, progress: 0, error: "", pages: [[]] };
 
@@ -1229,7 +1229,81 @@ function startScan(player, data) {
     rays: Math.max(0, Math.min(200000, Number(data.rays ?? 20000))),
     dist: Math.max(4, Math.min(256, Number(data.dist) || 64)),
   };
-  system.runJob(scanJob(player.dimension, player.getHeadLocation(), anchor, settings));
+  const dim = player.dimension;
+  const eye = player.getHeadLocation();
+  // Minecraft only keeps the chunks near players loaded, and nothing can be read from the rest: a
+  // bigger scan has its area loaded first (ticking areas, removed again when the scan is done)
+  const reach = Math.max(settings.radius, settings.rays ? Math.min(settings.dist, 128) : 0);
+  const boxes = reach > 32 ? scanBoxes(eye, reach) : [];
+  const start = () => system.runJob(scanThenUnload(dim, scanJob(dim, eye, anchor, settings), boxes.length));
+  if (!boxes.length) return start();
+  loadScanAreas(dim, boxes);
+  const y = Math.floor(eye.y);
+  const loaded = (x, z) => {
+    try {
+      return dim.getBlock({ x, y, z }) !== undefined;
+    } catch {
+      return false;
+    }
+  };
+  const ready = () => boxes.every((b) => loaded(b.x0, b.z0) && loaded(b.x1, b.z0) && loaded(b.x0, b.z1) && loaded(b.x1, b.z1) && loaded((b.x0 + b.x1) >> 1, (b.z0 + b.z1) >> 1));
+  let tries = 0;
+  if (ready()) return start();
+  const run = system.runInterval(() => {
+    // after 15 seconds: whatever has loaded is scanned
+    if (!ready() && ++tries < 60) return;
+    system.clearRun(run);
+    start();
+  }, 5);
+}
+
+// The square a scan reaches, as chunk-aligned boxes of at most 10×10 chunks (a ticking area's most
+// is 100 chunks).
+const SCAN_AREAS = ["pose_scan_0", "pose_scan_1", "pose_scan_2", "pose_scan_3"];
+function scanBoxes(eye, reach) {
+  const c0x = Math.floor((eye.x - reach) / 16), c1x = Math.floor((eye.x + reach) / 16);
+  const c0z = Math.floor((eye.z - reach) / 16), c1z = Math.floor((eye.z + reach) / 16);
+  const split = (a, b) => {
+    const n = Math.ceil((b - a + 1) / 10);
+    const size = Math.ceil((b - a + 1) / n);
+    const out = [];
+    for (let c = a; c <= b; c += size) out.push([c, Math.min(b, c + size - 1)]);
+    return out;
+  };
+  const boxes = [];
+  for (const [ax, bx] of split(c0x, c1x)) for (const [az, bz] of split(c0z, c1z)) boxes.push({ x0: ax * 16, z0: az * 16, x1: bx * 16 + 15, z1: bz * 16 + 15 });
+  return boxes.slice(0, SCAN_AREAS.length);
+}
+
+function loadScanAreas(dim, boxes) {
+  boxes.forEach((b, i) => {
+    try {
+      dim.runCommand(`tickingarea remove ${SCAN_AREAS[i]}`);
+    } catch {
+      // none there
+    }
+    try {
+      dim.runCommand(`tickingarea add ${b.x0} 0 ${b.z0} ${b.x1} 0 ${b.z1} ${SCAN_AREAS[i]}`);
+    } catch {
+      // the world has its 10: what's loaded anyway is scanned
+    }
+  });
+}
+
+function* scanThenUnload(dim, job, areas) {
+  try {
+    yield* job;
+  } catch (e) {
+    failResult(e);
+  } finally {
+    for (let i = 0; i < areas; i++) {
+      try {
+        dim.runCommand(`tickingarea remove ${SCAN_AREAS[i]}`);
+      } catch {
+        // none there
+      }
+    }
+  }
 }
 
 const FOLIAGE = /leaves|log$|_wood$|stem$|hyphae|vine|mushroom_block|bamboo|azalea/;
@@ -1320,6 +1394,7 @@ function* scanJob(dimension, eye, anchor, { radius, rays, dist }) {
 
   const items = [];
   for (const [type, index] of palette) items.push(`P|${index}|${type}`);
+  if (blocks.size >= MAX_SCAN_BLOCKS) items.push(`C|${MAX_SCAN_BLOCKS}`); // more than fits: Blockbench says so
   items.push(...packBlocks(blocks));
   finishResult(items);
 }

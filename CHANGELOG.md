@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.71.0 (2026-10-06)
+
+- Fixed: Import World stopped at about 48 blocks. Bigger radii now work, up to 128.
+- Update the Minecraft packs.
+
 ## 0.70.0 (2026-10-06)
 
 - New: Player View. Stands you at the active camera so Minecraft shows its own first-person view, hand included.

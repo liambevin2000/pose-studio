@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.70.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.71.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -4514,7 +4514,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
         if (meta[1] === 'ready') break;
         if (meta[1] === 'error') throw new Error(meta.slice(2).join('|'));
         Blockbench.showQuickMessage(`${label}… ${meta[2] || 0}%`, 700);
-        if (Date.now() - started > 180000) throw new Error(`${label} timed out.`);
+        if (Date.now() - started > 600000) throw new Error(`${label} timed out.`);
         await sleep(500);
       }
       const pages = Number(meta[2]) || 1;
@@ -4742,7 +4742,11 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
       return;
     }
     const { palette, blocks } = parseScanItems(items);
+    const capped = items.find((item) => item.startsWith('C|'));
     await buildWorld(palette, blocks, expand);
+    if (capped) {
+      Blockbench.showMessageBox({ title: 'Pose Studio: import world', message: `This area has more blocks than one import takes (${Number(capped.split('|')[1]).toLocaleString('en')}), so part of it is missing.\n\nUse a smaller radius, then Expand World… from other spots to add the rest.` });
+    }
   }
 
   function parseScanItems(items) {
@@ -10361,7 +10365,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     return { id: idItem.slice(2), name: scene.world || '', anchor: point('A|'), player: point('P|'), locations, removed: scene.removed || [], protocol: version ? Number(version.slice(2)) : 0 };
   }
 
-  const EXPECTED_PACK_PROTOCOL = 27; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
+  const EXPECTED_PACK_PROTOCOL = 28; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
   let warnedOldPack = false;
 
   // Scene files in the scenes folders that belong to a world (their pose_world says so), as
@@ -11176,6 +11180,14 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.71.0",
+      "date": "2026-10-06",
+      "changes": [
+        "Fixed: Import World stopped at about 48 blocks. Bigger radii now work, up to 128.",
+        "Update the Minecraft packs."
+      ]
+    },
     {
       "version": "0.70.0",
       "date": "2026-10-06",
