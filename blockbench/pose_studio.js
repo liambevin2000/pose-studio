@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.77.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.78.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -3507,23 +3507,28 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
   const REC_ACTIVE = REC_FLAG.sneak | REC_FLAG.sprint | REC_FLAG.swim | REC_FLAG.glide | REC_FLAG.swing | REC_FLAG.jump;
   // the player's animations a recording plays, by what they're called in the player's entity file
   const REC_CLIPS = { idle: 'idle', walk: 'walk', sprint: 'sprint', sneak: 'sneaking', swim: 'swimming', glide: 'glide', fly_move: 'fly_move', fly_idle: 'fly_idle', sprint_jump: 'sprint_jump', jump: 'jump', land: 'jump_land' };
-  const REC_BLEND = { jump: 0.14, land: 0.15 }; // seconds to fade in or out (the rest: REC_FADE)
-  const REC_FADE = 0.28;
   const recordingMath = new WeakMap(); // recording -> Map(which clips there are -> what's worked out, per tick)
   let recordingOn = false;
   let recordToggle = null;
 
   // What the game sent -> { n, t: [x, y, z (hundredths of a block from the anchor), yaw, pitch (tenths of a degree), flags, …], eq }
   function parseRecording(items) {
-    const t = [];
     const eq = {};
+    const runs = []; // [first tick, [ticks]]: Minecraft hands the items back in no particular order
     for (const item of items) {
       if (item.startsWith('E|')) {
         const [, slot, id] = item.split('|');
         if (slot && id) eq[slot] = id;
       }
       if (!item.startsWith('R|')) continue;
-      for (const tick of item.slice(2).split(';')) {
+      const parts = item.split('|');
+      const first = parts.length > 2 ? parseInt(parts[1], 10) : runs.length ? runs[runs.length - 1][0] + runs[runs.length - 1][1].length : 0;
+      runs.push([Number.isFinite(first) ? first : 0, parts[parts.length - 1].split(';')]);
+    }
+    runs.sort((a, b) => a[0] - b[0]);
+    const t = [];
+    for (const [, ticks] of runs) {
+      for (const tick of ticks) {
         const v = tick.split('.').map((s) => parseInt(s, 36));
         if (v.length === REC.SIZE && v.every(Number.isFinite)) t.push(...v);
       }
@@ -3532,9 +3537,9 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
   }
 
   // A recording as it's kept: the standing-about at both ends gone (getting to the game and back),
-  // and the path and the look smoothed a little. The game notes a player's place when the game
-  // ticks, not when the player moved, so raw steps come out uneven (none, then two at once); played
-  // back as they are, the player stutters.
+  // and otherwise as it was played, tick for tick. Only the path gets the lightest touch (each
+  // place leans a quarter towards the ones before and after): the game notes a player's place
+  // when the game ticks, not when the player moved, so a step can come out as none, then two.
   const REC_KEEP_STILL = 5; // ticks of standing still kept at each end
   function tidyRecording(raw) {
     const S = REC.SIZE;
@@ -3561,21 +3566,20 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
       const far = [REC.X, REC.Y, REC.Z].some((k) => Math.abs(at(start + i, k) - at(start + i - 1, k)) > 250);
       stretch[i] = stretch[i - 1] + (far ? 1 : 0);
     }
-    const KERNEL = [1, 4, 6, 4, 1];
+    const KERNEL = [1, 2, 1];
     const smooth = (values) => values.map((own, i) => {
       let sum = 0;
-      for (let d = -2; d <= 2; d++) {
+      for (let d = -1; d <= 1; d++) {
         let j = Math.max(0, Math.min(count - 1, i + d));
         while (stretch[j] !== stretch[i]) j += j > i ? -1 : 1;
-        sum += values[j] * KERNEL[d + 2];
+        sum += values[j] * KERNEL[d + 1];
       }
-      return sum / 16;
+      return sum / 4;
     });
     const column = (k) => Array.from({ length: count }, (unused, i) => at(start + i, k));
-    // the path twice over (a quarter second's worth), the look once
-    const channel = [REC.X, REC.Y, REC.Z].map((k) => smooth(smooth(column(k))));
-    const look = smooth(yaw);
-    const pitch = smooth(column(REC.PITCH));
+    const channel = [REC.X, REC.Y, REC.Z].map((k) => smooth(column(k)));
+    const look = yaw;
+    const pitch = column(REC.PITCH);
     const t = [];
     for (let i = 0; i < count; i++) {
       t.push(round(channel[0][i], 2), round(channel[1][i], 2), round(channel[2][i], 2), round(look[i], 2), round(pitch[i], 2), at(start + i, REC.FLAGS));
@@ -3585,6 +3589,17 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
 
   // What's worked out from a recording, per tick: how fast the player goes, the body's turn, and
   // for each of the player's animations how much of it shows and where in it it is.
+  //
+  // Which animation plays when follows the pack's own rules for a player. For a pack that plays
+  // the player from states (DragonCraft's controller.animation.player.main and movement_jump:
+  // idle, walk, sprint, sneak, swim, glide, fly, jump, sprint_jump, and a jump/landing layer on
+  // top), those states are run here on what was recorded, as the game runs them for the player
+  // themself: the same conditions (speeds, state times, on the ground, jumping, sprinting…), the
+  // same fades between states, and each animation's own clock (a walk that steps with the
+  // distance walked, backwards when you walk backwards).
+  const REC_STATE_BLEND = { idle: 0.26, walk: 0.3, sprint: 0.35, sprint_jump: 0.2, sneak: 0.26, swim: 0.3, glide: 0.12, fly: 0.12, jump: 0.26 };
+  const REC_STATE_EASED = new Set(['idle', 'walk', 'sprint', 'sneak', 'swim']); // (these fade on the pack's curve, the rest evenly)
+  const REC_LAYER_BLEND = { default: 0.1, jump: 0.14, sprint_jump: 0.16, land: 0.15 };
   function recordingTicks(rec, clips) {
     const style = Object.keys(clips).sort().join();
     let byStyle = recordingMath.get(rec);
@@ -3593,36 +3608,66 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     const n = rec.n;
     const dt = 1 / ANIM_FPS;
     const at = (i, k) => rec.t[i * REC.SIZE + k];
-    const body = new Array(n), speed = new Array(n), rise = new Array(n), pace = new Array(n), walked = new Array(n), attack = new Array(n);
+    const body = new Array(n), speed = new Array(n), rise = new Array(n), pace = new Array(n), walked = new Array(n), attack = new Array(n), states = new Array(n);
     const names = Object.keys(clips);
+    const has = (c) => c in clips;
     const weight = {}, time = {};
     for (const c of names) {
       weight[c] = new Float32Array(n);
       time[c] = new Float64Array(n);
     }
-    const w = Object.fromEntries(names.map((c) => [c, 0]));
     const tm = Object.fromEntries(names.map((c) => [c, 0]));
-    const has = (c) => c in clips;
+    const shown = Object.fromEntries(names.map((c) => [c, 0]));
+    // each animation's own clock, as its file sets it ("anim_time_update"), when that can be worked out here
+    const clock = {};
+    for (const c of names) {
+      const expr = typeof clips[c].def.anim_time_update === 'string' ? clips[c].def.anim_time_update.trim().replace(/;\s*$/, '') : null;
+      if (!expr || /;|\breturn\b/.test(expr)) continue;
+      const probe = (a, b) => idleValue(expr, 0, { is_local_player: 1, directional_distance_moved: a, smooth_ground_speed: 0.5 }, { anim_time: b, delta_time: 0.05, modified_distance_moved: a * 3 });
+      if (probe(7, 1.5) !== 0 || probe(31, 4.25) !== 0) clock[c] = expr;
+    }
+    // a state machine: which state, for how long, and what it's fading from
+    const machine = (first) => ({ state: first, since: 0, from: {}, fade: 0, over: 0, eased: false });
+    const go = (m, next, blends) => {
+      const now = stateWeights(m);
+      m.over = blends[m.state] || 0;
+      m.eased = REC_STATE_EASED.has(m.state) && blends === REC_STATE_BLEND;
+      m.from = now;
+      m.fade = 0;
+      m.state = next;
+      m.since = 0;
+    };
+    const stateWeights = (m) => {
+      const u = m.over > 0 ? Math.min(1, m.fade / m.over) : 1;
+      const left = m.eased ? (1 - u) * (1 - u) : 1 - u;
+      const out = {};
+      for (const [s, w] of Object.entries(m.from)) if (w * left > 1e-4) out[s] = w * left;
+      out[m.state] = (out[m.state] || 0) + 1 - left;
+      return out;
+    };
+    const main = machine('idle');
+    const layer = machine('default');
+    main.over = layer.over = 0;
     let b = n ? at(0, REC.YAW) / 10 : 0;
-    let main = 'idle', layer = '', layerTime = 0, airtime = 0, jumping = false, wasGround = true;
-    let amount = 0, dist = 0, swing = -1;
+    let airtime = 0, leap = false, wasGround = true, amount = 0, dist = 0, ddm = 0, dir = 1, sgs = 0, swing = -1;
     for (let i = 0; i < n; i++) {
       const flags = at(i, REC.FLAGS);
       const is = (flag) => !!(flags & flag);
-      // how fast (blocks a second), from the tick before to this one (the first: to the next)
-      const from = i ? i - 1 : 0, to = i ? i : Math.min(1, n - 1);
-      let dx = (at(to, REC.X) - at(from, REC.X)) / 100, dy = (at(to, REC.Y) - at(from, REC.Y)) / 100, dz = (at(to, REC.Z) - at(from, REC.Z)) / 100;
+      // how fast (blocks a second): over the tick before and the tick after, so one uneven step doesn't show
+      const from = Math.max(0, i - 1), to = Math.min(n - 1, i + 1);
+      const span = Math.max(1, to - from);
+      let dx = (at(to, REC.X) - at(from, REC.X)) / 100 / span, dy = (at(to, REC.Y) - at(from, REC.Y)) / 100 / span, dz = (at(to, REC.Z) - at(from, REC.Z)) / 100 / span;
       if (Math.hypot(dx, dy, dz) > 2.5) dx = dy = dz = 0; // a teleport isn't a step
       const v = Math.hypot(dx, dz) * ANIM_FPS;
-      const up = dy * ANIM_FPS;
+      const up = Math.abs(dy) < 1e-4 ? 0 : dy * ANIM_FPS;
       speed[i] = v;
       rise[i] = up;
-      // the limb swing Minecraft's own walk runs on
-      const step = Math.min(Math.hypot(dx, dz) * 4, 1);
-      amount += (step - amount) * 0.4;
+      // the limb swing Minecraft's own walk runs on (query.modified_distance_moved and _move_speed)
+      amount += (Math.min(Math.hypot(dx, dz) * 4, 1) - amount) * 0.4;
       dist += amount;
       pace[i] = amount;
       walked[i] = dist;
+      sgs = amount + (sgs - amount) * Math.exp(-7 * dt);
       if (is(REC_FLAG.swing)) swing = 0;
       attack[i] = swing >= 0 ? swing / 6 : 0;
       if (swing >= 0 && ++swing > 6) swing = -1;
@@ -3632,81 +3677,125 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
       if (v > 0.5 || attack[i] > 0) b += wrap(head - b) * 0.35;
       b = head - Math.max(-50, Math.min(50, wrap(head - b)));
       body[i] = b;
+      // walking backwards: the walk plays backwards
+      if (v > 0.3) {
+        const off = Math.abs(wrap((Math.atan2(-dx, dz) * 180) / Math.PI - head));
+        if (off > 110) dir = -1;
+        else if (off < 70) dir = 1;
+      }
+      ddm += amount * dir * 0.45;
 
-      // ---- which animations play ----
-      const ground = is(REC_FLAG.ground), water = is(REC_FLAG.water), sprinting = is(REC_FLAG.sprint);
+      // ---- the states ----
+      const ground = is(REC_FLAG.ground), water = is(REC_FLAG.water), sprinting = is(REC_FLAG.sprint), sneaking = is(REC_FLAG.sneak);
+      const gliding = is(REC_FLAG.glide), swimming = is(REC_FLAG.swim);
       airtime = ground ? 0 : airtime + dt;
-      const tookOff = wasGround && !ground && !water && (up > 2 || is(REC_FLAG.jump));
-      if (tookOff) jumping = true;
-      if (ground || water || is(REC_FLAG.swim) || is(REC_FLAG.glide)) jumping = false;
-      let want = is(REC_FLAG.sneak) ? 'sneak' : sprinting && v > (main === 'sprint' ? 2 : 3) ? 'sprint' : v > (main === 'walk' || main === 'sprint' ? 0.6 : 1) ? 'walk' : 'idle';
-      const onFoot = want;
-      if (is(REC_FLAG.glide)) want = 'glide';
-      else if (is(REC_FLAG.swim)) want = 'swim';
-      else if (!ground && !water && (is(REC_FLAG.fly) || airtime > 1)) want = 'fly';
-      else if (!ground && !water && jumping) {
-        // (a jump shows as the pack's jump; a pack without one keeps walking through the air)
-        if (sprinting && v > 3 && has('sprint_jump')) want = 'sprint_jump';
-        else if (has('jump')) want = 'air';
+      // jumping: as the game says, or (should it not say) from leaving the ground upwards until landing
+      if (wasGround && !ground && !water && up > 2) leap = true;
+      if (ground || water || swimming || gliding) leap = false;
+      const jumping = is(REC_FLAG.jump) || leap;
+      const afloat = !ground && !jumping && (airtime > 1 || up === 0);
+      const st = main.since;
+      let next = main.state;
+      switch (main.state) {
+        case 'idle':
+          next = gliding ? 'glide' : swimming ? 'swim' : jumping && sprinting ? 'sprint_jump' : jumping && !water ? 'jump' : afloat ? 'fly' : sneaking ? 'sneak' : v > 3 && sprinting ? 'sprint' : v > 1 ? 'walk' : 'idle';
+          break;
+        case 'walk':
+          next = gliding ? 'glide' : jumping && !water ? 'jump' : afloat ? 'fly' : swimming ? 'swim' : sneaking ? 'sneak' : v > 3 && sprinting && st > 0.3 ? 'sprint' : st > 0.28 && v < 0.6 ? 'idle' : 'walk';
+          break;
+        case 'sprint':
+          next = gliding ? 'glide' : afloat ? 'fly' : swimming ? 'swim' : sneaking ? 'sneak' : jumping && sprinting && st > 0.3 ? 'sprint_jump' : !sprinting && v < 2 && st > 0.3 ? 'walk' : 'sprint';
+          break;
+        case 'sneak':
+          next = gliding ? 'glide' : jumping && !water ? 'jump' : swimming ? 'swim' : st > 0.3 && !sneaking ? (v > 3 && sprinting ? 'sprint' : v > 1 ? 'walk' : 'idle') : 'sneak';
+          break;
+        case 'jump':
+          next = ground && sprinting && jumping ? 'sprint_jump' : ground && sprinting ? 'sprint' : ground && sgs > 0.3 ? 'walk' : swimming ? 'swim' : ground ? 'idle' : !ground && (airtime > 1 || up === 0 || (airtime > 0.4 && up > 0.2)) ? 'fly' : 'jump';
+          break;
+        case 'sprint_jump':
+          next = swimming ? 'swim' : !jumping && sprinting && st > 0.3 ? 'sprint' : !sprinting && v < 2 && st > 0.3 ? 'walk' : 'sprint_jump';
+          break;
+        case 'fly':
+          next = gliding ? 'glide' : ground && st > 0.4 ? (sprinting ? 'sprint' : v > 0.4 ? 'walk' : 'idle') : 'fly';
+          break;
+        case 'glide':
+          next = gliding ? 'glide' : sneaking ? 'sneak' : !ground ? 'fly' : v > 3 && sprinting ? 'sprint' : v > 1 ? 'walk' : 'idle';
+          break;
+        case 'swim':
+          next = swimming ? 'swim' : v > 3 && sprinting ? 'sprint' : v > 1 ? 'walk' : 'idle';
+          break;
+        default:
+          next = 'idle';
       }
-      main = onFoot;
-      // a jump and its landing play on top of that
-      layerTime += dt;
-      const enter = (state) => {
-        layer = state;
-        layerTime = 0;
-        if (state && has(state)) tm[state] = 0;
-      };
-      if (tookOff && want === 'air') enter('jump');
-      else if (layer === 'jump' && ground && layerTime > 0.1) enter('land');
-      else if (layer === 'jump' && want !== 'air' && !ground) enter('');
-      else if (layer === 'land' && layerTime >= (has('land') ? clips.land.length : 0.4)) enter('');
-      // what should show now
-      const target = {};
-      const show = (c, amountShown = 1) => {
-        if (has(c)) target[c] = amountShown;
-        return has(c);
-      };
-      if (want === 'idle') show('idle');
-      else if (want === 'walk') show('walk') || show('idle');
-      else if (want === 'sprint') show('sprint') || show('walk');
-      else if (want === 'sneak') show('sneak') || show(v > 0.6 ? 'walk' : 'idle');
-      else if (want === 'swim') show('swim') || show('idle');
-      else if (want === 'glide') show('glide') || show('idle');
-      else if (want === 'sprint_jump') show('sprint_jump');
-      else if (want === 'fly') {
-        const moving = Math.max(0, Math.min(1, amount));
-        if (has('fly_move') || has('fly_idle')) {
-          show('fly_move', moving);
-          show('fly_idle', 1 - moving);
-        } else show('idle');
+      const entered = [];
+      if (next !== main.state) {
+        go(main, next, REC_STATE_BLEND);
+        // (its animations start from their beginning; the state called jump has none of its own)
+        if (next !== 'jump') entered.push(...(next === 'fly' ? ['fly_move', 'fly_idle'] : [next]));
       }
-      if (layer) show(layer);
+      // the jump and its landing, on top
+      const lt = layer.since;
+      let over = layer.state;
+      if (layer.state === 'default') over = jumping && !water ? 'jump' : 'default';
+      else if (layer.state === 'jump') over = ground && sprinting && jumping && lt > 0.4 ? 'sprint_jump' : (ground || up === 0) && lt > 0.4 ? 'land' : (lt > 1.6 && up > -1) || up === 0 ? 'default' : 'jump';
+      else if (layer.state === 'sprint_jump') over = lt > 0.5 && (!sprinting || !jumping) ? 'default' : 'sprint_jump';
+      else if (layer.state === 'land') over = jumping && up > 0.2 ? 'jump' : lt >= (has('land') ? clips.land.length : 0.4) ? 'default' : 'land';
+      if (over !== layer.state) {
+        go(layer, over, REC_LAYER_BLEND);
+        if (over === 'jump' || over === 'land') entered.push(over);
+      }
+      // (a recording that starts in the middle of something starts as that, not fading in from standing)
+      if (i === 0) main.from = layer.from = {};
+      states[i] = main.state + (layer.state !== 'default' ? '+' + layer.state : '');
+      // how much of each animation shows
+      const mw = stateWeights(main), lw = stateWeights(layer);
+      const flying = Math.max(0, Math.min(1, sgs));
+      for (const c of names) shown[c] = 0;
+      const show = (c, w, instead) => {
+        if (has(c)) shown[c] += w;
+        else if (instead && has(instead)) shown[instead] += w;
+      };
+      for (const [s, w] of Object.entries(mw)) {
+        if (s === 'idle') show('idle', w);
+        else if (s === 'walk') show('walk', w, 'idle');
+        else if (s === 'sprint') show('sprint', w, 'walk');
+        else if (s === 'sneak') show('sneak', w, v > 0.6 ? 'walk' : 'idle');
+        else if (s === 'swim') show('swim', w, 'idle');
+        else if (s === 'glide') show('glide', w, 'idle');
+        else if (s === 'sprint_jump') show('sprint_jump', w, 'sprint');
+        else if (s === 'fly') {
+          if (has('fly_move') || has('fly_idle')) {
+            show('fly_move', w * flying);
+            show('fly_idle', w * (1 - flying));
+          } else show('idle', w);
+        }
+      }
+      if (lw.jump) show('jump', lw.jump);
+      if (lw.land) show('land', lw.land);
+      // each animation's clock
+      const doing = { delta_time: dt, modified_distance_moved: dist, vertical_speed: up, ground_speed: v, is_on_ground: ground ? 1 : 0 };
+      const vars = { is_local_player: 1, directional_distance_moved: ddm, smooth_ground_speed: sgs };
       for (const c of names) {
-        const goal = target[c] || 0;
-        if (w[c] <= 0 && goal > 0) tm[c] = c === layer ? tm[c] : 0; // it starts from its beginning
-        const most = i ? dt / (REC_BLEND[c] || REC_FADE) : 1; // (it starts as it is: nothing to fade from)
-        w[c] += Math.max(-most, Math.min(most, goal - w[c]));
-        if (w[c] > 0 || goal > 0) {
-          // how fast each plays: walks keep step with the pace, a sneak only moves while you do
-          let rate = 1;
-          if (c === 'walk') rate = 1.82 * Math.max(0.4, Math.min(1.5, v / 4.317));
-          else if (c === 'sprint') rate = Math.max(0.6, Math.min(1.4, v / 5.612));
-          else if (c === 'sneak') rate = Math.max(0, Math.min(1, v / 0.4));
+        if (entered.includes(c) || (shown[c] > 0 && i > 0 && weight[c][i - 1] <= 0)) tm[c] = 0; // it starts from its beginning
+        if (shown[c] > 0) {
+          if (clock[c]) tm[c] = idleValue(clock[c], 0, vars, Object.assign({ anim_time: tm[c] }, doing));
           else if (c === 'sprint_jump') {
             // (as the pack times it: each half of the leap waits for the rise, then the fall)
             const cycle = (tm[c] / 0.75) % 1;
-            const next = cycle < 0.5 ? up > 0 : up < 0;
-            rate = 1.1 * (next ? 1.64 : 0.4 - MOLANG_MATH.atan(((cycle * 2) % 1) * 10 - 6) / 200);
-          }
-          tm[c] += dt * rate;
+            const nextHalf = cycle < 0.5 ? up > 0 : up < 0;
+            tm[c] += dt * 1.1 * (nextHalf ? 1.64 : 0.4 - MOLANG_MATH.atan(((cycle * 2) % 1) * 10 - 6) / 200);
+          } else tm[c] += dt;
         }
-        weight[c][i] = w[c];
+        weight[c][i] = shown[c];
         time[c][i] = tm[c];
       }
+      main.since += dt;
+      main.fade += dt;
+      layer.since += dt;
+      layer.fade += dt;
       wasGround = ground;
     }
-    const math = { body, speed, rise, pace, walked, attack, weight, time, names };
+    const math = { body, speed, rise, pace, walked, attack, weight, time, names, states };
     byStyle.set(style, math);
     return math;
   }
@@ -3760,10 +3849,10 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
             const amount = lerp(math.weight[c][i], math.weight[c][j], k);
             if (amount < 0.002) continue;
             const anim = clips[c];
-            // (it started again between these two ticks: no sweeping back through it)
+            // (when it started again between these two ticks, there's no sweeping back through it)
             const from = math.time[c][i], to = math.time[c][j];
-            let tau = to >= from && math.weight[c][i] > 0 ? lerp(from, to, k) : to;
-            if (anim.keyframed) tau = anim.def.loop === true ? tau % anim.length : Math.min(tau, anim.length);
+            let tau = Math.abs(to - from) < 0.5 && math.weight[c][i] > 0 ? lerp(from, to, k) : to;
+            if (anim.keyframed) tau = anim.def.loop === true ? ((tau % anim.length) + anim.length) % anim.length : Math.max(0, Math.min(tau, anim.length));
             add(clipDelta(target, anim, tau, base, vars, Object.assign({}, doing, { anim_time: tau }), 1, true), amount);
           }
         } else if (bare) {
@@ -3784,6 +3873,10 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
           (delta.relative || (delta.relative = new Set())).add('head');
         }
         return delta;
+      },
+      // which of the pack's states the player is in at time t (and what's on top: "walk", "jump+jump")
+      stateAt(t) {
+        return recordingTicks(rec, clips).states[Math.max(0, Math.min(rec.n - 1, Math.round(t * ANIM_FPS)))];
       },
       // where the player has got to at time t, from where the recording starts: [x, y, z] in
       // Blockbench pixels (as recorded: not yet turned with the player), and the body's turn in degrees
@@ -3921,15 +4014,17 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     return root;
   }
 
-  // Animate ▸ Smooth Movement in Minecraft (experimental, off unless ticked): in Play Animation in
-  // Minecraft, players are pushed from place to place instead of being put there each tick, so the
-  // game glides them the way it does anything that moves (see the pack's playPath).
+  // Animate ▸ Smooth Movement in Minecraft (on unless unticked): in Play Animation in Minecraft,
+  // players are pushed from place to place instead of being put there each tick. Put in place,
+  // the game shows each step as a lurch and two small moves; pushed, it glides them evenly, the
+  // way it does anything that moves by itself (see the pack's playPath, which puts a player in
+  // place after all whenever a push didn't bring it where it should be).
   const SMOOTH_KEY = 'pose_studio_smooth_playback';
   function smoothPlayback() {
     try {
-      return localStorage.getItem(SMOOTH_KEY) === '1';
+      return localStorage.getItem(SMOOTH_KEY) !== '0';
     } catch (e) {
-      return false;
+      return true;
     }
   }
 
@@ -11164,7 +11259,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     return { id: idItem.slice(2), name: scene.world || '', anchor: point('A|'), player: point('P|'), locations, removed: scene.removed || [], protocol: version ? Number(version.slice(2)) : 0 };
   }
 
-  const EXPECTED_PACK_PROTOCOL = 31; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
+  const EXPECTED_PACK_PROTOCOL = 32; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
   let warnedOldPack = false;
 
   // Scene files in the scenes folders that belong to a world (their pose_world says so), as
@@ -11999,6 +12094,16 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.78.0",
+      "date": "2026-10-06",
+      "changes": [
+        "Fixed: a recording came back from Minecraft with its pieces out of order, so the recorded player jumped about.",
+        "The recorded player follows DragonCraft's own rules for which animation plays when, and walks in step with the distance covered.",
+        "Players in Minecraft now move their limbs smoothly between updates, and Smooth Movement is on by default.",
+        "Update the Minecraft packs."
+      ]
+    },
     {
       "version": "0.77.0",
       "date": "2026-10-06",
@@ -13228,8 +13333,8 @@ ${PLUGIN_URL}`,
           description: "On: after a 3 second countdown, Minecraft records what you do. Off: you choose to keep the take (on a new Pose Studio player, or the selected one) or discard it. It goes on the player's Animation track; move or turn that player in the Edit tab to move the whole recording.",
         })),
         smoothplay: new Toggle('pose_studio_smooth_playback', {
-          name: 'Smooth Movement in Minecraft (experimental)', icon: 'gesture', value: smoothPlayback(),
-          description: 'In Play Animation in Minecraft, players are pushed along instead of being placed 20 times a second, so they glide. Experimental: if a player drifts or turns oddly, untick it.',
+          name: 'Smooth Movement in Minecraft', icon: 'gesture', value: smoothPlayback(),
+          description: 'In Play Animation in Minecraft, players are pushed along instead of being placed 20 times a second, so they glide evenly. If a player drifts or turns oddly, untick it.',
           onChange: (value) => {
             try {
               localStorage.setItem(SMOOTH_KEY, value ? '1' : '0');

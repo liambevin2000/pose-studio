@@ -147,9 +147,11 @@ Animate the camera, players and mobs on Blockbench's timeline and have the game 
 - It is an animation like the others: drag its keyframe to start it later, slow it down, start it part-way in.
 - Record again for another actor.
 
-What is recorded is where you are, where you look and what you are doing (on the ground, sneaking, sprinting, swimming…), 20 times a second. A script cannot see a real player's limbs, so the body is played the way the game plays it for everyone else: from the player's own animations in the world's packs, picked by what you were doing (DragonCraft's idle, walk, sprint, sneak, jump and landing; otherwise Minecraft's own walk). Arm swings are only seen when they hit or use something, and weapon moves are not recorded.
+What is recorded is where you are, where you look and what you are doing (on the ground, jumping, sneaking, sprinting, swimming…), every game tick, and it is played back tick for tick. A script cannot see a real player's limbs, so the body is played by the pack's own rules for a player: DragonCraft's states (idle, walk, sprint, sneak, jump and its landing, sprint-jump, swim, glide, fly) with their own conditions, fades and timing, the walk stepping with the distance covered; otherwise Minecraft's own walk. Arm swings are only seen when they hit or use something, and weapon moves are not recorded.
 
-**Smooth Movement in Minecraft** (Animate menu, experimental, off unless ticked): during Play in Game, players are pushed from place to place instead of being put there 20 times a second, so the game glides them. If a player drifts or turns oddly, untick it.
+**Smooth Movement in Minecraft** (Animate menu, on unless unticked): during Play in Game, players are pushed from place to place instead of being put there 20 times a second, so the game glides them evenly. A player that a push did not bring where it should be is put there after all. If a player drifts or turns oddly, untick it.
+
+In Minecraft a Pose Studio player's limbs move smoothly from each pose to the next (a twentieth of a second), so an animation played 20 times a second does not look stepped. `node make-mannequin-pose.js` writes the pack files that do this.
 
 **Watching it.** The camera view follows the playhead, and with Minecraft connected so do the game's players and mobs (and the camera, with Sync Game Camera on). **Play Animation in Minecraft** sends the whole animation first and the game plays it a frame every tick; **Stop Animation in Minecraft** ends it.
 

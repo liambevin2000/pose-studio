@@ -348,8 +348,8 @@ function setFx(player, data) {
 }
 
 // `pose:rec {"on":1,"count":3}` starts recording the player who ran it, after a countdown of that
-// many seconds; `pose:rec {"on":0,op}` stops and answers with the recording: `R|` items, a tick
-// each: x.y.z (hundredths of a block from the anchor), yaw.pitch (tenths of a degree, where the
+// many seconds; `pose:rec {"on":0,op}` stops and answers with the recording: `R|first tick|…` items
+// of ticks, each tick: x.y.z (hundredths of a block from the anchor), yaw.pitch (tenths of a degree, where the
 // player looks) and flags (1 sneaking, 2 sprinting, 4 swimming, 8 gliding, 16 on the ground, 32 in
 // water, 64 flying, 128 an arm swing that hit or used something this tick, 256 jumping, 512
 // climbing), in base 36; and `E|slot|item` for what the player wears and holds.
@@ -406,7 +406,19 @@ function stopRecording(player, data) {
   if (!r) return failResult("Nothing is being recorded: start it with Record Player");
   endRecordingRun();
   recording = null;
-  const items = packItems("R|", r.ticks);
+  // Minecraft lists these in no particular order, so each says which tick it starts at: R|first|tick;tick;…
+  const items = [];
+  let run = "";
+  let first = 0;
+  r.ticks.forEach((tick, i) => {
+    if (run && run.length + tick.length + 1 > MAX_ITEM_LENGTH - 10) {
+      items.push(`R|${first}|${run}`);
+      run = "";
+    }
+    if (!run) first = i;
+    run += (run ? ";" : "") + tick;
+  });
+  if (run) items.push(`R|${first}|${run}`);
   try {
     if (r.player.onScreenDisplay) r.player.onScreenDisplay.setActionBar(`§aRecorded ${(r.ticks.length / 20).toFixed(1)} s`);
     // what the player wears and holds (a new Pose Studio player gets the same)
@@ -1179,7 +1191,7 @@ function debug(player) {
 // Every name looks like `PSD[op|page|item]`; page 0 always carries
 // `M|ready|<pages>|<items>|<items per page>` or `M|busy|<percent>`.
 // What this script understands; Blockbench warns when the world runs an older one.
-const PACK_PROTOCOL = 31;
+const PACK_PROTOCOL = 32;
 const IO_OBJECTIVE = "pose_io";
 const ITEMS_PER_PAGE = 30;
 const MAX_PAGES_PER_BATCH = 16;

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.78.0 (2026-10-06)
+
+- Fixed: a recording came back from Minecraft with its pieces out of order, so the recorded player jumped about.
+- The recorded player follows DragonCraft's own rules for which animation plays when, and walks in step with the distance covered.
+- Players in Minecraft now move their limbs smoothly between updates, and Smooth Movement is on by default.
+- Update the Minecraft packs.
+
 ## 0.77.0 (2026-10-06)
 
 - Record Player rebuilt. The recorded player now plays the pack's own idle, walk, sprint, sneak, jump and landing animations, and no longer jitters or twists.
