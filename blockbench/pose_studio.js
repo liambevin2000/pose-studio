@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.68.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.69.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -1613,12 +1613,14 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
         seen.add(`${id}__off`);
         continue;
       }
-      const msg = entityMessage(root);
-      if (!msg) continue;
-      if (lastSent.get(id) !== msg) {
+      const copies = entityMessages(root);
+      if (!copies.length) continue;
+      for (const copy of copies) {
+        seen.add(copy.id);
+        if (lastSent.get(copy.id) === copy.msg) continue;
         if (link.inFlight >= MAX_IN_FLIGHT) return;
-        send(`scriptevent pose:ent ${msg}`);
-        lastSent.set(id, msg);
+        send(`scriptevent pose:ent ${copy.msg}`);
+        lastSent.set(copy.id, copy.msg);
       }
       for (const side of ['main', 'off']) {
         const key = `${id}__${side}`;
@@ -2754,7 +2756,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
         let name = root.name.replace(/[^a-z0-9_-]+/gi, '_');
         while (used.has(name)) name += '_';
         used.add(name);
-        const others = roots.filter((r) => r !== root).map((r) => mannequinId(r.name));
+        const others = roots.filter((r) => r !== root).flatMap((r) => entityIds(r));
         takes.push({ suffix: `_${name}`, roots: [root], ids: others });
       }
     }
@@ -3474,15 +3476,17 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
           const pose = cameraPose(cam);
           camera.push({ p: toWorld(pose.pos.toArray()), dir: [-pose.forward.x, pose.forward.y, -pose.forward.z].map((v) => round(v, 4)), f: zoomedFov(baseFov, pose.zoom) });
         }
+        const updates = [];
         for (const [k, root] of roots) {
-          let msg = null;
           try {
-            msg = k === 's' ? poseMessage(root) : entityMessage(root);
+            if (k === 's') updates.push([k, mannequinId(root.name), poseMessage(root)]);
+            else for (const copy of entityMessages(root)) updates.push([k, copy.id, copy.msg]);
           } catch (e) {
-            msg = null;
+            // not this tick
           }
+        }
+        for (const [k, id, msg] of updates) {
           if (!msg) continue;
-          const id = mannequinId(root.name);
           let track = tracks.get(id);
           if (!track) tracks.set(id, (track = { k, frames: [], last: null }));
           if (track.last !== msg) {
@@ -7408,7 +7412,9 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
       for (const [name, r] of Object.entries(root.pose_entity.rest || {})) rest.set(name.toLowerCase(), r.slice());
       // bones with room to move in Minecraft move here too (held from the outside in)
       const movable = new Map();
-      for (const bone of movingBones(root.pose_entity.bones || [])) if (groups.has(bone.toLowerCase())) movable.set(bone.toLowerCase(), true);
+      const shown = proxyModelFor(root.pose_entity);
+      const moving = shown && shown.parts ? shown.bones : movingBones(root.pose_entity.bones || []);
+      for (const bone of moving) if (groups.has(bone.toLowerCase())) movable.set(bone.toLowerCase(), true);
       const depth = (key) => {
         let n = 0;
         for (let g = groups.get(key); g && g !== root && g instanceof Group; g = g.parent) n++;
@@ -8416,6 +8422,110 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     return `(${value} - 2048) / 64`;
   }
 
+  // ---- Every part of a big mob (experimental) ---------------------------------------------------
+  // Settings ▸ Pose Studio: Move Any Part (experimental). A copy has room for 60 numbers, enough to
+  // turn and move every bone of a model with up to 9 bones. With this on, a bigger model (a dragon,
+  // a rider on a horse) is shown by several copies standing in the same spot, each drawing up to 8
+  // of its parts. Those parts hang from nothing: each gets where it is and how it's turned in the
+  // mob's own space, worked out here from everything that holds it. So whatever is moved or turned
+  // in Blockbench, a part or anything it hangs from, is what Minecraft shows. Mobs that wear armour
+  // the way players do (arms named rightArm / leftArm) stay one copy: the armour follows its bones.
+  const ANY_PART_KEY = 'pose_studio_any_part';
+  const FLAT_PER_COPY = 8; // 7 numbers a part: 3 turns, and 3 moves in 4 (16 bits each)
+  function anyPartOn() {
+    try {
+      return localStorage.getItem(ANY_PART_KEY) === '1';
+    } catch (e) {
+      return false;
+    }
+  }
+
+  // The parts each copy of a model draws ([[bone names], …]), or null when one copy does it all.
+  function flatParts(geometry) {
+    if (!anyPartOn() || !geometry || geometry.bones.length <= 9) return null;
+    const names = new Set(geometry.bones.map((b) => String(b.name).toLowerCase()));
+    if (names.has('rightarm') && names.has('leftarm')) return null;
+    const drawn = geometry.bones.filter((b) => !b.neverRender && ((b.cubes || []).length || b.poly_mesh || (b.texture_meshes || []).length)).map((b) => b.name);
+    if (!drawn.length) return null;
+    const parts = [];
+    for (let i = 0; i < drawn.length; i += FLAT_PER_COPY) parts.push(drawn.slice(i, i + FLAT_PER_COPY));
+    return parts;
+  }
+
+  // The 12-bit number at `index` of a copy's packed properties, as Molang.
+  function valueExpr(index) {
+    const prop = `q.property('pose:p${Math.floor(index / 2)}')`;
+    return index % 2 === 0 ? `math.floor(${prop} / 4096)` : `(${prop} - math.floor(${prop} / 4096) * 4096)`;
+  }
+  // One of a part's three moves (16 bits each, spread over the four numbers from `base`), in pixels.
+  function flatMoveExpr(base, axis) {
+    const [a, b, c, d] = [0, 1, 2, 3].map((i) => valueExpr(base + i));
+    const raw = axis === 0 ? `${a} * 16 + math.floor(${b} / 256)` : axis === 1 ? `math.mod(${b}, 256) * 256 + math.floor(${c} / 16)` : `math.mod(${c}, 16) * 4096 + ${d}`;
+    return `(${raw} - 32768) / 64`;
+  }
+
+  // Where a group's pivot is and how the group is turned, from the mob's own origin (Blockbench
+  // axes): everything that holds it counted in, the mob's own turn too.
+  function partPlace(root, group) {
+    const mesh = animating() && group.mesh;
+    const space = mesh && mesh.matrixWorld ? modelSpace() : null;
+    if (space) {
+      // the Animate tab: as the timeline has it
+      space.updateMatrixWorld(true);
+      const matrix = mesh.matrixWorld.clone().premultiply(new THREE.Matrix4().copy(space.matrixWorld).invert());
+      const position = new THREE.Vector3();
+      const quaternion = new THREE.Quaternion();
+      matrix.decompose(position, quaternion, new THREE.Vector3());
+      return { position: position.sub(new THREE.Vector3().fromArray(liveOrigin(root))), quaternion };
+    }
+    const chain = [];
+    for (let node = group; node instanceof Group; node = node.parent) {
+      chain.unshift(node);
+      if (node === root) break;
+    }
+    const position = new THREE.Vector3();
+    const quaternion = eulerQuaternion(liveRotation(root));
+    for (let i = 1; i < chain.length; i++) {
+      const step = new THREE.Vector3().fromArray(chain[i].origin).sub(new THREE.Vector3().fromArray(chain[i - 1].origin));
+      position.add(step.applyQuaternion(quaternion));
+      quaternion.multiply(eulerQuaternion(liveRotation(chain[i])));
+    }
+    return { position, quaternion };
+  }
+
+  // A copy's 30 packed numbers for the parts it draws.
+  function packFlat(root, bones) {
+    const info = root.pose_entity;
+    if (!info.pivots) info.pivots = entityPivots(root);
+    const values = [];
+    const angle = (deg) => ((Math.round((wrap(deg) + 180) / ANGLE_STEP) % 4096) + 4096) % 4096;
+    const move = (u) => Math.max(0, Math.min(65535, Math.round((Number(u) || 0) * 64) + 32768));
+    for (const bone of bones) {
+      const group = findBoneGroup(root, bone);
+      const rest = info.pivots[String(bone).toLowerCase()];
+      if (!group || !rest) {
+        values.push(2048, 2048, 2048, 2048, 0, 0, 0); // as the model has it
+        continue;
+      }
+      const place = partPlace(root, group);
+      const e = new THREE.Euler().setFromQuaternion(place.quaternion, eulerOrder());
+      values.push(...toBedrockRot([e.x / DEG, e.y / DEG, e.z / DEG]).map(angle));
+      // Bedrock: X the other way
+      const [m0, m1, m2] = [-(place.position.x - rest[0]), place.position.y - rest[1], place.position.z - rest[2]].map(move);
+      values.push(m0 >> 4, ((m0 & 15) << 8) | (m1 >> 8), ((m1 & 255) << 4) | (m2 >> 12), m2 & 4095);
+    }
+    const q = [];
+    for (let i = 0; i < PACKED_PROPS; i++) q.push((values[i * 2] ?? 2048) * 4096 + (values[i * 2 + 1] ?? 2048));
+    return q;
+  }
+
+  // The ids a mob has in Minecraft: its own, and one for each further copy.
+  function entityIds(root) {
+    const id = mannequinId(root.name);
+    const model = ENTITY_PREFIX.test(root.name) && root.pose_entity ? proxyModelFor(root.pose_entity) : null;
+    return model && model.parts ? model.parts.map((part, k) => (k ? `${id}__p${k}` : id)) : [id];
+  }
+
   function angleExpr(index) {
     const prop = `q.property('pose:p${Math.floor(index / 2)}')`;
     const value = index % 2 === 0 ? `math.floor(${prop} / 4096)` : `(${prop} - math.floor(${prop} / 4096) * 4096)`;
@@ -8432,9 +8542,11 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     const models = list.map((entry) => {
       const geometry = restGeometry(content, entry.id, entry.geometryId, entry.flags);
       const model = geometry ? bedrockToBlockbench(geometry) : null;
-      return { key: entryKey(entry), entry, geometry, bones: model ? posableBones(model, boneUsage(content, entry.id)) : [] };
+      const parts = flatParts(geometry);
+      // (every part of a model shown by several copies can be posed)
+      return { key: entryKey(entry), entry, geometry, parts, bones: parts ? geometry.bones.map((b) => b.name) : model ? posableBones(model, boneUsage(content, entry.id)) : [] };
     });
-    const hash = hashString('v14|' + JSON.stringify(models.map((m) => [m.key, m.entry.material, m.bones, m.geometry && m.geometry.bones.length])));
+    const hash = hashString('v14|' + JSON.stringify(models.map((m) => [m.key, m.entry.material, m.bones, m.geometry && m.geometry.bones.length].concat(m.parts ? [m.parts] : []))));
     const registry = proxyRegistry();
     if (registry.hash === hash) return 0;
 
@@ -8494,14 +8606,43 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
       if (url) fs.writeFileSync(`${rp}\\${m.entry.texturePath.split('/').join('\\')}.png`, bufferClass().from(url.split(',')[1], 'base64'));
     }
     const geometries = [];
+    // One copy's share of a model shown by several copies: its parts hang from nothing (no parent,
+    // no turn of their own), and its animation gives each where it is and how it's turned.
+    const addFlat = (m, names) => {
+      const g = geometries.length;
+      const geometryId = `geometry.pose_studio.proxy.${g}`;
+      const flat = names.map((name) => {
+        const bone = Object.assign({}, m.geometry.bones.find((b) => b.name === name), { parent: PROXY_ROOT_BONE });
+        delete bone.rotation;
+        delete bone.bind_pose_rotation;
+        return bone;
+      });
+      geometries.push({
+        description: { identifier: geometryId, texture_width: m.geometry.texture_width, texture_height: m.geometry.texture_height, visible_bounds_width: 8, visible_bounds_height: 8, visible_bounds_offset: [0, 2, 0] },
+        bones: [{ name: PROXY_ROOT_BONE, pivot: [0, 0, 0] }, ...flat],
+      });
+      description.geometry[`g${g}`] = geometryId;
+      description.animations[`a${g}`] = `animation.pose_studio.proxy.${g}`;
+      const bones = {};
+      names.forEach((name, k) => {
+        const a = k * 7;
+        bones[name] = { rotation: [angleExpr(a), angleExpr(a + 1), angleExpr(a + 2)], position: [flatMoveExpr(a + 3, 0), flatMoveExpr(a + 3, 1), flatMoveExpr(a + 3, 2)] };
+      });
+      animations.animations[`animation.pose_studio.proxy.${g}`] = { loop: true, bones };
+      return g;
+    };
     // variants that only change the texture share a geometry (and its pose animation)
     const shared = new Map(); // geometry key -> { g, indices }
     const geometryOf = [];
     models.forEach((m, i) => {
       const geoKey = `${m.entry.id}|${m.entry.geometryId}|${m.entry.flags && m.entry.flags.is_baby ? 'baby' : ''}${m.entry.flags && m.entry.flags.is_saddled ? '|saddled' : ''}`;
       let slot = shared.get(geoKey);
+      if (!slot && m.parts) {
+        slot = { g: addFlat(m, m.parts[0]), indices: [], extra: m.parts.slice(1).map((names) => ({ g: addFlat(m, names), indices: [] })) };
+        shared.set(geoKey, slot);
+      }
       if (!slot) {
-        const g = shared.size;
+        const g = geometries.length;
         const geometryId = `geometry.pose_studio.proxy.${g}`;
         geometries.push({
           description: { identifier: geometryId, texture_width: m.geometry.texture_width, texture_height: m.geometry.texture_height, visible_bounds_width: 8, visible_bounds_height: 8, visible_bounds_offset: [0, 2, 0] },
@@ -8547,9 +8688,29 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
       arrays.skins.push(`Texture.t${i}`);
       arrays.mats.push(`Material.m${i}`);
       registryModels[m.key] = { index: i, bones: m.bones, entity: m.entry.id, source: m.entry.source };
+      if (m.parts) registryModels[m.key].parts = [{ index: i, bones: m.parts[0], slot }];
     });
+    // the further copies of the models shown by several: models of their own after the others,
+    // with the same texture and material
+    models.forEach((m, i) => {
+      if (!m.parts) return;
+      const entry = registryModels[m.key];
+      const slot = entry.parts[0].slot;
+      delete entry.parts[0].slot;
+      slot.extra.forEach((extra, k) => {
+        const index = arrays.geos.length;
+        arrays.geos.push(`Geometry.g${extra.g}`);
+        arrays.skins.push(`Texture.t${i}`);
+        arrays.mats.push(`Material.m${i}`);
+        extra.indices.push(index);
+        entry.parts.push({ index, bones: m.parts[k + 1] });
+      });
+    });
+    properties['pose:model'].range[1] = Math.max(0, arrays.geos.length - 1);
     // each pose animation plays for every model that uses its geometry
-    for (const { g, indices } of shared.values()) {
+    const gates = [];
+    for (const slot of shared.values()) gates.push(slot, ...(slot.extra || []));
+    for (const { g, indices } of gates) {
       description.scripts.animate.push({ [`a${g}`]: indices.map((i) => `q.property('pose:model') == ${i}`).join(' || ') });
     }
     // Minecraft finds the hand bones for held items in the entity's "default" geometry, which the
@@ -8683,7 +8844,8 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // Pose message for an entity: which model, bone rotations relative to the model's rest pose
   // (Bedrock convention, packed), and the root group's Y rotation as the entity's yaw.
   let warnedMissing = new Set();
-  function entityMessage(root) {
+  // What Minecraft is sent for a mob: [{ id, msg }], one for each copy that shows it.
+  function entityMessages(root) {
     const info = root.pose_entity;
     const model = proxyModelFor(info);
     if (!model) {
@@ -8691,7 +8853,16 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
         warnedMissing.add(root.name);
         Blockbench.showQuickMessage(`${root.name}: open Add Entity… for this world so Minecraft can show it`, 3000);
       }
-      return null;
+      return [];
+    }
+    if (model.parts) {
+      // several copies in the same spot, each with the place and turn of the parts it draws
+      const base = mannequinId(root.name);
+      const at = toWorld(liveOrigin(root));
+      return model.parts.map((part, k) => {
+        const id = k ? `${base}__p${k}` : base;
+        return { id, msg: JSON.stringify({ id, t: PROXY_TYPE, m: part.index, p: at, y: 0, q: packFlat(root, part.bones).map((n) => n.toString(36)).join(','), e: {} }) };
+      });
     }
     const angles = toBedrockRot(liveRotation(root));
     for (const bone of model.bones) {
@@ -8709,7 +8880,12 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     // only worn armour goes to the copy; held items are sent separately (see handMessage)
     const armour = {};
     for (const slot of ['head', 'chest', 'legs', 'feet']) if (knownEquipment(root)[slot]) armour[slot] = knownEquipment(root)[slot];
-    return JSON.stringify({ id: mannequinId(root.name), t: PROXY_TYPE, m: model.index, p: toWorld(liveOrigin(root)), y: 0, q: packAngles(angles, moves).map((n) => n.toString(36)).join(','), e: armour });
+    return [{ id: mannequinId(root.name), msg: JSON.stringify({ id: mannequinId(root.name), t: PROXY_TYPE, m: model.index, p: toWorld(liveOrigin(root)), y: 0, q: packAngles(angles, moves).map((n) => n.toString(36)).join(','), e: armour }) }];
+  }
+  // (the mob's own copy: what tests and older callers ask for)
+  function entityMessage(root) {
+    const all = entityMessages(root);
+    return all.length ? all[0].msg : null;
   }
 
   // ---- Still items -----------------------------------------------------------------------------
@@ -10987,6 +11163,14 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // <changelog>
   const CHANGELOG = [
     {
+      "version": "0.69.0",
+      "date": "2026-10-06",
+      "changes": [
+        "New (experimental): Move Any Part. Every part of a big mob (dragons, riders on horses) can be moved and turned, and Minecraft follows.",
+        "Turn it on in Settings, then open Add Entity once and reload Minecraft's packs when asked."
+      ]
+    },
+    {
       "version": "0.68.0",
       "date": "2026-10-05",
       "changes": [
@@ -11873,7 +12057,7 @@ ${PLUGIN_URL}`,
 
   // for the plugin's own tests only (they set this flag); nothing happens otherwise
   if (typeof globalThis !== 'undefined' && globalThis.__POSE_STUDIO_TEST) {
-    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS, sceneSpot, addLight, lightRoots, stopPath, cameraPathsOn, cameraPose, sampleCameraAnimation, playCameraAnimation, animateCamera, zoomedFov, setupClipChannel, removeClipChannel, clipKeys, clipPose, clipState, displayClips, addAnimationKey, sampleAnimation, liveRotation, liveOrigin, poseMessage, entityMessage, setContentCache: (c) => (contentCache = c), saddleParts, particleList, particleEntry, placeParticle, fxMessage, fxRoots };
+    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS, sceneSpot, addLight, lightRoots, stopPath, cameraPathsOn, cameraPose, sampleCameraAnimation, playCameraAnimation, animateCamera, zoomedFov, setupClipChannel, removeClipChannel, clipKeys, clipPose, clipState, displayClips, addAnimationKey, sampleAnimation, liveRotation, liveOrigin, poseMessage, entityMessage, setContentCache: (c) => (contentCache = c), saddleParts, entityMessages, entityIds, flatParts, packFlat, partPlace, proxyModelFor, anyPartOn, prepareProxy, particleList, particleEntry, placeParticle, fxMessage, fxRoots };
   }
 
   Plugin.register('pose_studio', {
@@ -12165,6 +12349,18 @@ ${PLUGIN_URL}`,
               // used until Blockbench restarts
             }
             applyInterface();
+          },
+        }),
+        setting('pose_studio_any_part', {
+          name: 'Pose Studio: Move Any Part (experimental)', type: 'toggle', value: anyPartOn(),
+          description: 'Big mobs (dragons, riders on horses…) are shown in Minecraft by several copies in one spot, so every part can be moved and turned, not just the first 19 bones. After changing this, open Add Entity… once and reload Minecraft\'s packs when asked.',
+          onChange: (value) => {
+            try {
+              localStorage.setItem(ANY_PART_KEY, value ? '1' : '0');
+            } catch (e) {
+              // used until Blockbench restarts
+            }
+            Blockbench.showQuickMessage("Open Add Entity… once and reload Minecraft's packs when asked, so the game has the new models", 5000);
           },
         }),
         setting('pose_studio_camera_paths', {

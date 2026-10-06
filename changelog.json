@@ -1,5 +1,13 @@
 [
   {
+    "version": "0.69.0",
+    "date": "2026-10-06",
+    "changes": [
+      "New (experimental): Move Any Part. Every part of a big mob (dragons, riders on horses) can be moved and turned, and Minecraft follows.",
+      "Turn it on in Settings, then open Add Entity once and reload Minecraft's packs when asked."
+    ]
+  },
+  {
     "version": "0.68.0",
     "date": "2026-10-05",
     "changes": [

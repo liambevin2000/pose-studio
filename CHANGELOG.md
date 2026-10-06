@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.69.0 (2026-10-06)
+
+- New (experimental): Move Any Part. Every part of a big mob (dragons, riders on horses) can be moved and turned, and Minecraft follows.
+- Turn it on in Settings, then open Add Entity once and reload Minecraft's packs when asked.
+
 ## 0.68.0 (2026-10-05)
 
 - Variant has a Saddle tickbox for mobs that can wear one (DragonCraft's dragons, camels, donkeys, mules).

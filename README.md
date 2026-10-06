@@ -137,6 +137,14 @@ Animate the camera, players and mobs on Blockbench's timeline and have the game 
 
 Limits: Minecraft's camera can't roll. Bones in the game update 20 times a second. Items held by mobs follow the playhead but not Play Animation in Minecraft. Position keyframes on single bones are not sent to the game.
 
+## Move Any Part (experimental)
+
+Normally a mob with more than 9 bones can only have 19 of them turned in Minecraft, and none moved. Turn on **File ▸ Preferences ▸ Settings ▸ Pose Studio: Move Any Part (experimental)** and every part of such a mob can be moved and turned in Blockbench, and Minecraft shows it. That includes groups that only hold other parts (the rider on a horse-and-rider mob).
+
+- After turning it on or off, open **Add Entity…** once and reload Minecraft's packs when asked.
+- In Minecraft a big mob is then several copies standing in the same spot, each drawing up to 8 parts.
+- Mobs that wear armour like players (zombies, skeletons, piglins…) are left as they are, so their armour keeps fitting.
+
 ## Particles
 
 Place particle effects from the world's packs (DragonCraft's smoke, wind, dust…) or Minecraft's own in the scene.
