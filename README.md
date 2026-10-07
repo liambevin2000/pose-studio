@@ -186,6 +186,12 @@ Place particle effects from the world's packs (DragonCraft's smoke, wind, dustâ€
 
 An effect that repeats by itself can't be stopped by Pose Studio once started: it stays until the world is reopened.
 
+## Hiding, copying and pasting
+
+- **Hide:** click the eye next to a player or mob in the outliner. It disappears from Minecraft too, and comes back, with its pose, skin and equipment, when you show it again. Alt+click an eye to show only that one. Hidden players and mobs are also left out of animations and entity shots. Cameras, lights and particles are not affected by their eye.
+- **Copy and paste:** select a player, mob, camera, light or particle in the outliner, press Ctrl+C, go to another scene's tab and press Ctrl+V. Ctrl+D duplicates it in the same scene. The copy keeps its pose, skin, equipment, look and settings, gets the next free name (`Player_2`, `cam_3`â€¦) and stands in the same place measured from its scene's anchor. Keep the scene you copied from open while you paste, so its textures can be brought over.
+- Timeline keyframes are not copied by a paste. A rider stays on its mount only when both are copied together.
+
 ## Moving structures
 
 Select a box of blocks in Minecraft, move it in Blockbench, and Minecraft moves the blocks.

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.79.0 (2026-10-07)
+
+- Hide a player or mob with its eye in the outliner and it disappears from Minecraft too.
+- Copy and paste players, mobs, cameras, lights and particles between scenes (Ctrl+C, Ctrl+V), or duplicate them (Ctrl+D).
+
 ## 0.78.0 (2026-10-06)
 
 - Fixed: a recording came back from Minecraft with its pieces out of order, so the recorded player jumped about.

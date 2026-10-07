@@ -1,5 +1,13 @@
 [
   {
+    "version": "0.79.0",
+    "date": "2026-10-07",
+    "changes": [
+      "Hide a player or mob with its eye in the outliner and it disappears from Minecraft too.",
+      "Copy and paste players, mobs, cameras, lights and particles between scenes (Ctrl+C, Ctrl+V), or duplicate them (Ctrl+D)."
+    ]
+  },
+  {
     "version": "0.78.0",
     "date": "2026-10-06",
     "changes": [

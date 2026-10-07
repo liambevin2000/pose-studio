@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.78.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.79.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -1506,6 +1506,21 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
     link.command(commandLine).catch(logFailure);
   }
 
+  // A player or mob whose visibility is off in Blockbench (the eye in the outliner) isn't in the
+  // game either: it's taken out of the world while it's hidden, and put back, pose, skin and
+  // equipment, when it's shown again. Hidden: its own eye is off, or every cube of it is (Alt+click
+  // on another model's eye hides the cubes of all the rest, and leaves their groups as they were).
+  function anyCubeShown(node) {
+    let any = null; // (null: there are no cubes under it)
+    for (const child of node.children || []) {
+      const shown = child.children ? anyCubeShown(child) : child.visibility !== false;
+      if (shown) return true;
+      if (shown === false) any = false;
+    }
+    return any;
+  }
+  const shownInGame = (root) => root.visibility !== false && anyCubeShown(root) !== false;
+
   function mannequinRoots() {
     if (typeof Project === 'undefined' || !Project) return [];
     return Outliner.root.filter((node) => node instanceof Group && MANNEQUIN_PREFIX.test(node.name));
@@ -1583,6 +1598,7 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
 
     const seen = new Set();
     for (const root of mannequinRoots()) {
+      if (!shownInGame(root)) continue;
       const id = mannequinId(root.name);
       if (seen.has(id)) continue;
       seen.add(id);
@@ -1595,8 +1611,11 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
     // equipment goes separately and only when it changes (a pose plus a full set of pack items
     // would make one command too long); Minecraft remembers it per mannequin
     const itemsChecked = equipmentReady();
-    for (const root of itemsChecked ? mannequinRoots() : []) {
+    for (const root of mannequinRoots()) {
+      if (!shownInGame(root)) continue;
       const id = mannequinId(root.name);
+      seen.add(`${id}#eq`); // (what was sent is remembered for as long as the player is in the game)
+      if (!itemsChecked) continue;
       const msg = JSON.stringify({ id, e: knownEquipment(root) });
       if (lastSent.get(`${id}#eq`) === msg) continue;
       if (link.inFlight >= MAX_IN_FLIGHT) return;
@@ -1604,6 +1623,7 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
       lastSent.set(`${id}#eq`, msg);
     }
     for (const root of entityRoots()) {
+      if (!shownInGame(root)) continue;
       const id = mannequinId(root.name);
       if (seen.has(id)) continue;
       seen.add(id);
@@ -1656,7 +1676,7 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
     }
     for (const id of Array.from(lastSent.keys())) {
       if (seen.has(id)) continue;
-      send(`scriptevent pose:remove ${JSON.stringify({ id })}`);
+      if (!id.endsWith('#eq')) send(`scriptevent pose:remove ${JSON.stringify({ id })}`);
       lastSent.delete(id);
     }
 
@@ -2736,10 +2756,10 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
       Blockbench.showMessageBox({ title: 'Capture Entities Only', message: 'Turn on Pose Studio ▸ Camera ▸ Sync Game Camera first: the shot is taken from the game camera.' });
       return;
     }
-    const roots = mannequinRoots().concat(entityRoots());
+    const roots = mannequinRoots().concat(entityRoots()).filter(shownInGame);
     const camText = cameraMessage();
     if (!roots.length || !camText) {
-      Blockbench.showQuickMessage(roots.length ? 'No camera to shoot from' : 'There are no players or mobs in this scene', 2500);
+      Blockbench.showQuickMessage(roots.length ? 'No camera to shoot from' : 'There are no players or mobs showing in this scene', 2500);
       return;
     }
     if (shooting) return;
@@ -4108,7 +4128,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     const was = Timeline.time;
     const camera = cam ? [] : null;
     const tracks = new Map();
-    const roots = mannequinRoots().map((r) => ['s', r]).concat(entityRoots().map((r) => ['e', r]));
+    const roots = mannequinRoots().filter(shownInGame).map((r) => ['s', r]).concat(entityRoots().filter(shownInGame).map((r) => ['e', r]));
     try {
       for (let i = 0; i < count; i++) {
         Timeline.setTime(Math.min(i * step, length), true);
@@ -4669,6 +4689,150 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     if (info.turn) Object.assign(vars, fxTurn(group));
     return JSON.stringify({ id: mannequinId(group.name), p: toWorld(group.origin), t: info.turn ? turnedId(info.id) : info.id, n: Math.round(info.every * 20), v: vars });
   }
+
+  // ---- Copies: pasted from another scene, or duplicated ----------------------------------------------
+  // Blockbench's own copy and paste (Ctrl+C in one scene, Ctrl+V in another) and duplicate (Ctrl+D)
+  // carry a player, mob, camera, light or particle whole: its pose, skin slot, equipment, look,
+  // recording and settings are kept in the copy. Three things Blockbench does to a copy would
+  // break it, and are put right here, as part of the same undo step:
+  //   - it gives every group a name no other group has, the bones too ("tail1" becomes "tail6"),
+  //     and the game finds bones by name: the bones get their names back, and the copy itself gets
+  //     the next free name of its kind (Player_3, ent_zombie_2, cam_4…);
+  //   - it puts the copy inside whatever was selected: a copy belongs at the top of the outliner;
+  //   - a texture belongs to the scene it's in: the copy's textures are brought over from the
+  //     scene they came from (or the ones already here by that name are used).
+  // A copy stands where the original stood, measured from its scene's anchor.
+  const COPY_EDITS = /^(Paste Elements|Duplicate group|Duplicate selection|Duplicate elements)$/i;
+  const nameBefore = (group) => (group.temp_data && group.temp_data.old_name) || group.name;
+
+  // What a group is to Pose Studio, going by a name: 'player', 'mob', 'camera', 'light', 'fx' or ''.
+  function poseKind(group, name = group.name) {
+    if (group.pose_entity && group.pose_entity.entity && ENTITY_PREFIX.test(name)) return 'mob';
+    if (MANNEQUIN_PREFIX.test(name) && mannequinBones(group).size) return 'player';
+    if (CAMERA_PREFIX.test(name)) return 'camera';
+    if (/^light_\d+$/i.test(name)) return 'light';
+    if (/^fx_\d+$/i.test(name) && group.pose_fx) return 'fx';
+    return '';
+  }
+
+  // The next free name of a kind for a copy (its own, when that's free and fits).
+  function copyName(kind, group, was) {
+    const base = kind === 'player' ? 'Player_' : kind === 'camera' ? 'cam_' : kind === 'light' ? 'light_' : kind === 'fx' ? 'fx_' : `${String(was).replace(/_?\d+$/, '')}_`;
+    const taken = new Set(Outliner.root.filter((n) => n instanceof Group && n !== group).map((n) => String(n.name).toLowerCase()));
+    const own = String(group.name);
+    if (own.toLowerCase().startsWith(base.toLowerCase()) && /^\d+$/.test(own.slice(base.length)) && !taken.has(own.toLowerCase())) return own;
+    for (let n = 1; n < 10000; n++) if (!taken.has(`${base}${n}`.toLowerCase())) return `${base}${n}`;
+    return own;
+  }
+
+  // A copy's textures, from the scene they came from. Returns how many faces are left without one.
+  function adoptTextures(root) {
+    const here = new Set((Texture.all || []).map((t) => t.uuid));
+    const elsewhere = [];
+    if (typeof ModelProject !== 'undefined') {
+      for (const project of ModelProject.all || []) if (project !== Project) elsewhere.push(...(project.textures || []));
+    }
+    const brought = new Map(); // a texture's id there -> the texture here (null: not found)
+    let missing = 0;
+    root.forEachChild((element) => {
+      if (!element.faces) return;
+      for (const face of Object.values(element.faces)) {
+        const id = face && face.texture;
+        if (!id || typeof id !== 'string' || here.has(id)) continue;
+        if (!brought.has(id)) {
+          const source = elsewhere.find((t) => t.uuid === id) || null;
+          let mine = source ? (Texture.all || []).find((t) => t.name === source.name) || null : null;
+          if (source && !mine) {
+            try {
+              mine = new Texture({ name: source.name }).fromDataURL(source.getDataURL());
+              mine.add(false);
+              for (const key of ['uv_width', 'uv_height']) if (source[key]) mine[key] = source[key];
+            } catch (e) {
+              mine = null;
+            }
+          }
+          brought.set(id, mine);
+        }
+        const mine = brought.get(id);
+        if (mine) face.texture = mine.uuid;
+        else missing++;
+      }
+    });
+    return missing;
+  }
+
+  // A copy whose scene isn't open any more: its look is made again from what it is.
+  async function rebuildLook(root) {
+    try {
+      if (MANNEQUIN_PREFIX.test(root.name)) {
+        const slot = root.pose_skin_slot || 0;
+        const entry = slot ? (await readLibrary()).find((e) => e.slot === slot) : null;
+        if (entry) wearSkin(root, entry);
+        else removeSkin(root);
+        return;
+      }
+      if (!root.pose_entity) return;
+      const state = contentCache || (await loadWorldContent(null));
+      const base = state.list.find((e) => e.id === root.pose_entity.entity);
+      const look = base ? variantEntries(state.content, base).find((l) => entryKey(l) === root.pose_entity.key) : null;
+      if (look) await setEntityVariant(root, state.content, look);
+    } catch (e) {
+      console.warn('[Pose Studio] look of a copy', e);
+    }
+  }
+
+  // Blockbench finished an edit: when it was a paste or a duplicate, Pose Studio's things in it are
+  // made whole (see above). Returns the copies adopted.
+  function adoptCopies(edit) {
+    if (!edit || !COPY_EDITS.test(String(edit.message || '')) || typeof Project === 'undefined' || !Project) return [];
+    const groups = edit.aspects && Array.isArray(edit.aspects.groups) ? edit.aspects.groups.filter((g) => g instanceof Group) : [];
+    const tops = groups.filter((g) => !(g.parent instanceof Group && groups.includes(g.parent)));
+    const copies = [];
+    for (const group of tops) {
+      const was = nameBefore(group);
+      const kind = poseKind(group, was) || poseKind(group);
+      if (kind) copies.push({ group, was, kind });
+    }
+    if (!copies.length) return [];
+    const renamed = new Map(); // what a copy was called -> what it's called now
+    for (const { group, was, kind } of copies) {
+      // at the top of the outliner, not inside what was selected
+      if (group.parent !== 'root' && group.addTo) group.addTo();
+      // the bones are called what they were
+      if (kind === 'player' || kind === 'mob') {
+        group.forEachChild((child) => {
+          const before = child instanceof Group && child.temp_data && child.temp_data.old_name;
+          if (before && child.name !== before) child.name = before;
+        });
+      }
+      group.name = copyName(kind, group, was);
+      renamed.set(was, group.name);
+    }
+    const unfinished = [];
+    for (const { group, kind } of copies) {
+      if (adoptTextures(group) > 0 && (kind === 'player' || kind === 'mob')) unfinished.push(group);
+      if (kind === 'player') ensureRig(group);
+      // a rider stays on its mount only when the mount was copied with it
+      if (group.pose_mount) {
+        const mount = copies.find((c) => c.kind === 'mob' && c.was === group.pose_mount.mob);
+        group.pose_mount = mount ? Object.assign({}, group.pose_mount, { mob: mount.group.name }) : null;
+      }
+      clipStates.delete(group.uuid);
+    }
+    Canvas.updateAll();
+    // (their looks: once this edit is done, as an edit of their own)
+    if (unfinished.length) setTimeout(() => unfinished.reduce((done, root) => done.then(() => rebuildLook(root)), Promise.resolve()), 0);
+    const names = copies.map((c) => c.group.name);
+    Blockbench.showQuickMessage(`Pose Studio: ${names.length === 1 ? `${names[0]} is a copy of ${copies[0].was}` : `${names.length} copies (${names.join(', ')})`}`, 3000);
+    return copies.map((c) => c.group);
+  }
+  const onFinishEdit = (edit) => {
+    try {
+      adoptCopies(edit);
+    } catch (e) {
+      console.warn('[Pose Studio] copy', e);
+    }
+  };
 
   // ---- Classic menu or the panel (experimental) ------------------------------------------------------
   // Settings ▸ Pose Studio: New Panel Interface (experimental). Off (the default): everything is in
@@ -12095,6 +12259,14 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // <changelog>
   const CHANGELOG = [
     {
+      "version": "0.79.0",
+      "date": "2026-10-07",
+      "changes": [
+        "Hide a player or mob with its eye in the outliner and it disappears from Minecraft too.",
+        "Copy and paste players, mobs, cameras, lights and particles between scenes (Ctrl+C, Ctrl+V), or duplicate them (Ctrl+D)."
+      ]
+    },
+    {
       "version": "0.78.0",
       "date": "2026-10-06",
       "changes": [
@@ -13092,7 +13264,7 @@ ${PLUGIN_URL}`,
 
   // for the plugin's own tests only (they set this flag); nothing happens otherwise
   if (typeof globalThis !== 'undefined' && globalThis.__POSE_STUDIO_TEST) {
-    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS, sceneSpot, addLight, lightRoots, stopPath, cameraPathsOn, cameraPose, sampleCameraAnimation, playCameraAnimation, animateCamera, zoomedFov, setupClipChannel, removeClipChannel, clipKeys, clipPose, clipState, displayClips, addAnimationKey, placeClipKey, clipKeyAt, parseRecording, tidyRecording, recordingTicks, recordingAnimation, importRecording, placeRecording, keepRecording, setRecording, poseState, showRecordedWalk, displayClipBones, displayClipRoot, updateRecordingLines, entityAnimations, clipDelta, sampleAnimation, liveRotation, liveOrigin, poseMessage, entityMessage, setContentCache: (c) => (contentCache = c), liveWorldName, turnedEffect, turnVector, fxTurn, prepareTurned, turnedId, saddleParts, entityMessages, entityIds, flatParts, packFlat, partPlace, proxyModelFor, anyPartOn, prepareProxy, particleList, particleEntry, placeParticle, fxMessage, fxRoots };
+    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS, sceneSpot, addLight, lightRoots, stopPath, cameraPathsOn, cameraPose, sampleCameraAnimation, playCameraAnimation, animateCamera, zoomedFov, setupClipChannel, removeClipChannel, clipKeys, clipPose, clipState, displayClips, addAnimationKey, placeClipKey, clipKeyAt, parseRecording, tidyRecording, recordingTicks, recordingAnimation, importRecording, placeRecording, keepRecording, setRecording, poseState, showRecordedWalk, displayClipBones, displayClipRoot, updateRecordingLines, entityAnimations, clipDelta, sampleAnimation, liveRotation, liveOrigin, poseMessage, entityMessage, setContentCache: (c) => (contentCache = c), liveWorldName, adoptCopies, adoptTextures, poseKind, copyName, turnedEffect, turnVector, fxTurn, prepareTurned, turnedId, saddleParts, entityMessages, entityIds, flatParts, packFlat, partPlace, proxyModelFor, anyPartOn, prepareProxy, particleList, particleEntry, placeParticle, fxMessage, fxRoots };
   }
 
   Plugin.register('pose_studio', {
@@ -13128,6 +13300,7 @@ ${PLUGIN_URL}`,
       if (Blockbench.on) Blockbench.on('select_project', onProjectSelected);
       if (Blockbench.on) Blockbench.on('load_project', refreshOnLoad);
       if (Blockbench.on) Blockbench.on('undo', onBlockbenchUndo);
+      if (Blockbench.on) Blockbench.on('finish_edit', onFinishEdit);
       if (Blockbench.on) Blockbench.on('display_default_pose', onDefaultPose);
       if (Blockbench.on) Blockbench.on('display_animation_frame', displayClipBones);
       recordingLineTimer = setInterval(() => {
@@ -13502,6 +13675,7 @@ ${PLUGIN_URL}`,
       if (Blockbench.removeListener) Blockbench.removeListener('select_project', onProjectSelected);
       if (Blockbench.removeListener) Blockbench.removeListener('load_project', refreshOnLoad);
       if (Blockbench.removeListener) Blockbench.removeListener('undo', onBlockbenchUndo);
+      if (Blockbench.removeListener) Blockbench.removeListener('finish_edit', onFinishEdit);
       if (Blockbench.removeListener) Blockbench.removeListener('display_default_pose', onDefaultPose);
       if (Blockbench.removeListener) Blockbench.removeListener('display_animation_frame', displayClipBones);
       if (recordingLineTimer) clearInterval(recordingLineTimer);
