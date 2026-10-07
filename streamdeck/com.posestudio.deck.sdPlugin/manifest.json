@@ -1,8 +1,8 @@
 {
   "Name": "Pose Studio",
-  "Version": "1.6.2.0",
+  "Version": "1.7.0.0",
   "Author": "Pose Studio",
-  "Description": "Run Pose Studio (the Blockbench plugin for posing Minecraft Bedrock screenshots) from your Stream Deck: captures, cameras, toggles, time and weather. Turn on Pose Studio ▸ More ▸ Stream Deck Link in Blockbench.",
+  "Description": "Run Pose Studio (the Blockbench plugin for posing Minecraft Bedrock screenshots) from your Stream Deck: connecting to Minecraft, captures, cameras, toggles, time and weather. Works while Blockbench is open.",
   "Category": "Pose Studio",
   "CategoryIcon": "images/category",
   "Icon": "images/plugin",
@@ -21,6 +21,28 @@
     }
   ],
   "Actions": [
+    {
+      "Name": "Connect to Minecraft",
+      "UUID": "com.posestudio.deck.connect",
+      "Icon": "images/connect_icon",
+      "Tooltip": "Starts the Minecraft connection and copies the /connect command: paste it into Minecraft's chat. The key is lit once Minecraft is connected.",
+      "Controllers": [
+        "Keypad"
+      ],
+      "DisableAutomaticStates": true,
+      "States": [
+        {
+          "Image": "images/connect",
+          "TitleAlignment": "bottom",
+          "FontSize": 11
+        },
+        {
+          "Image": "images/connect_on",
+          "TitleAlignment": "bottom",
+          "FontSize": 11
+        }
+      ]
+    },
     {
       "Name": "Capture Screenshot",
       "UUID": "com.posestudio.deck.capture",

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.80.0 (2026-10-07)
+
+- New Stream Deck key: Connect to Minecraft. Press it, then paste (Ctrl+V) into Minecraft chat.
+- Stream Deck Link is now on by default.
+- Get the Stream Deck plugin again for the new key (More ▸ Get the Stream Deck Plugin).
+
 ## 0.79.0 (2026-10-07)
 
 - Hide a player or mob with its eye in the outliner and it disappears from Minecraft too.

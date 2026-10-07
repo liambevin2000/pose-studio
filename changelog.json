@@ -1,5 +1,14 @@
 [
   {
+    "version": "0.80.0",
+    "date": "2026-10-07",
+    "changes": [
+      "New Stream Deck key: Connect to Minecraft. Press it, then paste (Ctrl+V) into Minecraft chat.",
+      "Stream Deck Link is now on by default.",
+      "Get the Stream Deck plugin again for the new key (More ▸ Get the Stream Deck Plugin)."
+    ]
+  },
+  {
     "version": "0.79.0",
     "date": "2026-10-07",
     "changes": [

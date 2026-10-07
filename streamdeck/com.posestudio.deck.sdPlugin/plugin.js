@@ -1,6 +1,6 @@
 // Pose Studio for Stream Deck — the plugin half.
 // Stream Deck runs this page and talks to it over a websocket (which keys exist, which was pressed).
-// Pose Studio (the Blockbench plugin) answers on 127.0.0.1:19132 once "Stream Deck Link" is on:
+// Pose Studio (the Blockbench plugin) answers on 127.0.0.1:19132 while "Stream Deck Link" is on (it is by default):
 // GET /state says what's open and switched on, GET /run?id=… does something.
 const POSE_STUDIO = 'http://127.0.0.1:19132';
 const PREFIX = 'com.posestudio.deck.';
@@ -92,6 +92,12 @@ function look(key) {
     }
     return { title: (state && state.camera) || '', state: 0, art: [mode === 'prev' ? 'prev' : 'next', 'stone'] };
   }
+  if (kind === 'connect') {
+    // lit once Minecraft is connected; in between, Pose Studio is listening and the command is copied
+    if (state && state.connected) return { title: 'Connected', state: 1, art: ['bars', 'grass'] };
+    if (state && state.link) return { title: 'Paste in\nchat', state: 0, art: ['bars', 'stone'] };
+    return { title: 'Connect', state: 0, art: ['bars_off', 'stone'] };
+  }
   if (kind === 'toggle') {
     const which = TOGGLES[s.which] ? s.which : 'sync';
     const on = !!(state && state[which]);
@@ -141,6 +147,8 @@ function requests(key) {
   const kind = key.action.slice(PREFIX.length);
   const s = key.settings || {};
   if (kind === 'capture') return ['/run?id=pose_studio_capture'];
+  // listens for Minecraft and copies the /connect command (and, if the key says so, brings Minecraft up to paste it)
+  if (kind === 'connect') return ['/run?id=connect'].concat(s.then === 'minecraft' ? ['/run?id=focus&value=minecraft'] : []);
   if (kind === 'entities') return ['/run?id=pose_studio_capture_entities'];
   if (kind === 'camera') {
     const mode = s.mode || 'next';

@@ -216,11 +216,11 @@ Mobs aren't moved. Up to 600,000 blocks at a time; above 40,000 visible blocks t
 Pose Studio has a plugin for Elgato Stream Deck (Stream Deck 6.5 or newer, Windows).
 
 1. In Blockbench: **Pose Studio ▸ More ▸ Get the Stream Deck Plugin**, then double-click the downloaded `PoseStudio.streamDeckPlugin`.
-2. In Blockbench: turn on **Pose Studio ▸ More ▸ Stream Deck Link** (it stays on).
-3. In Stream Deck, drag keys from the **Pose Studio** category:
+2. In Stream Deck, drag keys from the **Pose Studio** category. They work while Blockbench is open: **Pose Studio ▸ More ▸ Stream Deck Link** is on unless you turn it off.
 
 | Key | What it does |
 | --- | --- |
+| **Connect to Minecraft** | Starts the connection and copies the `/connect` command: open Minecraft's chat, paste (Ctrl+V), Enter. The key reads *Paste in chat* while it waits and lights up once Minecraft is connected. It can also bring Minecraft to the front (in the key's settings). |
 | **Capture Screenshot** | Same as the menu's. |
 | **Capture Entities Only** | Same as the menu's (what it saves is in Entity Shot Options). |
 | **Camera** | Next, previous, or a numbered camera. A numbered key shows that camera's name and lights up while it's the active one. |
@@ -229,6 +229,6 @@ Pose Studio has a plugin for Elgato Stream Deck (Stream Deck 6.5 or newer, Windo
 | **Switch To** | Brings Blockbench (or Minecraft) to the front. |
 | **Run Action** | Anything else from the Pose Studio menu (Drop to Ground, Compare with Game, Add Camera…). |
 
-The link only listens on this computer (127.0.0.1:19132) and refuses requests from web pages. A key shows a warning triangle when Pose Studio isn't answering (Blockbench closed, or the link off).
+The link only listens on this computer (127.0.0.1:19132) and refuses requests from web pages. A key shows a warning triangle when Pose Studio isn't answering (Blockbench closed, or the link off). The first time, Blockbench has to have allowed Pose Studio to use the network: connect to Minecraft from the menu once and pick **Always allow**.
 
 The plugin's source is in `streamdeck/`; `node build-streamdeck.js` packs it into `dist/`.

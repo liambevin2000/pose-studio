@@ -138,6 +138,7 @@ for (const [name, sprite] of Object.entries(sprites)) {
 
 // the pictures in the manifest (what a key shows before the plugin has set its own)
 const fixed = {
+  connect: ['bars', 'stone'], connect_on: ['bars', 'grass'],
   capture: ['capture', 'stone'], entities: ['face', 'stone'],
   camera: ['camera', 'stone'], camera_on: ['camera', 'grass'],
   toggle: ['lamp_off', 'stone'], toggle_on: ['lamp_on', 'grass'],

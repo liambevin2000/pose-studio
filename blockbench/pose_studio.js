@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.79.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.80.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -74,6 +74,19 @@
       return requireNativeModule(name, { message: `Pose Studio needs this to ${why || 'talk to Minecraft'}.` });
     }
     return require(name);
+  }
+  // Node's 'net' (for the Minecraft link and the Stream Deck link), kept once Blockbench has let
+  // Pose Studio have it. Blockbench asks the user the first time; with ask = false nothing is
+  // asked, and there's no module (null) until the user has allowed it.
+  let netModule = null;
+  function netFor(why, ask = true) {
+    if (netModule) return netModule;
+    if (typeof requireNativeModule === 'function') {
+      netModule = requireNativeModule('net', Object.assign({ message: `Pose Studio needs this to ${why}.` }, ask ? {} : { show_permission_dialog: false })) || null;
+    } else {
+      netModule = require('net');
+    }
+    return netModule;
   }
   function bufferClass() {
     return typeof Buffer !== 'undefined' ? Buffer : nodeRequire('buffer').Buffer;
@@ -192,7 +205,7 @@
     // so the HTTP upgrade request is parsed by hand on a raw 'net' socket.
     start() {
       if (this.server) return;
-      const net = nodeRequire('net', 'accept a connection from Minecraft on 127.0.0.1');
+      const net = netFor('accept a connection from Minecraft on 127.0.0.1');
       if (!net) throw new Error('Network permission was denied');
       this.nodeCrypto = nodeRequire('crypto');
 
@@ -1716,6 +1729,7 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
     return false;
   }
 
+  let quietLinkStart = false; // started from the Stream Deck's Connect key: the command is on the clipboard already
   function startLink() {
     try {
       link.start();
@@ -1738,6 +1752,8 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
       }, 1000);
     };
     if (!tickTimer) tickTimer = setInterval(tick, TICK_MS);
+    autoStartDeck(); // (the network is allowed now, if it wasn't at startup)
+    if (quietLinkStart) return true;
     const command = `/connect 127.0.0.1:${PORT}`;
     const noPacks = !!installedPacks().missing;
     Blockbench.showMessageBox(
@@ -5261,8 +5277,8 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
   }
 
   // ---- Stream Deck link ---------------------------------------------------------------------------
-  // Pose Studio ▸ More ▸ Stream Deck Link: a small control link on this machine only (127.0.0.1),
-  // for the Pose Studio Stream Deck plugin. It answers two things: GET /state (what's open, which
+  // Pose Studio ▸ More ▸ Stream Deck Link (on unless it's turned off): a small control link on this
+  // machine only (127.0.0.1), for the Pose Studio Stream Deck plugin. It answers two things: GET /state (what's open, which
   // cameras there are, what's switched on) and GET /run?id=… (do something: an action of the Pose
   // Studio menu, a camera, a toggle, the time or the weather). Like the Minecraft link it's plain
   // HTTP read by hand on a 'net' socket ('http' isn't a module Blockbench lets plugins use).
@@ -5351,9 +5367,32 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     return 'Blockbench';
   }
 
+  // The Connect key: Pose Studio starts listening for Minecraft (as Connect to Minecraft does, without
+  // the window that says what to type) and the command is put on the clipboard, ready to paste into
+  // Minecraft's chat. Blockbench's own clipboard is used: it works while another window has the focus.
+  function deckConnect() {
+    if (link.connected) return { ok: true, message: 'Minecraft is already connected' };
+    if (linkToggle && !linkToggle.value) {
+      quietLinkStart = true;
+      try {
+        linkToggle.set(true);
+      } finally {
+        quietLinkStart = false;
+      }
+    }
+    if (!link.server) throw new Error("Pose Studio couldn't start listening for Minecraft");
+    const command = `/connect 127.0.0.1:${PORT}`;
+    if (typeof Clipbench !== 'undefined' && Clipbench.setText) Clipbench.setText(command);
+    else if (typeof clipboard !== 'undefined' && clipboard.writeText) clipboard.writeText(command);
+    else throw new Error("The clipboard isn't available");
+    Blockbench.showQuickMessage(`Copied ${command}: paste it into Minecraft chat (Ctrl+V)`, 4000);
+    return { ok: true, message: `Copied ${command}` };
+  }
+
   function deckRun(q) {
     const id = String(q.id || '');
     const value = String(q.value === undefined ? '' : q.value);
+    if (id === 'connect') return deckConnect();
     if (id === 'focus') return { ok: true, message: focusWindow(value === 'minecraft' ? 'minecraft' : 'blockbench') };
     if (id === 'camera') return { ok: true, message: deckCamera(value || 'next') };
     if (id === 'time') {
@@ -5382,20 +5421,41 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
 
   const deck = {
     server: null,
-    start() {
-      if (this.server) return;
-      const net = nodeRequire('net', 'let the Stream Deck plugin on this computer talk to Pose Studio (127.0.0.1 only)');
-      if (!net) throw new Error('Network permission was denied');
+    retry: null,
+    // quiet: started by Pose Studio itself (the link is on by default), so nothing is asked and
+    // nothing is said when it can't. Returns whether it's listening.
+    start(quiet) {
+      if (this.server) return true;
+      clearTimeout(this.retry);
+      this.retry = null;
+      const net = netFor('let the Stream Deck plugin on this computer talk to Pose Studio (127.0.0.1 only)', !quiet);
+      if (!net) {
+        if (quiet) return false; // (it starts with the Minecraft link, once the network is allowed: see startLink)
+        throw new Error('Network permission was denied');
+      }
       const server = net.createServer((socket) => this.serve(socket));
       server.on('error', (e) => {
-        this.server = null;
+        if (this.server === server) this.server = null;
+        if (quiet) {
+          // most likely another Blockbench window has the port: this one takes over when that one closes
+          console.warn('[Pose Studio] Stream Deck link', e && e.message);
+          clearTimeout(this.retry);
+          this.retry = setTimeout(() => {
+            this.retry = null;
+            autoStartDeck();
+          }, 15000);
+          return;
+        }
         Blockbench.showMessageBox({ title: 'Pose Studio', message: `The Stream Deck link could not listen on port ${DECK_PORT}: ${e.message}` });
         if (deckToggle && deckToggle.value) deckToggle.set(false);
       });
       server.listen(DECK_PORT, '127.0.0.1');
       this.server = server;
+      return true;
     },
     stop() {
+      clearTimeout(this.retry);
+      this.retry = null;
       if (this.server) this.server.close();
       this.server = null;
     },
@@ -5457,6 +5517,18 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
       socket.on('data', onData);
     },
   };
+
+  // The link is on unless it's been turned off, so Pose Studio starts it itself: at startup, and with
+  // the Minecraft link. (The tests leave the port of a real Blockbench on this computer alone.)
+  function autoStartDeck() {
+    if (!(deckToggle && deckToggle.value) || deck.server) return;
+    if (globalThis.__POSE_STUDIO_TEST && !globalThis.__POSE_STUDIO_TEST.deckAutoStart) return;
+    try {
+      deck.start(true);
+    } catch (e) {
+      console.warn('[Pose Studio] Stream Deck link', e);
+    }
+  }
 
   function setDeckLink(on) {
     try {
@@ -12259,6 +12331,15 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // <changelog>
   const CHANGELOG = [
     {
+      "version": "0.80.0",
+      "date": "2026-10-07",
+      "changes": [
+        "New Stream Deck key: Connect to Minecraft. Press it, then paste (Ctrl+V) into Minecraft chat.",
+        "Stream Deck Link is now on by default.",
+        "Get the Stream Deck plugin again for the new key (More ▸ Get the Stream Deck Plugin)."
+      ]
+    },
+    {
       "version": "0.79.0",
       "date": "2026-10-07",
       "changes": [
@@ -13264,7 +13345,7 @@ ${PLUGIN_URL}`,
 
   // for the plugin's own tests only (they set this flag); nothing happens otherwise
   if (typeof globalThis !== 'undefined' && globalThis.__POSE_STUDIO_TEST) {
-    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS, sceneSpot, addLight, lightRoots, stopPath, cameraPathsOn, cameraPose, sampleCameraAnimation, playCameraAnimation, animateCamera, zoomedFov, setupClipChannel, removeClipChannel, clipKeys, clipPose, clipState, displayClips, addAnimationKey, placeClipKey, clipKeyAt, parseRecording, tidyRecording, recordingTicks, recordingAnimation, importRecording, placeRecording, keepRecording, setRecording, poseState, showRecordedWalk, displayClipBones, displayClipRoot, updateRecordingLines, entityAnimations, clipDelta, sampleAnimation, liveRotation, liveOrigin, poseMessage, entityMessage, setContentCache: (c) => (contentCache = c), liveWorldName, adoptCopies, adoptTextures, poseKind, copyName, turnedEffect, turnVector, fxTurn, prepareTurned, turnedId, saddleParts, entityMessages, entityIds, flatParts, packFlat, partPlace, proxyModelFor, anyPartOn, prepareProxy, particleList, particleEntry, placeParticle, fxMessage, fxRoots };
+    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS, sceneSpot, addLight, lightRoots, stopPath, cameraPathsOn, cameraPose, sampleCameraAnimation, playCameraAnimation, animateCamera, zoomedFov, setupClipChannel, removeClipChannel, clipKeys, clipPose, clipState, displayClips, addAnimationKey, placeClipKey, clipKeyAt, parseRecording, tidyRecording, recordingTicks, recordingAnimation, importRecording, placeRecording, keepRecording, setRecording, poseState, showRecordedWalk, displayClipBones, displayClipRoot, updateRecordingLines, entityAnimations, clipDelta, sampleAnimation, liveRotation, liveOrigin, poseMessage, entityMessage, setContentCache: (c) => (contentCache = c), liveWorldName, adoptCopies, adoptTextures, poseKind, copyName, deckConnect, autoStartDeck, turnedEffect, turnVector, fxTurn, prepareTurned, turnedId, saddleParts, entityMessages, entityIds, flatParts, packFlat, partPlace, proxyModelFor, anyPartOn, prepareProxy, particleList, particleEntry, placeParticle, fxMessage, fxRoots };
   }
 
   Plugin.register('pose_studio', {
@@ -13416,20 +13497,21 @@ ${PLUGIN_URL}`,
         }),
         deck: (deckToggle = new Toggle('pose_studio_deck', {
           name: 'Stream Deck Link', icon: 'grid_view', onChange: setDeckLink,
+          // on unless it's been turned off
           value: (() => {
             try {
-              return localStorage.getItem(DECK_KEY) === '1';
+              return localStorage.getItem(DECK_KEY) !== '0';
             } catch (e) {
-              return false;
+              return true;
             }
           })(),
-          description: 'Lets the Pose Studio Stream Deck plugin on this computer run Pose Studio (captures, cameras, toggles, time and weather).',
+          description: 'Lets the Pose Studio Stream Deck plugin on this computer run Pose Studio (connecting, captures, cameras, toggles, time and weather). On unless you turn it off.',
         })),
         deckplugin: new Action('pose_studio_deck_plugin', {
           name: 'Get the Stream Deck Plugin', icon: 'download',
           click: () => {
             Blockbench.openLink('https://github.com/liambevin2000/pose-studio/raw/main/dist/PoseStudio.streamDeckPlugin');
-            Blockbench.showMessageBox({ title: 'Pose Studio for Stream Deck', message: 'Your browser is downloading PoseStudio.streamDeckPlugin. Double-click it to add it to Stream Deck, then turn on Pose Studio ▸ More ▸ Stream Deck Link here.' });
+            Blockbench.showMessageBox({ title: 'Pose Studio for Stream Deck', message: 'Your browser is downloading PoseStudio.streamDeckPlugin. Double-click it to add it to Stream Deck. Its keys work while Blockbench is open (Pose Studio ▸ More ▸ Stream Deck Link is on unless you turned it off).' });
           },
           description: 'Downloads the Pose Studio plugin for Elgato Stream Deck: keys for captures, cameras, toggles, time and weather.',
         }),
@@ -13661,7 +13743,7 @@ ${PLUGIN_URL}`,
         showWhatsNewOnce();
         checkForUpdates(false).catch(() => {});
         removeSunTiltLighting();
-        if (deckToggle && deckToggle.value) setDeckLink(true);
+        autoStartDeck();
         try {
           if (typeof Project !== 'undefined' && Project) refreshOldEquipment();
         } catch (e) {

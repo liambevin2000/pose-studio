@@ -14,7 +14,7 @@
     </style>
   </head>
   <body>
-    <div id="offline" class="warn" hidden>Pose Studio isn't answering. In Blockbench, turn on Pose Studio ▸ More ▸ Stream Deck Link.</div>
+    <div id="offline" class="warn" hidden>Pose Studio isn't answering. Open Blockbench (and check Pose Studio ▸ More ▸ Stream Deck Link is on).</div>
     <div id="form"></div>
     <script>
       const POSE_STUDIO = 'http://127.0.0.1:19132';
@@ -97,6 +97,8 @@
           const mode = select('mode', [['next', 'Next camera'], ['prev', 'Previous camera'], ['number', 'A numbered camera']], 'next', (el) => number.forEach((n) => (n.hidden = el.value !== 'number')));
           form.append(...row('Switch to', mode), ...number);
           number.forEach((n) => (n.hidden = settings.mode !== 'number'));
+        } else if (kind === 'connect') {
+          form.append(...row('Afterwards', select('then', [['', 'Stay where I am'], ['minecraft', 'Switch to Minecraft']], ''), 'Copies the /connect command. In Minecraft, open chat, paste it (Ctrl+V) and press Enter. The key lights up once Minecraft is connected.'));
         } else if (kind === 'toggle') {
           form.append(...row('Toggle', select('which', [['sync', 'Sync Game Camera'], ['pov', 'Camera POV Viewport'], ['link', 'Connect to Minecraft']], 'sync')));
         } else if (kind === 'env') {
@@ -116,7 +118,7 @@
             if (!settings.label) settings.label = el.options[el.selectedIndex].textContent;
             form.append(...row('Action', el, 'Actions that open a window open it in Blockbench.'));
           } else {
-            form.append(...row('Action id', input('id', 'text', 'pose_studio_drop'), 'Turn on Stream Deck Link to pick from a list.'));
+            form.append(...row('Action id', input('id', 'text', 'pose_studio_drop'), 'Open Blockbench to pick from a list.'));
           }
         } else {
           const p = document.createElement('div');
