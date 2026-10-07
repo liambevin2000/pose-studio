@@ -160,6 +160,16 @@ What is recorded is where you are, where you look and what you are doing (on the
 
 **Arm swings.** Every swing of your arm is recorded: a punch (in the air too), a hit, mining, placing. It is played with the pack's own animation for what the player holds: in DragonCraft a punch with an empty hand, the pickaxe, axe, sword, hoe, shovel, mace and trident hits, and the first attack of its weapons (a second swing in time goes on to the next one). Without a pack that says, it is Minecraft's own swing. The animation follows what the Pose Studio player holds now, so change its main-hand item and the swings change with it. Needs Minecraft 26.0 or newer. Blocking, charging a bow and combo finishers are not recorded.
 
+**Export Video.** **Animate ▸ Export Video** (also on the panel) is Capture Screenshot for the whole animation: it plays the animation once in Minecraft and records the Minecraft window while it plays.
+
+- The video goes to `Videos\Pose Studio\pose_<date>_<time>.mp4` (H.264, no sound). It is the size of Minecraft's picture, so pick the aspect ratio first, as for a screenshot.
+- Minecraft comes to the front and its interface is hidden, as for a screenshot. Keep its window in view and uncovered until the message says **Saved**: what is recorded is what is on the screen there.
+- 60 frames a second. Untick **Export Video at 60 fps** for 30 (a slow computer, or a very big window). If the message says frames were held over, the computer could not keep up.
+- The first and last frame are held for a moment, so there is room to cut.
+- **Stop Animation in Minecraft** ends it early and keeps what was recorded.
+- Nothing has to be installed: it uses Windows' own screen capture and H.264 encoder.
+- For the smoothest motion, set Minecraft's maximum framerate to 60 or 120.
+
 **Smooth Movement in Minecraft** (Animate menu, on unless unticked): during Play in Game, players are pushed from place to place instead of being put there 20 times a second, so the game glides them evenly. A player that a push did not bring where it should be is put there after all. If a player drifts or turns oddly, untick it.
 
 In Minecraft a Pose Studio player's limbs move smoothly from each pose to the next (a twentieth of a second), so an animation played 20 times a second does not look stepped. `node make-mannequin-pose.js` writes the pack files that do this.

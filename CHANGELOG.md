@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.84.0 (2026-10-07)
+
+- New: Animate ▸ Export Video. Plays the animation in Minecraft and saves it as an .mp4 in the Videos folder (Pose Studio).
+- 60 fps, no sound, interface hidden. Nothing to install.
+
 ## 0.83.0 (2026-10-07)
 
 - Record Player now plays what is already on the timeline while you record, so you can act with your earlier takes.

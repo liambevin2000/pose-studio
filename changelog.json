@@ -1,5 +1,13 @@
 [
   {
+    "version": "0.84.0",
+    "date": "2026-10-07",
+    "changes": [
+      "New: Animate ▸ Export Video. Plays the animation in Minecraft and saves it as an .mp4 in the Videos folder (Pose Studio).",
+      "60 fps, no sound, interface hidden. Nothing to install."
+    ]
+  },
+  {
     "version": "0.83.0",
     "date": "2026-10-07",
     "changes": [

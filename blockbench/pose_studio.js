@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.83.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.84.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -4520,6 +4520,546 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     return true;
   }
 
+  // ---- Export Video ---------------------------------------------------------------------------------
+  // Animate ▸ Export Video: what Capture Screenshot is for a picture, for the whole animation. The
+  // animation is sent to the game, everyone is put at its first frame, and the Minecraft window is
+  // recorded while the game plays it once: to Videos\Pose Studio\pose_<date>_<time>.mp4 (H.264,
+  // no sound), the size of the window's picture, 60 frames a second (or 30). The interface is
+  // hidden as for a screenshot, and so are the cameras shown in the world.
+  //
+  // The recording is done by PowerShell, like the screenshot, with a small C# program compiled as
+  // it starts (RECORDER_CS): it reads the screen where the window is (Desktop Duplication: the
+  // picture Windows composes, as the graphics card shows it; BitBlt where that isn't to be had)
+  // on a steady clock, and hands the pictures to Windows' own H.264 encoder (Media Foundation's
+  // sink writer). Nothing has to be installed. It says READY on its output once the first picture
+  // is in (the game starts playing then), stops when a line arrives on its input, and answers
+  // SAVED|file|seconds|frames|repeated|how the screen was read|size|fps.
+  const RECORDER_CS = String.raw`using System;
+using System.Runtime.InteropServices;
+using System.Threading;
+using System.Diagnostics;
+
+// Records a rectangle of the screen to an H.264 .mp4 with Windows' own encoder (Media Foundation's
+// sink writer): frames are copied off the screen on a steady clock and handed to the encoder as
+// they come. A frame that comes late is written again for the slots it missed, so the file keeps
+// a constant frame rate.
+public static class PoseStudioRec {
+  [DllImport("mfplat.dll", ExactSpelling = true)] static extern int MFStartup(int version, int flags);
+  [DllImport("mfplat.dll", ExactSpelling = true)] static extern int MFShutdown();
+  [DllImport("mfplat.dll", ExactSpelling = true)] static extern int MFCreateMediaType(out IMFMediaType type);
+  [DllImport("mfplat.dll", ExactSpelling = true)] static extern int MFCreateSample(out IMFSample sample);
+  [DllImport("mfplat.dll", ExactSpelling = true)] static extern int MFCreateMemoryBuffer(int size, out IMFMediaBuffer buffer);
+  [DllImport("mfplat.dll", ExactSpelling = true)] static extern int MFCreateAttributes(out IMFAttributes attributes, int size);
+  [DllImport("mfreadwrite.dll", ExactSpelling = true, CharSet = CharSet.Unicode)] static extern int MFCreateSinkWriterFromURL(string url, IntPtr stream, IMFAttributes attributes, out IMFSinkWriter writer);
+  [DllImport("kernel32.dll", EntryPoint = "RtlMoveMemory")] static extern void CopyMemory(IntPtr to, IntPtr from, UIntPtr size);
+  [DllImport("winmm.dll")] static extern int timeBeginPeriod(int ms);
+  [DllImport("winmm.dll")] static extern int timeEndPeriod(int ms);
+  [DllImport("user32.dll")] static extern IntPtr GetDC(IntPtr window);
+  [DllImport("user32.dll")] static extern int ReleaseDC(IntPtr window, IntPtr dc);
+  [DllImport("gdi32.dll")] static extern IntPtr CreateCompatibleDC(IntPtr dc);
+  [DllImport("gdi32.dll")] static extern IntPtr CreateDIBSection(IntPtr dc, ref BITMAPINFOHEADER info, int usage, out IntPtr bits, IntPtr section, int offset);
+  [DllImport("gdi32.dll")] static extern IntPtr SelectObject(IntPtr dc, IntPtr obj);
+  [DllImport("gdi32.dll")] static extern bool BitBlt(IntPtr to, int x, int y, int w, int h, IntPtr from, int fromX, int fromY, int op);
+  [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr obj);
+  [DllImport("gdi32.dll")] static extern bool DeleteDC(IntPtr dc);
+
+  // the Minecraft window: to the front, its picture's place on the screen, F1
+  [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr window);
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr window, int how);
+  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr window);
+  [DllImport("user32.dll")] static extern bool GetClientRect(IntPtr window, out RECT rect);
+  [DllImport("user32.dll")] static extern bool ClientToScreen(IntPtr window, ref POINT point);
+  [DllImport("user32.dll")] static extern void keybd_event(byte key, byte scan, uint flags, UIntPtr extra);
+  [StructLayout(LayoutKind.Sequential)] struct RECT { public int left, top, right, bottom; }
+  [StructLayout(LayoutKind.Sequential)] struct POINT { public int x, y; }
+  // where a window's inside is on the screen: x, y, width, height
+  public static int[] ClientBox(IntPtr window) {
+    RECT rect; POINT corner = new POINT();
+    GetClientRect(window, out rect);
+    ClientToScreen(window, ref corner);
+    return new int[] { corner.x, corner.y, rect.right - rect.left, rect.bottom - rect.top };
+  }
+  public static void PressF1() { keybd_event(0x70, 0x3B, 0, UIntPtr.Zero); Thread.Sleep(30); keybd_event(0x70, 0x3B, 2, UIntPtr.Zero); }
+
+  [StructLayout(LayoutKind.Sequential)] struct BITMAPINFOHEADER { public int size, width, height; public short planes, bits; public int compression, imageSize, xPerMeter, yPerMeter, used, important; }
+
+  // (methods that aren't called are only there to keep the others in their places)
+  [ComImport, InterfaceType(ComInterfaceType.InterfaceIsIUnknown), Guid("2cd2d921-c447-44a7-a13c-4adabfc247e3")]
+  interface IMFAttributes {
+    void a1(); void a2(); void a3(); void a4(); void a5(); void a6(); void a7(); void a8(); void a9(); void a10(); void a11(); void a12(); void a13(); void a14(); void a15(); void a16(); void a17(); void a18();
+    [PreserveSig] int SetUINT32([In] ref Guid key, int value);
+    [PreserveSig] int SetUINT64([In] ref Guid key, long value);
+    void a21();
+    [PreserveSig] int SetGUID([In] ref Guid key, [In] ref Guid value);
+    void a23(); void a24(); void a25(); void a26(); void a27(); void a28(); void a29(); void a30();
+  }
+  [ComImport, InterfaceType(ComInterfaceType.InterfaceIsIUnknown), Guid("44ae0fa8-ea31-4109-8d2e-4cae4997c555")]
+  interface IMFMediaType {
+    void a1(); void a2(); void a3(); void a4(); void a5(); void a6(); void a7(); void a8(); void a9(); void a10(); void a11(); void a12(); void a13(); void a14(); void a15(); void a16(); void a17(); void a18();
+    [PreserveSig] int SetUINT32([In] ref Guid key, int value);
+    [PreserveSig] int SetUINT64([In] ref Guid key, long value);
+    void a21();
+    [PreserveSig] int SetGUID([In] ref Guid key, [In] ref Guid value);
+    void a23(); void a24(); void a25(); void a26(); void a27(); void a28(); void a29(); void a30();
+    void t1(); void t2(); void t3(); void t4(); void t5();
+  }
+  [ComImport, InterfaceType(ComInterfaceType.InterfaceIsIUnknown), Guid("c40a00f2-b93a-4d80-ae8c-5a1c634f58e4")]
+  interface IMFSample {
+    void a1(); void a2(); void a3(); void a4(); void a5(); void a6(); void a7(); void a8(); void a9(); void a10(); void a11(); void a12(); void a13(); void a14(); void a15(); void a16(); void a17(); void a18(); void a19(); void a20();
+    void a21(); void a22(); void a23(); void a24(); void a25(); void a26(); void a27(); void a28(); void a29(); void a30();
+    void s1(); void s2(); void s3();
+    [PreserveSig] int SetSampleTime(long time);
+    void s5();
+    [PreserveSig] int SetSampleDuration(long duration);
+    void s7(); void s8(); void s9();
+    [PreserveSig] int AddBuffer(IMFMediaBuffer buffer);
+    void s11(); void s12(); void s13(); void s14();
+  }
+  [ComImport, InterfaceType(ComInterfaceType.InterfaceIsIUnknown), Guid("045FA593-8799-42b8-BC8D-8968C6453507")]
+  interface IMFMediaBuffer {
+    [PreserveSig] int Lock(out IntPtr data, out int max, out int current);
+    [PreserveSig] int Unlock();
+    void b3();
+    [PreserveSig] int SetCurrentLength(int length);
+    void b5();
+  }
+  [ComImport, InterfaceType(ComInterfaceType.InterfaceIsIUnknown), Guid("3137f1cd-fe5e-4805-a5d8-fb477448cb3d")]
+  interface IMFSinkWriter {
+    [PreserveSig] int AddStream(IMFMediaType type, out int stream);
+    [PreserveSig] int SetInputMediaType(int stream, IMFMediaType type, IMFAttributes parameters);
+    [PreserveSig] int BeginWriting();
+    [PreserveSig] int WriteSample(int stream, IMFSample sample);
+    void w5(); void w6(); void w7(); void w8();
+    [PreserveSig] int DoFinalize();
+    void w10(); void w11();
+  }
+
+  // ---- the fast way to read the screen: Desktop Duplication (the picture Windows composes, read
+  // from the graphics card as it's shown). Used when the rectangle is all on one screen; BitBlt
+  // otherwise, or when this isn't to be had. ----
+  [DllImport("dxgi.dll")] static extern int CreateDXGIFactory1(ref Guid iid, out IntPtr factory);
+  [DllImport("d3d11.dll")] static extern int D3D11CreateDevice(IntPtr adapter, int driverType, IntPtr software, int flags, IntPtr levels, int levelCount, int sdk, out IntPtr device, out int level, out IntPtr context);
+
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)] struct OUTPUT_DESC { [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string name; public int left, top, right, bottom, attached, rotation; public IntPtr monitor; }
+  [StructLayout(LayoutKind.Sequential)] struct FRAME_INFO { public long presented, mouse; public int frames, coalesced, masked, pointerX, pointerY, pointerVisible, metadata, shape; }
+  [StructLayout(LayoutKind.Sequential)] struct TEXTURE_DESC { public int width, height, mips, array, format, samples, quality, usage, bind, cpu, misc; }
+  [StructLayout(LayoutKind.Sequential)] struct BOX { public int left, top, front, right, bottom, back; }
+  [StructLayout(LayoutKind.Sequential)] struct MAPPED { public IntPtr data; public int rowPitch, depthPitch; }
+
+  [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int EnumFn(IntPtr self, int index, out IntPtr found);
+  [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int OutputDescFn(IntPtr self, out OUTPUT_DESC desc);
+  [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int DuplicateFn(IntPtr self, IntPtr device, out IntPtr duplication);
+  [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int AcquireFn(IntPtr self, int timeout, out FRAME_INFO info, out IntPtr resource);
+  [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int ReleaseFrameFn(IntPtr self);
+  [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int CreateTextureFn(IntPtr self, ref TEXTURE_DESC desc, IntPtr data, out IntPtr texture);
+  [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate void TextureDescFn(IntPtr self, out TEXTURE_DESC desc);
+  [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate void CopyRegionFn(IntPtr self, IntPtr to, int toSub, int toX, int toY, int toZ, IntPtr from, int fromSub, ref BOX box);
+  [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int MapFn(IntPtr self, IntPtr resource, int sub, int type, int flags, out MAPPED mapped);
+  [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate void UnmapFn(IntPtr self, IntPtr resource, int sub);
+
+  // a method of a COM object, by its place in the object's table
+  static T Method<T>(IntPtr com, int place) where T : class {
+    return (T)(object)Marshal.GetDelegateForFunctionPointer(Marshal.ReadIntPtr(Marshal.ReadIntPtr(com), place * IntPtr.Size), typeof(T));
+  }
+  static void Free(ref IntPtr com) { if (com != IntPtr.Zero) Marshal.Release(com); com = IntPtr.Zero; }
+
+  sealed class Duplicator {
+    IntPtr device, context, duplication, staging;
+    AcquireFn acquire; ReleaseFrameFn release; CopyRegionFn copy; MapFn map; UnmapFn unmap;
+    int width, height; BOX box;
+    public string Why = "";
+    public int Lost; // the error that ended it
+
+    // Sets up for a rectangle of the screen; false (and Why) when it can't be done this way.
+    public bool Open(int x, int y, int w, int h) {
+      width = w; height = h;
+      IntPtr factory = IntPtr.Zero, adapter = IntPtr.Zero, output = IntPtr.Zero, output1 = IntPtr.Zero;
+      try {
+        Guid factoryId = new Guid("770aae78-f26f-4dba-a829-253c83d1b387"), output1Id = new Guid("00cddea8-939b-4b83-a340-a685226666cc");
+        if (CreateDXGIFactory1(ref factoryId, out factory) < 0) { Why = "no DXGI"; return false; }
+        bool found = false;
+        for (int a = 0; !found && Method<EnumFn>(factory, 12)(factory, a, out adapter) >= 0; a++) {
+          for (int o = 0; Method<EnumFn>(adapter, 7)(adapter, o, out output) >= 0; o++) {
+            OUTPUT_DESC desc;
+            Method<OutputDescFn>(output, 7)(output, out desc);
+            if (desc.attached != 0 && x >= desc.left && y >= desc.top && x + w <= desc.right && y + h <= desc.bottom) {
+              if (desc.rotation > 1) { Why = "the screen is turned"; return false; }
+              box = new BOX { left = x - desc.left, top = y - desc.top, front = 0, right = x - desc.left + w, bottom = y - desc.top + h, back = 1 };
+              found = true;
+              break;
+            }
+            Free(ref output);
+          }
+          if (!found) Free(ref adapter);
+        }
+        if (!found) { Why = "the window isn't all on one screen"; return false; }
+        int level;
+        if (D3D11CreateDevice(adapter, 0, IntPtr.Zero, 0, IntPtr.Zero, 0, 7, out device, out level, out context) < 0) { Why = "no Direct3D 11 device"; return false; }
+        if (Marshal.QueryInterface(output, ref output1Id, out output1) < 0) { Why = "no IDXGIOutput1"; return false; }
+        int hr = Method<DuplicateFn>(output1, 22)(output1, device, out duplication);
+        if (hr < 0) { Why = "the screen can't be duplicated (0x" + hr.ToString("X8") + ")"; return false; }
+        TEXTURE_DESC desc2 = new TEXTURE_DESC { width = w, height = h, mips = 1, array = 1, format = 87, samples = 1, quality = 0, usage = 3, bind = 0, cpu = 0x20000, misc = 0 };
+        if (Method<CreateTextureFn>(device, 5)(device, ref desc2, IntPtr.Zero, out staging) < 0) { Why = "no texture to read into"; return false; }
+        acquire = Method<AcquireFn>(duplication, 8); release = Method<ReleaseFrameFn>(duplication, 14);
+        // (the first picture a duplication hands out can be empty: it's taken and let go)
+        FRAME_INFO first; IntPtr none;
+        if (acquire(duplication, 200, out first, out none) >= 0) { Marshal.Release(none); release(duplication); }
+        copy = Method<CopyRegionFn>(context, 46); map = Method<MapFn>(context, 14); unmap = Method<UnmapFn>(context, 15);
+        return true;
+      } catch (Exception e) {
+        Why = e.Message;
+        return false;
+      } finally {
+        Free(ref output1); Free(ref output); Free(ref adapter); Free(ref factory);
+      }
+    }
+
+    // The screen now, into bits (width x height, 4 bytes a pixel, rows from the top). 1: a new
+    // picture, 0: nothing changed on the screen (bits are left as they were), -1: it can't go on.
+    public int Grab(IntPtr bits) {
+      FRAME_INFO info; IntPtr resource;
+      int hr = acquire(duplication, 0, out info, out resource);
+      if (hr == unchecked((int)0x887A0027)) return 0; // nothing new
+      if (hr < 0) { Lost = hr; return -1; }
+      IntPtr texture = IntPtr.Zero;
+      try {
+        Guid textureId = new Guid("6f15aaf2-d208-4e89-9ab4-489535d34f9c");
+        if (Marshal.QueryInterface(resource, ref textureId, out texture) < 0) return -1;
+        TEXTURE_DESC desc;
+        Method<TextureDescFn>(texture, 10)(texture, out desc);
+        if (desc.format != 87 && desc.format != 91) return -1; // (not 8-bit BGRA: an HDR surface)
+        copy(context, staging, 0, 0, 0, 0, texture, 0, ref box);
+      } finally {
+        Free(ref texture);
+        Marshal.Release(resource);
+        release(duplication);
+      }
+      MAPPED mapped;
+      if (map(context, staging, 0, 1, 0, out mapped) < 0) return -1;
+      try {
+        int row = width * 4;
+        if (mapped.rowPitch == row) CopyMemory(bits, mapped.data, (UIntPtr)(uint)(row * height));
+        else for (int line = 0; line < height; line++) CopyMemory(IntPtr.Add(bits, line * row), IntPtr.Add(mapped.data, line * mapped.rowPitch), (UIntPtr)(uint)row);
+      } finally {
+        unmap(context, staging, 0);
+      }
+      return 1;
+    }
+
+    public void Close() { Free(ref staging); Free(ref duplication); Free(ref context); Free(ref device); }
+  }
+
+  static Guid G(string s) { return new Guid(s); }
+  static void Check(int hr, string what) { if (hr < 0) throw new Exception(what + " failed (0x" + hr.ToString("X8") + ")"); }
+
+  static volatile bool stopAsked;
+
+  public static int Frames, Repeated, Held, Restarts;
+  public static string Way = "";
+
+  // Records the rectangle (x, y, width, height: screen pixels) for at most seconds, or until a
+  // line arrives on the standard input. ready is called when the first picture is in. Returns
+  // the seconds recorded.
+  public static double Record(string file, int x, int y, int width, int height, int fps, int bitrate, double seconds, Action ready) {
+    width &= ~1; height &= ~1; // (H.264 takes even sizes)
+    if (width < 16 || height < 16) throw new Exception("the window is too small to record");
+    Guid MAJOR = G("48eba18e-f8c9-4687-bf11-0a74c9f96a8f"), SUBTYPE = G("f7e34c9a-42e8-4714-b74b-cb29d72c35e5"), BITRATE = G("20332624-fb0d-4d9e-bd0d-cbf6786c102e");
+    Guid INTERLACE = G("e2724bb8-e676-4806-b4b2-a8d6efb44ccd"), SIZE = G("1652c33d-d6b2-4012-b834-72030849a37d"), RATE = G("c459a2e8-3d2c-4e44-b132-fee5156c7bb0");
+    Guid ASPECT = G("c6376a1e-8d0a-4027-be45-6d9a0ad39bb6"), STRIDE = G("644b4e48-1e02-4516-b0eb-c01ca9d49ac6"), PROFILE = G("ad76a80b-2d5c-4e0b-b375-64e520137036");
+    Guid VIDEO = G("73646976-0000-0010-8000-00AA00389B71"), H264 = G("34363248-0000-0010-8000-00AA00389B71"), RGB32 = G("00000016-0000-0010-8000-00AA00389B71");
+    Guid HARDWARE = G("a634a91c-822b-41b9-a494-4de4643612b0");
+    long size = ((long)width << 32) | (uint)height, rate = ((long)fps << 32) | 1u, square = (1L << 32) | 1u;
+    int bytes = width * height * 4;
+    long slot = 10000000L / fps;
+
+    Check(MFStartup(0x00020070, 0), "starting Media Foundation");
+    IMFSinkWriter writer = null;
+    IntPtr screen = IntPtr.Zero, memory = IntPtr.Zero, bitmap = IntPtr.Zero, bits = IntPtr.Zero, old = IntPtr.Zero;
+    timeBeginPeriod(1);
+    try {
+      IMFAttributes attributes;
+      Check(MFCreateAttributes(out attributes, 1), "MFCreateAttributes");
+      attributes.SetUINT32(ref HARDWARE, 1); // the graphics card's encoder, when it has one
+      Check(MFCreateSinkWriterFromURL(file, IntPtr.Zero, attributes, out writer), "creating the video file");
+
+      IMFMediaType output;
+      Check(MFCreateMediaType(out output), "MFCreateMediaType");
+      output.SetGUID(ref MAJOR, ref VIDEO); output.SetGUID(ref SUBTYPE, ref H264);
+      output.SetUINT32(ref BITRATE, bitrate); output.SetUINT32(ref INTERLACE, 2); output.SetUINT32(ref PROFILE, 100);
+      output.SetUINT64(ref SIZE, size); output.SetUINT64(ref RATE, rate); output.SetUINT64(ref ASPECT, square);
+      int stream;
+      Check(writer.AddStream(output, out stream), "setting up H.264 at " + width + "x" + height);
+
+      IMFMediaType input;
+      Check(MFCreateMediaType(out input), "MFCreateMediaType");
+      input.SetGUID(ref MAJOR, ref VIDEO); input.SetGUID(ref SUBTYPE, ref RGB32);
+      input.SetUINT32(ref INTERLACE, 2); input.SetUINT32(ref STRIDE, width * 4); // (rows from the top down)
+      input.SetUINT64(ref SIZE, size); input.SetUINT64(ref RATE, rate); input.SetUINT64(ref ASPECT, square);
+      Check(writer.SetInputMediaType(stream, input, null), "setting up the encoder for " + width + "x" + height);
+      Check(writer.BeginWriting(), "starting the encoder");
+
+      // a bitmap the screen is copied into, its pixels in memory
+      BITMAPINFOHEADER info = new BITMAPINFOHEADER();
+      info.size = Marshal.SizeOf(typeof(BITMAPINFOHEADER)); info.width = width; info.height = -height; info.planes = 1; info.bits = 32;
+      screen = GetDC(IntPtr.Zero);
+      memory = CreateCompatibleDC(screen);
+      bitmap = CreateDIBSection(memory, ref info, 0, out bits, IntPtr.Zero, 0);
+      if (bitmap == IntPtr.Zero || bits == IntPtr.Zero) throw new Exception("no memory for a " + width + "x" + height + " frame");
+      old = SelectObject(memory, bitmap);
+
+      // the screen: read from the graphics card when that can be done, copied with BitBlt otherwise
+      Duplicator fast = new Duplicator();
+      if (!fast.Open(x, y, width, height)) { Way = "BitBlt (" + fast.Why + ")"; fast.Close(); fast = null; } else Way = "Desktop Duplication";
+      bool any = false;
+      int restarts = 0;
+
+      stopAsked = false;
+      Thread listener = new Thread(() => { try { if (Console.In.ReadLine() != null) stopAsked = true; } catch { } });
+      listener.IsBackground = true;
+      listener.Start();
+
+      Frames = 0; Repeated = 0; Held = 0;
+      Stopwatch clock = new Stopwatch();
+      bool started = false;
+      long next = 0; // the next slot to fill
+      while (true) {
+        if (started) {
+          double now = clock.Elapsed.TotalSeconds;
+          if (stopAsked || now >= seconds) break;
+          long due = (long)(now * fps);
+          if (due < next) { Thread.Sleep(1); continue; }
+        }
+        {
+          int got = fast != null ? fast.Grab(bits) : 2;
+          if (got < 0) {
+            // it was lost (a change of screen mode, a secure screen…): started again, a few times; BitBlt when that fails
+            int lost = fast.Lost;
+            fast.Close(); fast = null;
+            if (restarts++ < 8) { fast = new Duplicator(); if (!fast.Open(x, y, width, height)) { fast.Close(); fast = null; } }
+            if (fast == null) Way += ", then BitBlt (0x" + lost.ToString("X8") + ")";
+            got = 2;
+          }
+          if (got == 0 && !any) got = 2; // (nothing to hold yet)
+          if (got == 2) BitBlt(memory, 0, 0, width, height, screen, x, y, 0x00CC0020);
+          if (got == 0) Held++;
+          any = true;
+        }
+        if (!started) { started = true; clock.Start(); if (ready != null) ready(); }
+        long until = Math.Max(next, Math.Min((long)(clock.Elapsed.TotalSeconds * fps), next + 3)); // late: it fills the slots it missed (three at most)
+        for (long n = next; n <= until; n++) {
+          IMFMediaBuffer buffer;
+          Check(MFCreateMemoryBuffer(bytes, out buffer), "MFCreateMemoryBuffer");
+          IntPtr data; int max, current;
+          Check(buffer.Lock(out data, out max, out current), "locking a frame");
+          CopyMemory(data, bits, (UIntPtr)(uint)bytes);
+          buffer.Unlock();
+          buffer.SetCurrentLength(bytes);
+          IMFSample sample;
+          Check(MFCreateSample(out sample), "MFCreateSample");
+          sample.AddBuffer(buffer);
+          sample.SetSampleTime(n * slot);
+          sample.SetSampleDuration(slot);
+          Check(writer.WriteSample(stream, sample), "encoding a frame");
+          Marshal.ReleaseComObject(sample);
+          Marshal.ReleaseComObject(buffer);
+          Frames++;
+          if (n > next) Repeated++;
+        }
+        long behind = (long)(clock.Elapsed.TotalSeconds * fps);
+        next = Math.Max(until + 1, behind - 3 > until ? behind : until + 1); // (far behind: the slots are left out, the picture holds)
+      }
+      Restarts = restarts;
+      if (fast != null) fast.Close();
+      Check(writer.DoFinalize(), "finishing the video file");
+      return clock.Elapsed.TotalSeconds;
+    } finally {
+      timeEndPeriod(1);
+      if (old != IntPtr.Zero) SelectObject(memory, old);
+      if (bitmap != IntPtr.Zero) DeleteObject(bitmap);
+      if (memory != IntPtr.Zero) DeleteDC(memory);
+      if (screen != IntPtr.Zero) ReleaseDC(IntPtr.Zero, screen);
+      if (writer != null) Marshal.ReleaseComObject(writer);
+      MFShutdown();
+    }
+  }
+}
+`;
+
+  const RECORD_PS1 = String.raw`$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+try {
+  # the recorder's C# comes in on the first line of the standard input (it's too long for a command line)
+  Add-Type -TypeDefinition ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([Console]::In.ReadLine())))
+  $dir = Join-Path ([Environment]::GetFolderPath('MyVideos')) 'Pose Studio'
+  New-Item -ItemType Directory -Force $dir | Out-Null
+  $Out = Join-Path $dir ('pose_' + (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss') + '.mp4')
+  [PoseStudioRec]::SetProcessDPIAware() | Out-Null
+  $proc = Get-Process | Where-Object { $_.ProcessName -like 'Minecraft.Windows*' -and $_.MainWindowHandle -ne 0 } | Select-Object -First 1
+  if (-not $proc) { throw 'Minecraft window not found' }
+  $hwnd = $proc.MainWindowHandle
+  if ([PoseStudioRec]::IsIconic($hwnd)) { [PoseStudioRec]::ShowWindow($hwnd, 9) | Out-Null }
+  [PoseStudioRec]::SetForegroundWindow($hwnd) | Out-Null
+  Start-Sleep -Milliseconds 600
+  # F1 hides Minecraft's whole interface (packs' own HUDs too, which /hud doesn't reach); again after
+  [PoseStudioRec]::PressF1()
+  Start-Sleep -Milliseconds 350
+  $box = [PoseStudioRec]::ClientBox($hwnd)
+  $fps = __FPS__
+  # about a third of a bit a pixel a frame: plenty to edit with
+  $bitrate = [int][Math]::Max(8000000, [Math]::Min(150000000, [double]$box[2] * $box[3] * $fps * 0.3))
+  try {
+    $took = [PoseStudioRec]::Record($Out, $box[0], $box[1], $box[2], $box[3], $fps, $bitrate, __SECONDS__, [Action]{ [Console]::Out.WriteLine('READY'); [Console]::Out.Flush() })
+  } finally {
+    [PoseStudioRec]::PressF1()
+  }
+  [Console]::Out.WriteLine(('SAVED|{0}|{1:N2}|{2}|{3}|{4}|{5}x{6}|{7}' -f $Out, $took, [PoseStudioRec]::Frames, [PoseStudioRec]::Repeated, [PoseStudioRec]::Way, ($box[2] -band -2), ($box[3] -band -2), $fps))
+} catch {
+  $e = $_.Exception
+  while ($e.InnerException) { $e = $e.InnerException }
+  [Console]::Error.WriteLine('ERROR|' + $e.Message)
+  exit 3
+}
+`;
+
+  const VIDEO_FPS_KEY = 'pose_studio_video_fps';
+  const VIDEO_LEAD = 300; // ms the first frame is held before the animation starts
+  const VIDEO_TAIL = 500; // ms the last frame is held
+  let exporting = null; // the recorder, while a video is being exported
+  let videoRate = (() => {
+    try {
+      return localStorage.getItem(VIDEO_FPS_KEY) === '30' ? 30 : 60;
+    } catch (e) {
+      return 60;
+    }
+  })();
+  const videoFps = () => videoRate;
+
+  // Starts recording the Minecraft window, for `seconds` at most. { ready: resolves when the first
+  // picture is in, done: resolves with { file, seconds, frames, repeated, way, size, fps } when
+  // the file is written, stop() }.
+  function startRecorder(seconds, fps) {
+    const childProcess = nodeRequire('child_process', 'run PowerShell to record the Minecraft window');
+    if (!childProcess) throw new Error('PowerShell is not available');
+    const B = bufferClass();
+    const script = RECORD_PS1.replace('__FPS__', String(fps)).replace('__SECONDS__', String(Math.ceil(seconds)));
+    const child = childProcess.spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', B.from(script, 'utf16le').toString('base64')], { windowsHide: true });
+    let out = '';
+    let err = '';
+    let nowReady = null;
+    let notReady = null;
+    const ready = new Promise((resolve, reject) => {
+      nowReady = resolve;
+      notReady = reject;
+    });
+    const done = new Promise((resolve, reject) => {
+      const failed = (e) => {
+        notReady(e);
+        reject(e);
+      };
+      child.on('error', failed);
+      child.stdout.on('data', (d) => {
+        out += d;
+        if (/(^|\n)READY/.test(out)) nowReady();
+      });
+      child.stderr.on('data', (d) => (err += d));
+      child.on('close', (code) => {
+        const saved = out.split(/\r?\n/).find((line) => line.startsWith('SAVED|'));
+        if (code === 0 && saved) {
+          const [, file, took, frames, repeated, way, size, rate] = saved.split('|');
+          return resolve({ file, seconds: Number(String(took).replace(',', '.')) || 0, frames: Number(frames) || 0, repeated: Number(repeated) || 0, way, size, fps: Number(rate) || fps });
+        }
+        const said = err.split(/\r?\n/).find((line) => line.startsWith('ERROR|'));
+        failed(new Error(said ? said.slice(6) : `the recorder stopped (${code})${err ? ': ' + err.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 300) : ''}`));
+      });
+    });
+    ready.catch(() => {});
+    done.catch(() => {});
+    child.stdin.on('error', () => {});
+    child.stdin.write(B.from(RECORDER_CS, 'utf8').toString('base64') + '\n');
+    return {
+      ready, done,
+      stop() {
+        try {
+          child.stdin.write('stop\n');
+        } catch (e) {
+          // it has ended already
+        }
+      },
+    };
+  }
+
+  async function exportVideo() {
+    if (exporting) {
+      Blockbench.showQuickMessage('A video is being exported: Stop Animation in Minecraft ends it', 3000);
+      return false;
+    }
+    if (!requireConnection()) return false;
+    const Anim = blockbenchAnimation();
+    const anim = Anim && (Anim.selected || (Anim.all || []).find((a) => a.name === CAMERA_ANIMATION));
+    if (!anim || typeof Timeline === 'undefined' || typeof Animator === 'undefined') {
+      Blockbench.showQuickMessage('Nothing is animated yet: Animate ▸ Animate Camera, or Add Animation Keyframe on a player or mob', 3500);
+      return false;
+    }
+    if (typeof Modes !== 'undefined' && !Modes.animate) {
+      Blockbench.showQuickMessage('Open the Animate tab to export the animation', 3500);
+      return false;
+    }
+    // (as Play Animation in Minecraft: the game camera flies the active camera when it's synced or animated)
+    const active = activeCamera();
+    const sampled = sampleAnimation(anim, active && (cameraSync || hasOwnKeys(anim, active)) ? active : null);
+    const { count, camera, tracks } = sampled;
+    if (count < 2 || (!camera && !tracks.size)) {
+      Blockbench.showQuickMessage('Nothing moves in this animation yet', 3000);
+      return false;
+    }
+    const length = (count - 1) * 0.05;
+    const fps = videoFps();
+    endPathPlay();
+    pathPlaying = true;
+    let recorder = null;
+    try {
+      await hideCameraMarks();
+      await sendAnimation(sampled, { loop: false, hud: false });
+      // everyone at the first frame, and the camera, before the first picture is taken
+      for (const track of tracks.values()) {
+        const first = track.frames.find(([i]) => i === 0);
+        if (first) await link.command(`scriptevent ${track.k === 'e' ? 'pose:ent' : 'pose:set'} ${first[1]}`).catch(logFailure);
+      }
+      if (camera && camera[0]) {
+        const c = camera[0];
+        await link.command(`scriptevent pose:cam ${JSON.stringify({ p: c.p, t: c.p.map((v, i) => round(v + c.dir[i] * 16, 3)), f: c.f })}`).catch(logFailure);
+      }
+      await link.command('hud @s hide all').catch(logFailure);
+      Blockbench.showQuickMessage(`Exporting ${length.toFixed(1)} s of video… keep Minecraft in view`, 4000);
+      recorder = startRecorder(length + (VIDEO_LEAD + VIDEO_TAIL) / 1000 + 5, fps);
+      exporting = recorder;
+      await Promise.race([recorder.ready, sleep(20000).then(() => Promise.reject(new Error("the recorder didn't start")))]);
+      await sleep(VIDEO_LEAD);
+      await link.command('scriptevent pose:pathplay {"t":0}');
+      // (it ends early when Stop Animation in Minecraft is clicked: see stopPath)
+      await Promise.race([sleep(length * 1000 + VIDEO_TAIL), recorder.done.catch(() => {})]);
+      recorder.stop();
+      const video = await recorder.done;
+      const smooth = video.repeated > video.frames * 0.05 ? `, ${video.repeated} of its ${video.frames} frames held over (the computer couldn't keep up: untick Export Video at 60 fps, or make the Minecraft window smaller)` : '';
+      Blockbench.showQuickMessage(`Saved ${video.file} (${video.seconds.toFixed(1)} s, ${video.size}, ${video.fps} fps${smooth})`, smooth ? 9000 : 5000);
+      return video;
+    } catch (e) {
+      if (recorder) recorder.stop();
+      Blockbench.showMessageBox({ title: 'Pose Studio: Export Video failed', message: String((e && e.message) || e) });
+      return false;
+    } finally {
+      exporting = null;
+      link.command('hud @s reset all').catch(logFailure);
+      stopPath(); // everyone back to where Blockbench has them, the game camera to the scene's
+      try {
+        focusWindow('blockbench');
+      } catch (e) {
+        // come back to Blockbench yourself
+      }
+    }
+  }
+
   function endPathPlay() {
     if (pathPlayTimer) clearTimeout(pathPlayTimer);
     pathPlayTimer = null;
@@ -4529,6 +5069,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
   }
 
   function stopPath() {
+    if (exporting) exporting.stop(); // (a video being exported ends here, and is kept)
     if (link.connected) send('scriptevent pose:pathstop');
     endPathPlay();
   }
@@ -5164,7 +5705,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
           '_',
           locations,
           { name: 'Camera Settings', id: 'pose_studio_camera_menu', icon: 'photo_camera_front', children: [aspect, a.timeweather, a.follow] },
-          ...(cameraPathsOn() ? [{ name: 'Animate (experimental)', id: 'pose_studio_animate_menu', icon: 'movie_filter', children: [a.record, '_', a.camanimate, a.animkey, '_', a.camanimplay, a.camanimstop, a.smoothplay] }] : []),
+          ...(cameraPathsOn() ? [{ name: 'Animate (experimental)', id: 'pose_studio_animate_menu', icon: 'movie_filter', children: [a.record, '_', a.camanimate, a.animkey, '_', a.camanimplay, a.camanimstop, a.smoothplay, '_', a.exportvideo, a.video60] }] : []),
           { name: 'Stream Deck', id: 'pose_studio_deck_menu', icon: 'grid_view', children: [a.deck, a.deckplugin] },
           '_',
           a.comparegame,
@@ -5196,7 +5737,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
           { name: 'Lights', id: 'pose_studio_light_menu', icon: 'lightbulb', children: [a.addlight, a.lightlevel] },
           { name: 'Particles', id: 'pose_studio_fx_menu', icon: 'auto_awesome', children: [a.addfx, a.editfx] },
           { name: 'Camera', id: 'pose_studio_camera_menu', icon: 'photo_camera_front', children: [a.pov, a.camera, a.playerview, a.cameramarks, '_', a.fov, aspect, a.timeweather, '_', a.lookcam, a.follow] },
-          ...(cameraPathsOn() ? [{ name: 'Animate (experimental)', id: 'pose_studio_animate_menu', icon: 'movie_filter', children: [a.record, '_', a.camanimate, a.animkey, '_', a.camanimplay, a.camanimstop, a.smoothplay] }] : []),
+          ...(cameraPathsOn() ? [{ name: 'Animate (experimental)', id: 'pose_studio_animate_menu', icon: 'movie_filter', children: [a.record, '_', a.camanimate, a.animkey, '_', a.camanimplay, a.camanimstop, a.smoothplay, '_', a.exportvideo, a.video60] }] : []),
           '_',
           a.scan,
           a.scanmore,
@@ -5497,6 +6038,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
                 <div class="ps-btn ps-wide" :class="{ 'ps-on': s.recording }" @click="run('pose_studio_record')" title="Records you in Minecraft; click again to stop and bring it in on a Pose Studio player"><i class="material-icons">fiber_manual_record</i><span>{{ s.recording ? 'Stop Recording' : 'Record Player' }}</span></div>
                 <div class="ps-btn" @click="run('pose_studio_cam_anim_play')" title="The game flies the camera's animation"><i class="material-icons">smart_display</i><span>Play in Game</span></div>
                 <div class="ps-btn" @click="run('pose_studio_cam_anim_stop')" title="Stops the animation in the game"><i class="material-icons">stop</i><span>Stop</span></div>
+                <div class="ps-btn ps-wide" @click="run('pose_studio_export_video')" title="Plays the animation in Minecraft and records it to an .mp4 in Videos\\Pose Studio"><i class="material-icons">movie</i><span>Export Video</span></div>
               </div>
               <div style="margin-top: 4px">
                 <div v-for="name in s.cameras" :key="name" class="ps-cam" :class="{ 'ps-on': name === s.camera }" @click="pickCamera(name)" :title="name === s.camera ? 'The active camera' : 'Make this the active camera'">
@@ -12617,6 +13159,14 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // <changelog>
   const CHANGELOG = [
     {
+      "version": "0.84.0",
+      "date": "2026-10-07",
+      "changes": [
+        "New: Animate ▸ Export Video. Plays the animation in Minecraft and saves it as an .mp4 in the Videos folder (Pose Studio).",
+        "60 fps, no sound, interface hidden. Nothing to install."
+      ]
+    },
+    {
       "version": "0.83.0",
       "date": "2026-10-07",
       "changes": [
@@ -13657,7 +14207,7 @@ ${PLUGIN_URL}`,
 
   // for the plugin's own tests only (they set this flag); nothing happens otherwise
   if (typeof globalThis !== 'undefined' && globalThis.__POSE_STUDIO_TEST) {
-    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS, sceneSpot, addLight, lightRoots, stopPath, cameraPathsOn, cameraPose, sampleCameraAnimation, playCameraAnimation, animateCamera, zoomedFov, setupClipChannel, removeClipChannel, clipKeys, clipPose, clipState, displayClips, addAnimationKey, placeClipKey, clipKeyAt, parseRecording, tidyRecording, recordingTicks, recordingAnimation, importRecording, placeRecording, keepRecording, setRecording, poseState, showRecordedWalk, displayClipBones, displayClipRoot, updateRecordingLines, entityAnimations, clipDelta, sampleAnimation, liveRotation, liveOrigin, poseMessage, entityMessage, setContentCache: (c) => (contentCache = c), liveWorldName, adoptCopies, adoptTextures, poseKind, copyName, deckConnect, autoStartDeck, swingStates, heldItemAnswers, cameraMarkMessage, hideCameraMarks, cameraMarksShown, setCameraMarks, sendTimelineForTake, placeRecording, sampleAnimation, sendAnimation, turnedEffect, turnVector, fxTurn, prepareTurned, turnedId, saddleParts, entityMessages, entityIds, flatParts, packFlat, partPlace, proxyModelFor, anyPartOn, prepareProxy, particleList, particleEntry, placeParticle, fxMessage, fxRoots };
+    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS, sceneSpot, addLight, lightRoots, stopPath, cameraPathsOn, cameraPose, sampleCameraAnimation, playCameraAnimation, animateCamera, zoomedFov, setupClipChannel, removeClipChannel, clipKeys, clipPose, clipState, displayClips, addAnimationKey, placeClipKey, clipKeyAt, parseRecording, tidyRecording, recordingTicks, recordingAnimation, importRecording, placeRecording, keepRecording, setRecording, poseState, showRecordedWalk, displayClipBones, displayClipRoot, updateRecordingLines, entityAnimations, clipDelta, sampleAnimation, liveRotation, liveOrigin, poseMessage, entityMessage, setContentCache: (c) => (contentCache = c), liveWorldName, adoptCopies, adoptTextures, poseKind, copyName, deckConnect, autoStartDeck, swingStates, heldItemAnswers, cameraMarkMessage, hideCameraMarks, cameraMarksShown, setCameraMarks, sendTimelineForTake, placeRecording, sampleAnimation, sendAnimation, exportVideo, startRecorder, RECORDER_CS, RECORD_PS1, turnedEffect, turnVector, fxTurn, prepareTurned, turnedId, saddleParts, entityMessages, entityIds, flatParts, packFlat, partPlace, proxyModelFor, anyPartOn, prepareProxy, particleList, particleEntry, placeParticle, fxMessage, fxRoots };
   }
 
   Plugin.register('pose_studio', {
@@ -13925,6 +14475,22 @@ ${PLUGIN_URL}`,
         camanimplay: new Action('pose_studio_cam_anim_play', {
           name: 'Play Animation in Minecraft', icon: 'smart_display', click: () => playCameraAnimation(),
           description: 'Plays the animation open in the Animate tab in Minecraft, a frame every game tick: the camera, and every animated player and mob.',
+        }),
+        exportvideo: new Action('pose_studio_export_video', {
+          name: 'Export Video', icon: 'movie', click: () => exportVideo(),
+          description: 'Plays the animation in Minecraft and records the Minecraft window while it plays, to an .mp4 in Videos\\Pose Studio (no interface in the picture, no sound). Like Capture Screenshot, for the whole animation.',
+        }),
+        video60: new Toggle('pose_studio_video_60', {
+          name: 'Export Video at 60 fps', icon: 'sixty_fps', value: videoFps() === 60,
+          description: 'Export Video records 60 pictures a second. Unticked: 30 (for a slow computer, or a very big Minecraft window).',
+          onChange: (value) => {
+            videoRate = value ? 60 : 30;
+            try {
+              localStorage.setItem(VIDEO_FPS_KEY, value ? '60' : '30');
+            } catch (e) {
+              // used until Blockbench restarts
+            }
+          },
         }),
         camanimstop: new Action('pose_studio_cam_anim_stop', {
           name: 'Stop Animation in Minecraft', icon: 'stop', click: () => stopPath(),
