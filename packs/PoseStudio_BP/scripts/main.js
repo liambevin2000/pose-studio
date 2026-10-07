@@ -348,7 +348,10 @@ function setFx(player, data) {
 }
 
 // `pose:rec {"on":1,"count":3}` starts recording the player who ran it, after a countdown of that
-// many seconds; `pose:rec {"on":0,op}` stops and answers with the recording: `R|first tick|…` items
+// many seconds. With "play":1 it's a take acted along with the animation that was just sent
+// (pose:path, pose:track…: the players and mobs already on Blockbench's timeline): everyone in it
+// stands at its first frame through the countdown, and it starts playing on the very tick the
+// recording starts, so tick n of the recording is tick n of the animation; `pose:rec {"on":0,op}` stops and answers with the recording: `R|first tick|…` items
 // of ticks, each tick: x.y.z (hundredths of a block from the anchor), yaw.pitch (tenths of a degree, where the
 // player looks) and flags (1 sneaking, 2 sprinting, 4 swimming, 8 gliding, 16 on the ground, 32 in
 // water, 64 flying, 128 a swing of the arm started this tick, 256 jumping, 512
@@ -365,8 +368,15 @@ function startRecording(player, data) {
   if (!player) return;
   endRecordingRun();
   const anchor = requireAnchor(player);
-  recording = { player, anchor, ticks: [], swing: false, wait: Math.max(0, Math.min(10, Math.round(Number(data.count) || 0))) * 20, run: undefined };
+  recording = { player, anchor, ticks: [], swing: false, wait: Math.max(0, Math.min(10, Math.round(Number(data.count) || 0))) * 20, run: undefined, play: !!data.play && !!cameraPath };
   const r = recording;
+  if (r.play) {
+    try {
+      showPathStart(player); // where everyone starts, to take your place by
+    } catch (e) {
+      console.warn(`[Pose Studio] the start of the animation: ${e}`);
+    }
+  }
   const say = (text) => {
     try {
       if (r.player.onScreenDisplay) r.player.onScreenDisplay.setActionBar(text);
@@ -384,6 +394,15 @@ function startRecording(player, data) {
         return;
       }
       const p = r.player;
+      if (r.play && !r.ticks.length) {
+        // the others start now, with the first tick recorded
+        try {
+          playPath(p, { t: 0 });
+        } catch (e) {
+          r.play = false;
+          console.warn(`[Pose Studio] playing along: ${e}`);
+        }
+      }
       const l = p.location;
       const rot = p.getRotation();
       const flags = (p.isSneaking ? 1 : 0) | (p.isSprinting ? 2 : 0) | (p.isSwimming ? 4 : 0) | (p.isGliding ? 8 : 0) | (p.isOnGround ? 16 : 0) | (p.isInWater ? 32 : 0) | (p.isFlying ? 64 : 0) | (r.swing ? 128 : 0) | (p.isJumping ? 256 : 0) | (p.isClimbing ? 512 : 0);
@@ -773,6 +792,35 @@ function stopPath() {
     }
   }
   pathPlayer = null;
+}
+
+// The first frame of the animation that's been sent (pose:path): everyone in it where they
+// start, and the camera if it's flown.
+function showPathStart(player) {
+  if (!player || !cameraPath) return;
+  stopPath();
+  for (const track of cameraPath.tracks.values()) {
+    const d = track.frames.get(0);
+    if (!d) continue;
+    try {
+      if (track.k === "e") setEntity(player, d);
+      else setPose(player, d);
+    } catch {
+      // not there right now (unloaded, or removed)
+    }
+  }
+  const first = cameraPath.cam ? cameraPath.keys[0] : null;
+  if (!first) return;
+  const anchor = requireAnchor(player);
+  const at = { x: anchor.x + first.p[0], y: anchor.y + first.p[1], z: anchor.z + first.p[2] };
+  player.runCommand(`camera @s set minecraft:free pos ${fmt(at)} facing ${fmt({ x: at.x + first.dir[0] * 16, y: at.y + first.dir[1] * 16, z: at.z + first.dir[2] * 16 })}`);
+  if (Number.isFinite(first.f)) {
+    try {
+      player.runCommand(`camera @s fov_set ${first.f.toFixed(2)}`);
+    } catch {
+      // older versions without fov support
+    }
+  }
 }
 
 function playPath(player, data) {
@@ -1259,7 +1307,7 @@ function debug(player) {
 // Every name looks like `PSD[op|page|item]`; page 0 always carries
 // `M|ready|<pages>|<items>|<items per page>` or `M|busy|<percent>`.
 // What this script understands; Blockbench warns when the world runs an older one.
-const PACK_PROTOCOL = 34;
+const PACK_PROTOCOL = 35;
 const IO_OBJECTIVE = "pose_io";
 const ITEMS_PER_PAGE = 30;
 const MAX_PAGES_PER_BATCH = 16;

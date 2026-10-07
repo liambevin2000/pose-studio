@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.82.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.83.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -1584,12 +1584,31 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
   let cameraMarkToggle = null;
   let capturing = false; // a screenshot is being taken
   const cameraMarkSaid = new Map(); // camera id -> when it was last said (ms)
-  const cameraMarksShown = () => cameraMarks && !cameraSync && !playerView && !shooting && !capturing && !pathPlaying;
+  const cameraMarksShown = () => cameraMarks && !cameraSync && !playerView && !shooting && !capturing && (!pathPlaying || takeAlong);
 
   function cameraMarkMessage(cam) {
     const pose = cameraPose(cam);
     const target = pose.pos.clone().add(pose.forward.clone().multiplyScalar(160));
     return JSON.stringify({ id: mannequinId(cam.name), n: cam.name, p: toWorld(pose.pos.toArray()), t: toWorld(target.toArray()) });
+  }
+
+  // Says the cameras that are shown (new, moved, or not said for a while); `seen` gets their ids.
+  // Returns false when the game has too much waiting to take more now.
+  function sayCameraMarks(seen) {
+    for (const cam of cameraMarksShown() ? cameraRoots() : []) {
+      if (!shownInGame(cam)) continue;
+      const id = mannequinId(cam.name);
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const msg = cameraMarkMessage(cam);
+      // (said again every so often: the game drops the ones it stops hearing of)
+      if (lastSent.get(id) === msg && Date.now() - (cameraMarkSaid.get(id) || 0) < CAMERA_MARK_AGAIN) continue;
+      if (link.inFlight >= MAX_IN_FLIGHT) return false;
+      send(`scriptevent pose:cammark ${msg}`);
+      lastSent.set(id, msg);
+      cameraMarkSaid.set(id, Date.now());
+    }
+    return true;
   }
 
   // Takes the cameras out of the world now, and waits until the game has: before a picture.
@@ -1656,7 +1675,12 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
       if (l && connectedWorld && l.id === connectedWorld.id) holdUpdates(10000);
     }
     if (Date.now() < holdUntil) return;
-    if (pathPlaying) return; // the game is playing the animation it was sent
+    if (pathPlaying) {
+      // the game is playing the animation it was sent; during a take acted along with it, the
+      // cameras shown in the world stay (you play to them)
+      if (takeAlong) sayCameraMarks(new Set());
+      return;
+    }
 
     const seen = new Set();
     for (const root of mannequinRoots()) {
@@ -1736,19 +1760,7 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
       send(off ? `scriptevent pose:remove ${JSON.stringify({ id })}` : `scriptevent pose:light ${msg}`);
       lastSent.set(id, msg);
     }
-    for (const cam of cameraMarksShown() ? cameraRoots() : []) {
-      if (!shownInGame(cam)) continue;
-      const id = mannequinId(cam.name);
-      if (seen.has(id)) continue;
-      seen.add(id);
-      const msg = cameraMarkMessage(cam);
-      // (said again every so often: the game drops the ones it stops hearing of)
-      if (lastSent.get(id) === msg && Date.now() - (cameraMarkSaid.get(id) || 0) < CAMERA_MARK_AGAIN) continue;
-      if (link.inFlight >= MAX_IN_FLIGHT) return;
-      send(`scriptevent pose:cammark ${msg}`);
-      lastSent.set(id, msg);
-      cameraMarkSaid.set(id, Date.now());
-    }
+    if (!sayCameraMarks(seen)) return;
     for (const id of Array.from(lastSent.keys())) {
       if (seen.has(id)) continue;
       if (!id.endsWith('#eq')) send(`scriptevent pose:remove ${JSON.stringify({ id })}`);
@@ -3649,7 +3661,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     const S = REC.SIZE;
     const at = (i, k) => raw.t[i * S + k];
     const n = raw.n;
-    if (!n) return { v: 2, n: 0, t: [], eq: raw.eq || {} };
+    if (!n) return { v: 2, n: 0, t: [], eq: raw.eq || {}, skip: 0 };
     const differs = (i, j) =>
       [REC.X, REC.Y, REC.Z].some((k) => Math.abs(at(i, k) - at(j, k)) > 3) ||
       Math.abs(wrap((at(i, REC.YAW) - at(j, REC.YAW)) / 10)) > 3 || Math.abs(at(i, REC.PITCH) - at(j, REC.PITCH)) > 30 ||
@@ -3688,7 +3700,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     for (let i = 0; i < count; i++) {
       t.push(round(channel[0][i], 2), round(channel[1][i], 2), round(channel[2][i], 2), round(look[i], 2), round(pitch[i], 2), at(start + i, REC.FLAGS));
     }
-    return { v: 2, n: count, t, eq: raw.eq || {} };
+    return { v: 2, n: count, t, eq: raw.eq || {}, skip: start }; // (skip: the ticks cut off the start)
   }
 
   // ---- The arm swing ----
@@ -4205,8 +4217,10 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     return root;
   }
 
-  // The recording on the timeline, from the start: the Animate tab, long enough for all of it.
-  function placeRecording(root) {
+  // The recording on the timeline: the Animate tab, long enough for all of it. It starts at the
+  // start of the timeline, or (a take acted along with the timeline) `at` seconds in: where the
+  // recording really began. Any keyframe the player had for an earlier recording goes.
+  function placeRecording(root, at = 0) {
     const Anim = blockbenchAnimation();
     if (!Anim || typeof Modes === 'undefined' || !Modes.options || !Modes.options.animate || !setupClipChannel()) return null;
     const anim = shotAnimation(Anim);
@@ -4215,20 +4229,29 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     } catch (e) {
       // select it in the outliner
     }
+    const time = Math.max(0, round(Number(at) || 0, 3));
     if (typeof Timeline !== 'undefined' && Timeline.setTime) Timeline.setTime(0);
-    const at = clipKeyAt(root);
-    if (!at) return null;
-    // it replaces what was at the start of this player's track
+    const spot = clipKeyAt(root);
+    if (!spot) return null;
+    // it replaces what was there on this player's track, and the keyframes of the recording it had
+    const keys = spot.animator[CLIP_CHANNEL];
+    const here = keys.find((kf) => Math.abs(kf.time - time) < 0.026) || null;
+    for (const kf of keys.slice()) {
+      const data = (kf.data_points && kf.data_points[0]) || {};
+      if (kf === here || data.pose_anim !== REC_ID) continue;
+      if (typeof kf.remove === 'function') kf.remove();
+      if (keys.includes(kf)) keys.splice(keys.indexOf(kf), 1);
+    }
     const length = (root.pose_recording.n - 1) / ANIM_FPS;
-    const kf = placeClipKey(root, { pick: REC_ID, speed: 1, loop: false, blend: 0, start: 0 }, [{ id: REC_ID, length }], at);
-    if (Number(anim.length) < length && anim.setLength) anim.setLength(Math.ceil(length * 20) / 20);
+    const kf = placeClipKey(root, { pick: REC_ID, speed: 1, loop: false, blend: 0, start: 0 }, [{ id: REC_ID, length }], { anim: spot.anim, animator: spot.animator, existing: here, time });
+    if (Number(anim.length) < time + length && anim.setLength) anim.setLength(Math.ceil((time + length) * 20) / 20);
     return kf;
   }
 
   // A recording that just came in: kept on a player, and on the timeline.
-  function keepRecording(rec, onto) {
+  function keepRecording(rec, onto, at = 0) {
     const root = importRecording(rec, onto);
-    const placed = placeRecording(root);
+    const placed = placeRecording(root, at);
     Blockbench.showQuickMessage(
       placed
         ? `${root.name}: ${(rec.n / ANIM_FPS).toFixed(1)} s recorded. Play in Game shows it in Minecraft. To move it all, move or turn ${root.name} in the Edit tab`
@@ -4262,18 +4285,40 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
       recordingOn = true;
       // you're the one in the shot: shown while it records, also if the camera view had hidden you
       if (playerHidden) send('scriptevent pose:hideplayer {"hide":false}');
-      send(`scriptevent pose:rec ${JSON.stringify({ on: 1, count: RECORD_COUNTDOWN })}`);
+      // with others already on the timeline, the game plays them from the moment it records
+      let along = false;
+      try {
+        along = await sendTimelineForTake();
+      } catch (e) {
+        console.warn('[Pose Studio] a take along with the timeline', e);
+      }
+      if (!recordingOn) {
+        // stopped before it began
+        if (along) {
+          takeAlong = false;
+          stopPath();
+        }
+        return;
+      }
+      send(`scriptevent pose:rec ${JSON.stringify(Object.assign({ on: 1, count: RECORD_COUNTDOWN }, along ? { play: 1 } : {}))}`);
       try {
         // over to the game: that's where the part is played
         if (!(globalThis.__POSE_STUDIO_TEST && globalThis.__POSE_STUDIO_TEST.noFocus)) focusWindow('minecraft');
       } catch (e) {
         // click the game yourself
       }
-      Blockbench.showQuickMessage(`Recording starts in Minecraft in ${RECORD_COUNTDOWN} seconds. Play your part, then come back and click Stop Recording`, 6000);
+      Blockbench.showQuickMessage(
+        along
+          ? `Recording starts in Minecraft in ${RECORD_COUNTDOWN} seconds, and everyone on the timeline starts with it (they stand at their first frame until then). Play your part, then come back and click Stop Recording`
+          : `Recording starts in Minecraft in ${RECORD_COUNTDOWN} seconds. Play your part, then come back and click Stop Recording`,
+        along ? 9000 : 6000
+      );
       return;
     }
     if (!recordingOn) return;
     recordingOn = false;
+    const along = takeAlong;
+    takeAlong = false;
     let items;
     try {
       items = await runGameQuery('pose:rec', { on: 0 }, 'Fetching the recording');
@@ -4281,6 +4326,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
       showError('Pose Studio: recording', e);
       return;
     } finally {
+      if (along) stopPath(); // everyone back to where Blockbench has them
       if (playerHidden && link.connected) send('scriptevent pose:hideplayer {"hide":true}');
     }
     let rec;
@@ -4296,18 +4342,21 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     const onto = selected && MANNEQUIN_PREFIX.test(selected.name) ? selected : null;
     const seconds = (rec.n / ANIM_FPS).toFixed(1);
     const buttons = onto ? ['New player', `Onto ${onto.name}`, 'Discard'] : ['Keep', 'Discard'];
+    // a take acted along with the timeline starts on it where the recording did
+    const at = along ? rec.skip / ANIM_FPS : 0;
+    const timed = along ? ' It stays in time with the others on the timeline.' : '';
     Blockbench.showMessageBox(
       {
         title: 'Pose Studio: recording',
         message: onto
-          ? `${seconds} seconds recorded.\n\nPut it on a new player, or on ${onto.name} (which moves to where you started, and loses the recording it had)?`
-          : `${seconds} seconds recorded.\n\nKeep it? It goes on a new player, stood where you started.`,
+          ? `${seconds} seconds recorded.\n\nPut it on a new player, or on ${onto.name} (which moves to where you started, and loses the recording it had)?${timed}`
+          : `${seconds} seconds recorded.\n\nKeep it? It goes on a new player, stood where you started.${timed}`,
         buttons, confirm: 0, cancel: buttons.length - 1,
       },
       (button) => {
         if (button === buttons.length - 1 || button === undefined || button < 0) return;
         try {
-          keepRecording(rec, onto && button === 1 ? onto : null);
+          keepRecording(rec, onto && button === 1 ? onto : null, at);
         } catch (e) {
           showError('Pose Studio: recording', e);
         }
@@ -4369,6 +4418,69 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
   }
   const sampleCameraAnimation = (cam, anim) => sampleAnimation(anim, cam).camera;
 
+  // Sends a sampled animation (see sampleAnimation) to the game whole, for it to play a frame
+  // every tick: `pose:path`, then the camera's samples and everyone's updates. Returns how many
+  // updates were too long to send.
+  async function sendAnimation({ count, camera, tracks }, { loop, hud }) {
+    const lines = [];
+    let skipped = 0;
+    const PER = 4; // camera samples a message (a message stays well under Minecraft's command length)
+    for (let i = 0; camera && i < camera.length; i += PER) {
+      const flat = [];
+      for (const s of camera.slice(i, i + PER)) flat.push(...s.p, ...s.dir, s.f);
+      lines.push(`scriptevent pose:pathsamples ${JSON.stringify({ i, s: flat })}`);
+    }
+    for (const track of tracks.values()) {
+      for (const [i, msg] of track.frames) {
+        const line = `scriptevent pose:track {"k":"${track.k}","i":${i},"d":${msg}}`;
+        if (line.length > MAX_COMMAND) skipped++;
+        else lines.push(line);
+      }
+    }
+    Blockbench.showQuickMessage(`Sending the animation to Minecraft (${lines.length} updates)…`, 2500);
+    await link.command(`scriptevent pose:path ${JSON.stringify({ n: count, step: 0.05, ramp: [0, 0, 1, 1], loop: loop ? 1 : 0, hud: hud ? 1 : 0, cam: camera ? 1 : 0, smooth: smoothPlayback() ? 1 : 0 })}`);
+    const TOGETHER = 6;
+    for (let i = 0; i < lines.length; i += TOGETHER) await Promise.all(lines.slice(i, i + TOGETHER).map((line) => link.command(line)));
+    return skipped;
+  }
+
+  // ---- A take acted along with the timeline ----
+  // Record Player when players or mobs already move on the timeline (earlier takes, animations
+  // keyframed there): the game is sent the animation first, everyone in it stands at its first
+  // frame through the countdown, and it starts playing on the tick the recording starts. So you
+  // act with what's already there, as many takes as there are parts. The take is kept in time with
+  // the timeline: its Animation keyframe goes where the recording really began (the standing about
+  // that's cut off its start is that much later on the timeline). With Sync Game Camera on, the
+  // camera plays its part too, so you see the shot while you act.
+  let takeAlong = false; // this take plays the timeline in the game
+  async function sendTimelineForTake() {
+    const Anim = blockbenchAnimation();
+    if (!Anim || typeof Timeline === 'undefined' || typeof Animator === 'undefined' || typeof Modes === 'undefined') return false;
+    const anim = Anim.selected || (Anim.all || []).find((a) => a.name === CAMERA_ANIMATION);
+    if (!anim) return false;
+    if (!Modes.animate) {
+      // (what's on the timeline can only be worked out with the Animate tab open)
+      const keyed = Object.values(anim.animators || {}).some((a) => a && ((a.keyframes && a.keyframes.length) || (a[CLIP_CHANNEL] && a[CLIP_CHANNEL].length)));
+      if (!keyed || !Modes.options || !Modes.options.animate) return false;
+      Modes.options.animate.select();
+      if (anim.select) anim.select();
+    }
+    const active = activeCamera();
+    const sampled = sampleAnimation(anim, active && cameraSync && !playerView ? active : null);
+    if (sampled.count < 2 || !sampled.tracks.size) return false; // nobody moves in it yet: a take on its own
+    endPathPlay();
+    pathPlaying = true; // (nothing else is sent to the players and mobs meanwhile)
+    takeAlong = true;
+    try {
+      await sendAnimation(sampled, { loop: false, hud: false });
+    } catch (e) {
+      takeAlong = false;
+      endPathPlay();
+      throw e;
+    }
+    return true;
+  }
+
   // Animate ▸ Play Animation in Minecraft: the camera and every animated player and mob, sent
   // whole first, then played by the game a frame every tick.
   async function playCameraAnimation() {
@@ -4391,29 +4503,12 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
       Blockbench.showQuickMessage('Nothing moves in this animation yet', 3000);
       return false;
     }
-    const lines = [];
-    let skipped = 0;
-    const PER = 4; // camera samples a message (a message stays well under Minecraft's command length)
-    for (let i = 0; camera && i < camera.length; i += PER) {
-      const flat = [];
-      for (const s of camera.slice(i, i + PER)) flat.push(...s.p, ...s.dir, s.f);
-      lines.push(`scriptevent pose:pathsamples ${JSON.stringify({ i, s: flat })}`);
-    }
-    for (const track of tracks.values()) {
-      for (const [i, msg] of track.frames) {
-        const line = `scriptevent pose:track {"k":"${track.k}","i":${i},"d":${msg}}`;
-        if (line.length > MAX_COMMAND) skipped++;
-        else lines.push(line);
-      }
-    }
     endPathPlay();
     pathPlaying = true;
-    Blockbench.showQuickMessage(`Sending the animation to Minecraft (${lines.length} updates)…`, 2500);
+    let skipped = 0;
     try {
       await hideCameraMarks(); // (the cameras shown in the world aren't in what's played)
-      await link.command(`scriptevent pose:path ${JSON.stringify({ n: count, step: 0.05, ramp: [0, 0, 1, 1], loop: anim.loop === 'loop' ? 1 : 0, hud: 1, cam: camera ? 1 : 0, smooth: smoothPlayback() ? 1 : 0 })}`);
-      const TOGETHER = 6;
-      for (let i = 0; i < lines.length; i += TOGETHER) await Promise.all(lines.slice(i, i + TOGETHER).map((line) => link.command(line)));
+      skipped = await sendAnimation({ count, camera, tracks }, { loop: anim.loop === 'loop', hud: true });
       await link.command('scriptevent pose:pathplay {"t":0}');
     } catch (e) {
       endPathPlay();
@@ -11686,7 +11781,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     return { id: idItem.slice(2), name: scene.world || '', anchor: point('A|'), player: point('P|'), locations, removed: scene.removed || [], protocol: version ? Number(version.slice(2)) : 0 };
   }
 
-  const EXPECTED_PACK_PROTOCOL = 34; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
+  const EXPECTED_PACK_PROTOCOL = 35; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
   let warnedOldPack = false;
 
   // Scene files in the scenes folders that belong to a world (their pose_world says so), as
@@ -12521,6 +12616,15 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.83.0",
+      "date": "2026-10-07",
+      "changes": [
+        "Record Player now plays what is already on the timeline while you record, so you can act with your earlier takes.",
+        "Everyone stands at their first frame during the countdown, and the new take stays in time with them.",
+        "Update the Minecraft packs."
+      ]
+    },
     {
       "version": "0.82.0",
       "date": "2026-10-07",
@@ -13553,7 +13657,7 @@ ${PLUGIN_URL}`,
 
   // for the plugin's own tests only (they set this flag); nothing happens otherwise
   if (typeof globalThis !== 'undefined' && globalThis.__POSE_STUDIO_TEST) {
-    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS, sceneSpot, addLight, lightRoots, stopPath, cameraPathsOn, cameraPose, sampleCameraAnimation, playCameraAnimation, animateCamera, zoomedFov, setupClipChannel, removeClipChannel, clipKeys, clipPose, clipState, displayClips, addAnimationKey, placeClipKey, clipKeyAt, parseRecording, tidyRecording, recordingTicks, recordingAnimation, importRecording, placeRecording, keepRecording, setRecording, poseState, showRecordedWalk, displayClipBones, displayClipRoot, updateRecordingLines, entityAnimations, clipDelta, sampleAnimation, liveRotation, liveOrigin, poseMessage, entityMessage, setContentCache: (c) => (contentCache = c), liveWorldName, adoptCopies, adoptTextures, poseKind, copyName, deckConnect, autoStartDeck, swingStates, heldItemAnswers, cameraMarkMessage, hideCameraMarks, cameraMarksShown, setCameraMarks, turnedEffect, turnVector, fxTurn, prepareTurned, turnedId, saddleParts, entityMessages, entityIds, flatParts, packFlat, partPlace, proxyModelFor, anyPartOn, prepareProxy, particleList, particleEntry, placeParticle, fxMessage, fxRoots };
+    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS, sceneSpot, addLight, lightRoots, stopPath, cameraPathsOn, cameraPose, sampleCameraAnimation, playCameraAnimation, animateCamera, zoomedFov, setupClipChannel, removeClipChannel, clipKeys, clipPose, clipState, displayClips, addAnimationKey, placeClipKey, clipKeyAt, parseRecording, tidyRecording, recordingTicks, recordingAnimation, importRecording, placeRecording, keepRecording, setRecording, poseState, showRecordedWalk, displayClipBones, displayClipRoot, updateRecordingLines, entityAnimations, clipDelta, sampleAnimation, liveRotation, liveOrigin, poseMessage, entityMessage, setContentCache: (c) => (contentCache = c), liveWorldName, adoptCopies, adoptTextures, poseKind, copyName, deckConnect, autoStartDeck, swingStates, heldItemAnswers, cameraMarkMessage, hideCameraMarks, cameraMarksShown, setCameraMarks, sendTimelineForTake, placeRecording, sampleAnimation, sendAnimation, turnedEffect, turnVector, fxTurn, prepareTurned, turnedId, saddleParts, entityMessages, entityIds, flatParts, packFlat, partPlace, proxyModelFor, anyPartOn, prepareProxy, particleList, particleEntry, placeParticle, fxMessage, fxRoots };
   }
 
   Plugin.register('pose_studio', {

@@ -145,7 +145,16 @@ Animate the camera, players and mobs on Blockbench's timeline and have the game 
 - The recording goes on that player's Animation track as "● Recording", from the start of the timeline. **Play in Game** plays it in Minecraft, with the camera and everyone else on the timeline.
 - **To move it afterwards:** in the Edit tab, move or turn the player. The whole recording moves and turns with it. A yellow line shows the way the player goes.
 - It is an animation like the others: drag its keyframe to start it later, slow it down, start it part-way in.
-- Record again for another actor.
+- Record again for another actor: see below.
+
+**Acting with what's already recorded.** When players or mobs already move on the timeline (earlier takes, or animations you keyframed), **Record Player** plays them in the game while you record, so you can play every part of a scene yourself, one take each.
+
+1. Click **Record Player**. Blockbench sends what's on the timeline to Minecraft first (a moment, for long scenes), then the countdown starts.
+2. During the countdown everyone already recorded **stands at their first frame**: take your place by them.
+3. At **● REC** they all start, from the start of the timeline, on the same game tick the recording does. Act along. When the timeline runs out they hold their last frame; you can keep going.
+4. **Stop Recording** and **Keep**: the new take goes on the timeline in time with the others. (The standing about cut off its start isn't lost: its Animation keyframe is put that much later.)
+
+With **Sync Game Camera** on, the camera plays its part too, so you watch the shot while you act; with it off you see through your own eyes, and the cameras shown in the world stay. Everything on the timeline plays from its start, wherever the playhead is.
 
 What is recorded is where you are, where you look and what you are doing (on the ground, jumping, sneaking, sprinting, swimming…), every game tick, and it is played back tick for tick. A script cannot see a real player's limbs, so the body is played by the pack's own rules for a player: DragonCraft's states (idle, walk, sprint, sneak, jump and its landing, sprint-jump, swim, glide, fly) with their own conditions, fades and timing, the walk stepping with the distance covered; otherwise Minecraft's own walk.
 

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.83.0 (2026-10-07)
+
+- Record Player now plays what is already on the timeline while you record, so you can act with your earlier takes.
+- Everyone stands at their first frame during the countdown, and the new take stays in time with them.
+- Update the Minecraft packs.
+
 ## 0.82.0 (2026-10-07)
 
 - Cameras now show in Minecraft as a little camera with its name, while you look through your own eyes.
