@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.81.0 (2026-10-07)
+
+- Recorded players now swing their arm: punches, hits and mining, with the animation for what they hold.
+- Update the Minecraft packs.
+
 ## 0.80.0 (2026-10-07)
 
 - New Stream Deck key: Connect to Minecraft. Press it, then paste (Ctrl+V) into Minecraft chat.

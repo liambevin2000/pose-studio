@@ -351,7 +351,7 @@ function setFx(player, data) {
 // many seconds; `pose:rec {"on":0,op}` stops and answers with the recording: `R|first tick|…` items
 // of ticks, each tick: x.y.z (hundredths of a block from the anchor), yaw.pitch (tenths of a degree, where the
 // player looks) and flags (1 sneaking, 2 sprinting, 4 swimming, 8 gliding, 16 on the ground, 32 in
-// water, 64 flying, 128 an arm swing that hit or used something this tick, 256 jumping, 512
+// water, 64 flying, 128 a swing of the arm started this tick, 256 jumping, 512
 // climbing), in base 36; and `E|slot|item` for what the player wears and holds.
 const MAX_RECORDING_TICKS = 6000; // 5 minutes
 let recording = null; // { player, anchor, ticks, swing, wait, run }
@@ -433,16 +433,21 @@ function stopRecording(player, data) {
   finishResult(items);
 }
 
-// an arm swing can only be seen when it does something
+// A swing of the arm: every one, as the game says it starts (a punch in the air too; mining swings
+// again and again). A game that doesn't say (before @minecraft/server 2.5) only shows the ones
+// that hit, broke or placed something.
 function noteSwing(entity) {
   if (recording && entity && recording.player && entity.id === recording.player.id) recording.swing = true;
 }
 try {
   const after = world.afterEvents || {};
-  if (after.entityHitEntity) after.entityHitEntity.subscribe((ev) => noteSwing(ev.damagingEntity));
-  if (after.entityHitBlock) after.entityHitBlock.subscribe((ev) => noteSwing(ev.damagingEntity));
-  if (after.playerBreakBlock) after.playerBreakBlock.subscribe((ev) => noteSwing(ev.player));
-  if (after.itemUse) after.itemUse.subscribe((ev) => noteSwing(ev.source));
+  if (after.playerSwingStart) after.playerSwingStart.subscribe((ev) => noteSwing(ev.player));
+  else {
+    if (after.entityHitEntity) after.entityHitEntity.subscribe((ev) => noteSwing(ev.damagingEntity));
+    if (after.entityHitBlock) after.entityHitBlock.subscribe((ev) => noteSwing(ev.damagingEntity));
+    if (after.playerBreakBlock) after.playerBreakBlock.subscribe((ev) => noteSwing(ev.player));
+    if (after.playerPlaceBlock) after.playerPlaceBlock.subscribe((ev) => noteSwing(ev.player));
+  }
 } catch (e) {
   console.warn(`[Pose Studio] swings aren't recorded here: ${e}`);
 }
@@ -1191,7 +1196,7 @@ function debug(player) {
 // Every name looks like `PSD[op|page|item]`; page 0 always carries
 // `M|ready|<pages>|<items>|<items per page>` or `M|busy|<percent>`.
 // What this script understands; Blockbench warns when the world runs an older one.
-const PACK_PROTOCOL = 32;
+const PACK_PROTOCOL = 33;
 const IO_OBJECTIVE = "pose_io";
 const ITEMS_PER_PAGE = 30;
 const MAX_PAGES_PER_BATCH = 16;

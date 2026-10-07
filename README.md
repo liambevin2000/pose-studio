@@ -16,7 +16,7 @@ Blockbench plugin ──websocket──► Minecraft (/connect) ──/scripteve
    Blockbench downloads it again every time it starts, so updates arrive by themselves.
 2. **Install the Minecraft packs:** Pose Studio → More → **Install Minecraft Packs** (Connect to Minecraft also offers it when they're missing). This downloads the packs into
    Minecraft's development pack folders (or double-click `dist/PoseStudio.mcaddon` instead).
-3. **Create a test world:** Cheats ON, then add *Pose Studio* under Behavior Packs and Resource Packs.
+3. **Create a test world:** Cheats ON, then add *Pose Studio* under Behavior Packs and Resource Packs. (Minecraft 26.0 or newer.)
 4. **Enable Vibrant Visuals:** Settings → Video → Graphics Mode → Vibrant Visuals.
 5. **Allow plain websockets:** Settings → General → turn **Require Encrypted Websockets** OFF.
 
@@ -147,7 +147,9 @@ Animate the camera, players and mobs on Blockbench's timeline and have the game 
 - It is an animation like the others: drag its keyframe to start it later, slow it down, start it part-way in.
 - Record again for another actor.
 
-What is recorded is where you are, where you look and what you are doing (on the ground, jumping, sneaking, sprinting, swimming…), every game tick, and it is played back tick for tick. A script cannot see a real player's limbs, so the body is played by the pack's own rules for a player: DragonCraft's states (idle, walk, sprint, sneak, jump and its landing, sprint-jump, swim, glide, fly) with their own conditions, fades and timing, the walk stepping with the distance covered; otherwise Minecraft's own walk. Arm swings are only seen when they hit or use something, and weapon moves are not recorded.
+What is recorded is where you are, where you look and what you are doing (on the ground, jumping, sneaking, sprinting, swimming…), every game tick, and it is played back tick for tick. A script cannot see a real player's limbs, so the body is played by the pack's own rules for a player: DragonCraft's states (idle, walk, sprint, sneak, jump and its landing, sprint-jump, swim, glide, fly) with their own conditions, fades and timing, the walk stepping with the distance covered; otherwise Minecraft's own walk.
+
+**Arm swings.** Every swing of your arm is recorded: a punch (in the air too), a hit, mining, placing. It is played with the pack's own animation for what the player holds: in DragonCraft a punch with an empty hand, the pickaxe, axe, sword, hoe, shovel, mace and trident hits, and the first attack of its weapons (a second swing in time goes on to the next one). Without a pack that says, it is Minecraft's own swing. The animation follows what the Pose Studio player holds now, so change its main-hand item and the swings change with it. Needs Minecraft 26.0 or newer. Blocking, charging a bow and combo finishers are not recorded.
 
 **Smooth Movement in Minecraft** (Animate menu, on unless unticked): during Play in Game, players are pushed from place to place instead of being put there 20 times a second, so the game glides them evenly. A player that a push did not bring where it should be is put there after all. If a player drifts or turns oddly, untick it.
 

@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.80.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.81.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -3536,7 +3536,8 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
   // player is doing. A pack with a walk animation of its own (DragonCraft: idle, walk, sprint,
   // sneaking, jump, jump_land, sprint_jump, swimming, fly…) gets those, cross-faded as the state
   // changes; otherwise Minecraft's own (arms and legs swinging by the distance walked, the sneak
-  // and swim poses, the attack swing). The head looks where the player looked.
+  // and swim poses). A swing of the arm (a punch, a hit, mining) plays the pack's own animation
+  // for it with what's in the hand, or Minecraft's. The head looks where the player looked.
   const REC_ID = '@recording';
   const REC = { X: 0, Y: 1, Z: 2, YAW: 3, PITCH: 4, FLAGS: 5, SIZE: 6 };
   const REC_FLAG = { sneak: 1, sprint: 2, swim: 4, glide: 8, ground: 16, water: 32, fly: 64, swing: 128, jump: 256, climb: 512 };
@@ -3623,6 +3624,82 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     return { v: 2, n: count, t, eq: raw.eq || {} };
   }
 
+  // ---- The arm swing ----
+  // A swing of the arm (a punch, a hit with what's held, mining, placing) is noted by the game the
+  // tick it starts, and lasts REC_SWING_TICKS: variable.attack_time runs from 0 to 1 over it. What
+  // it looks like is the pack's to say. A pack that plays the player from states has a controller
+  // that leaves its first state when attack_time rises, for a state picked by what's in the hand
+  // (DragonCraft's third_person.use_item: "punch" plays attack.third, a pickaxe "pickaxe.hit", a
+  // greatsword "longsword.attack_1" and, swung again in time, "longsword.attack_2"…). Those
+  // states are run on the recording like the walking ones (see recordingTicks).
+  const REC_SWING_TICKS = 6;
+  const VANILLA_ITEM_TAGS = [[/_pickaxe$/, 'minecraft:is_pickaxe'], [/_axe$/, 'minecraft:is_axe'], [/_sword$/, 'minecraft:is_sword'], [/_hoe$/, 'minecraft:is_hoe'], [/_shovel$/, 'minecraft:is_shovel']];
+
+  // Answers what a condition asks about the items held ("q.equipped_item_any_tag('slot.weapon.mainhand',
+  // 'minecraft:is_pickaxe')" becomes 1 or 0), and leaves the rest of it for idleValue.
+  function heldItemAnswers(content, equipment) {
+    const item = (slot) => String((equipment && equipment[/off/i.test(slot) ? 'offhand' : 'mainhand']) || '').toLowerCase();
+    const bare = (id) => id.replace(/^minecraft:/, '');
+    const tagsOf = (id) => {
+      const info = id && content && content.items && content.items.get(id);
+      const tags = new Set(((info && info.tags) || []).map((t) => String(t).toLowerCase()));
+      if (id && !/:/.test(bare(id))) for (const [pattern, tag] of VANILLA_ITEM_TAGS) if (pattern.test(id)) tags.add(tag);
+      return tags;
+    };
+    const list = (args) => args.split(',').map((t) => t.trim().replace(/^'|'$/g, '').toLowerCase()).filter((t) => t && !/^\d+$/.test(t));
+    const answer = (yes) => (yes ? '(1)' : '(0)');
+    return (expr) =>
+      String(expr)
+        .replace(/\b(?:q|query)\.equipped_item_(any|all)_tags?\s*\(\s*'([^']*)'\s*,([^()]*)\)/gi, (m, mode, slot, rest) => {
+          const tags = tagsOf(item(slot));
+          return answer(mode.toLowerCase() === 'all' ? list(rest).every((t) => tags.has(t)) : list(rest).some((t) => tags.has(t)));
+        })
+        .replace(/\b(?:q|query)\.is_item_name_any\s*\(\s*'([^']*)'\s*,([^()]*)\)/gi, (m, slot, rest) => {
+          const id = item(slot);
+          return answer(!!id && list(rest).some((name) => bare(name) === bare(id)));
+        })
+        .replace(/\b(?:q|query)\.get_equipped_item_name(?:\s*\(([^()]*)\))?\s*(==|!=)\s*'([^']*)'/gi, (m, args, op, name) => {
+          const id = item(/off_hand|^\s*1\s*(,|$)/.test(args || '') ? 'offhand' : 'mainhand');
+          const same = !!id && bare(id).replace(/^[^:]+:/, '') === bare(name.toLowerCase()).replace(/^[^:]+:/, '');
+          return answer(op === '==' ? same : !same);
+        });
+  }
+
+  // The states a swing of the arm takes a player through, from the pack's own controller:
+  // { sig, initial, blends: { state: seconds it fades out over }, states: { state: { clips:
+  // [{ key, anim, when }], transitions: [[to, condition]] } } }, or null when the pack has none.
+  function swingStates(content, root, byName) {
+    const player = content && content.entities && content.entities.get('minecraft:player');
+    if (!player || !content.animationControllers) return null;
+    const equipment = (root && root.pose_equipment) || {};
+    const held = heldItemAnswers(content, equipment);
+    for (const [key, ctrlId] of Object.entries(player.description.animations || {})) {
+      if (typeof ctrlId !== 'string' || !/^controller\./.test(ctrlId) || ANIM_SKIP.test(key) || ANIM_SKIP.test(ctrlId)) continue; // (not the first-person ones)
+      const ctrl = content.animationControllers.get(ctrlId);
+      if (!ctrl || !ctrl.states) continue;
+      const initial = ctrl.initial_state && ctrl.states[ctrl.initial_state] ? ctrl.initial_state : 'default';
+      const first = ctrl.states[initial];
+      const pairs = (state) => (state.transitions || []).flatMap((t) => Object.entries(t || {})).filter(([to]) => ctrl.states[to]);
+      if (!first || !pairs(first).some(([, expr]) => /\battack_time\b/.test(String(expr)))) continue;
+      const plan = { sig: `${ctrlId}|${equipment.mainhand || ''}|${equipment.offhand || ''}`, initial, blends: {}, states: {} };
+      for (const [name, state] of Object.entries(ctrl.states)) {
+        const clips = [];
+        for (const entry of state.animations || []) {
+          const [animKey, when] = typeof entry === 'string' ? [entry, null] : Object.entries(entry || {})[0] || [];
+          const anim = animKey && byName.get(animKey);
+          if (anim && anim.keyframed) clips.push({ key: `swing:${animKey}`, anim, when: when === null || when === undefined ? null : held(when) });
+        }
+        plan.states[name] = { clips, transitions: pairs(state).map(([to, expr]) => [to, held(expr)]) };
+        plan.blends[name] = Number(state.blend_transition) > 0 ? Number(state.blend_transition) : 0;
+      }
+      // the controller a swing does something in, with what's held (others watch attack_time too:
+      // a spear's, which only acts with a spear in the hand)
+      const swung = plan.states[initial].transitions.find(([, when]) => idleValue(when, 0, { attack_time: 0.5 }, IDLE_QUERIES));
+      if (swung && plan.states[swung[0]].clips.length) return plan;
+    }
+    return null;
+  }
+
   // What's worked out from a recording, per tick: how fast the player goes, the body's turn, and
   // for each of the player's animations how much of it shows and where in it it is.
   //
@@ -3636,15 +3713,15 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
   const REC_STATE_BLEND = { idle: 0.26, walk: 0.3, sprint: 0.35, sprint_jump: 0.2, sneak: 0.26, swim: 0.3, glide: 0.12, fly: 0.12, jump: 0.26 };
   const REC_STATE_EASED = new Set(['idle', 'walk', 'sprint', 'sneak', 'swim']); // (these fade on the pack's curve, the rest evenly)
   const REC_LAYER_BLEND = { default: 0.1, jump: 0.14, sprint_jump: 0.16, land: 0.15 };
-  function recordingTicks(rec, clips) {
-    const style = Object.keys(clips).sort().join();
+  function recordingTicks(rec, clips, swings = null) {
+    const style = Object.keys(clips).sort().join() + (swings ? `#${swings.sig}` : '');
     let byStyle = recordingMath.get(rec);
     if (!byStyle) recordingMath.set(rec, (byStyle = new Map()));
     if (byStyle.has(style)) return byStyle.get(style);
     const n = rec.n;
     const dt = 1 / ANIM_FPS;
     const at = (i, k) => rec.t[i * REC.SIZE + k];
-    const body = new Array(n), speed = new Array(n), rise = new Array(n), pace = new Array(n), walked = new Array(n), attack = new Array(n), states = new Array(n);
+    const body = new Array(n), speed = new Array(n), rise = new Array(n), pace = new Array(n), walked = new Array(n), attack = new Array(n), states = new Array(n), arm = new Array(n);
     const names = Object.keys(clips);
     const has = (c) => c in clips;
     const weight = {}, time = {};
@@ -3683,9 +3760,10 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     };
     const main = machine('idle');
     const layer = machine('default');
+    const hit = swings ? machine(swings.initial) : null; // what the arm is doing
     main.over = layer.over = 0;
     let b = n ? at(0, REC.YAW) / 10 : 0;
-    let airtime = 0, leap = false, wasGround = true, amount = 0, dist = 0, ddm = 0, dir = 1, sgs = 0, swing = -1;
+    let airtime = 0, leap = false, wasGround = true, amount = 0, dist = 0, ddm = 0, dir = 1, sgs = 0, swing = 0;
     for (let i = 0; i < n; i++) {
       const flags = at(i, REC.FLAGS);
       const is = (flag) => !!(flags & flag);
@@ -3704,9 +3782,10 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
       pace[i] = amount;
       walked[i] = dist;
       sgs = amount + (sgs - amount) * Math.exp(-7 * dt);
-      if (is(REC_FLAG.swing)) swing = 0;
-      attack[i] = swing >= 0 ? swing / 6 : 0;
-      if (swing >= 0 && ++swing > 6) swing = -1;
+      // a swing of the arm: variable.attack_time, from the tick it starts until it's through
+      if (is(REC_FLAG.swing)) swing = 1;
+      attack[i] = swing > 0 ? swing / REC_SWING_TICKS : 0;
+      if (swing > 0 && ++swing > REC_SWING_TICKS) swing = 0;
       // the body turns to where the player looks while it walks (or swings); standing, the head
       // turns alone until it has turned as far as a neck goes, then takes the body with it
       const head = at(i, REC.YAW) / 10;
@@ -3780,8 +3859,26 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
         go(layer, over, REC_LAYER_BLEND);
         if (over === 'jump' || over === 'land') entered.push(over);
       }
+      // the arm: the pack's states for a swing, with what's held
+      if (hit) {
+        const state = swings.states[hit.state];
+        const done = state.clips.filter((c) => c.anim.def.loop !== true && tm[c.key] >= c.anim.length - 1e-6).length;
+        const asks = {
+          state_time: hit.since, any_animation_finished: done > 0 ? 1 : 0, all_animations_finished: state.clips.length && done === state.clips.length ? 1 : 0,
+          is_on_ground: ground ? 1 : 0, is_sneaking: sneaking ? 1 : 0, is_sprinting: sprinting ? 1 : 0, is_swimming: swimming ? 1 : 0, is_gliding: gliding ? 1 : 0,
+          is_in_water: water ? 1 : 0, is_alive: 1, ground_speed: v, vertical_speed: up, delta_time: dt,
+        };
+        for (const [to, when] of state.transitions) {
+          if (!idleValue(when, 0, { attack_time: attack[i] }, asks)) continue;
+          go(hit, to, swings.blends);
+          entered.push(...swings.states[to].clips.map((c) => c.key));
+          break;
+        }
+      }
       // (a recording that starts in the middle of something starts as that, not fading in from standing)
       if (i === 0) main.from = layer.from = {};
+      if (i === 0 && hit) hit.from = {};
+      arm[i] = hit ? hit.state : '';
       states[i] = main.state + (layer.state !== 'default' ? '+' + layer.state : '');
       // how much of each animation shows
       const mw = stateWeights(main), lw = stateWeights(layer);
@@ -3808,6 +3905,11 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
       }
       if (lw.jump) show('jump', lw.jump);
       if (lw.land) show('land', lw.land);
+      if (hit) {
+        for (const [s, w] of Object.entries(stateWeights(hit))) {
+          for (const c of swings.states[s].clips) show(c.key, w * (c.when === null ? 1 : Math.max(0, Math.min(1, idleValue(c.when, 0, { attack_time: attack[i] }, { is_on_ground: ground ? 1 : 0, is_alive: 1 })))));
+        }
+      }
       // each animation's clock
       const doing = { delta_time: dt, modified_distance_moved: dist, vertical_speed: up, ground_speed: v, is_on_ground: ground ? 1 : 0 };
       const vars = { is_local_player: 1, directional_distance_moved: ddm, smooth_ground_speed: sgs };
@@ -3829,9 +3931,13 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
       main.fade += dt;
       layer.since += dt;
       layer.fade += dt;
+      if (hit) {
+        hit.since += dt;
+        hit.fade += dt;
+      }
       wasGround = ground;
     }
-    const math = { body, speed, rise, pace, walked, attack, weight, time, names, states };
+    const math = { body, speed, rise, pace, walked, attack, weight, time, names, states, arm };
     byStyle.set(style, math);
     return math;
   }
@@ -3848,18 +3954,22 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     }
     const own = Object.keys(clips).length > 0;
     const parts = (names) => names.map((name) => byName.get(name)).filter(Boolean);
+    // the arm's swing: the pack's states for it (their animations are played like the others)
+    const swings = own ? swingStates(content, root, byName) : null;
+    const moves = Object.keys(clips);
+    if (swings) for (const state of Object.values(swings.states)) for (const c of state.clips) clips[c.key] = c.anim;
     const always = own ? [] : parts(['move.arms', 'move.legs', 'bob']);
     const sneaking = own ? [] : parts(['sneaking']);
     const swimming = own ? [] : parts(['swimming', 'swimming.legs']);
-    const attacking = own ? [] : parts(['attack.rotations']);
+    const attacking = swings ? [] : parts(['attack.rotations']); // Minecraft's own swing, where the pack has no states for it
     const bare = !own && !always.length; // no animations to go by: Minecraft's walk, worked out here
     const lerp = (a, b, f) => a + (b - a) * f;
     return {
       name: '● Recording', id: REC_ID, def: { bones: {} }, length: Math.max(0.05, (rec.n - 1) / ANIM_FPS), keyframed: true, recording: rec,
-      plays: own ? Object.keys(clips) : bare ? ['(built-in walk)'] : always.concat(sneaking, swimming, attacking).map((a) => a.name),
+      plays: own ? moves.concat(swings ? ['(arm swings)'] : attacking.map((a) => a.name)) : bare ? ['(built-in walk)'] : always.concat(sneaking, swimming, attacking).map((a) => a.name),
       // how far each bone is turned and moved at time t (see animationDelta); 'root' is the player itself
       poseAt(target, t, base) {
-        const math = recordingTicks(rec, clips);
+        const math = recordingTicks(rec, clips, swings);
         const f = Math.max(0, Math.min(rec.n - 1, t * ANIM_FPS));
         const i = Math.floor(f), j = Math.min(rec.n - 1, i + 1), k = f - i;
         const flags = rec.t[i * REC.SIZE + REC.FLAGS];
@@ -3869,7 +3979,8 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
           modified_move_speed: lerp(math.pace[i], math.pace[j], k), ground_speed: lerp(math.speed[i], math.speed[j], k), vertical_speed: lerp(math.rise[i], math.rise[j], k),
           is_moving: math.speed[i] > 0.4 ? 1 : 0, is_sneaking: has(REC_FLAG.sneak), is_sprinting: has(REC_FLAG.sprint), is_swimming: has(REC_FLAG.swim), is_gliding: has(REC_FLAG.glide),
           is_on_ground: has(REC_FLAG.ground), is_in_water: has(REC_FLAG.water), can_fly: has(REC_FLAG.fly), is_jumping: has(REC_FLAG.ground) ? 0 : 1,
-          attack_time: lerp(math.attack[i], math.attack[j], k), anim_time: t, life_time: t,
+          // (a swing runs forwards only: at its end, or where the next one starts, it doesn't run back)
+          attack_time: math.attack[j] > math.attack[i] ? lerp(math.attack[i], math.attack[j], k) : math.attack[i], anim_time: t, life_time: t,
         };
         const delta = new Map();
         const add = (d, amount = 1) => {
@@ -3880,7 +3991,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
           for (const key of d.relative || []) (delta.relative || (delta.relative = new Set())).add(key);
         };
         if (own) {
-          const vars = { smooth_ground_speed: doing.modified_move_speed, sideway_move_component: 0, gliding_speed_value: 1, attack_time: 0 };
+          const vars = { smooth_ground_speed: doing.modified_move_speed, sideway_move_component: 0, gliding_speed_value: 1, attack_time: doing.attack_time };
           for (const c of math.names) {
             const amount = lerp(math.weight[c][i], math.weight[c][j], k);
             if (amount < 0.002) continue;
@@ -3891,11 +4002,17 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
             if (anim.keyframed) tau = anim.def.loop === true ? ((tau % anim.length) + anim.length) % anim.length : Math.max(0, Math.min(tau, anim.length));
             add(clipDelta(target, anim, tau, base, vars, Object.assign({}, doing, { anim_time: tau }), 1, true), amount);
           }
+          if (doing.attack_time > 0) for (const part of attacking) add(animationDelta(target, content, part, t, base, doing));
         } else if (bare) {
           // Minecraft's walk: legs and arms swing against each other with the distance walked
           const swingBy = Math.cos(doing.modified_distance_moved * 0.6662) * doing.modified_move_speed * 57.3;
           add(new Map([['rightleg', [-1.4 * swingBy, 0, 0]], ['leftleg', [1.4 * swingBy, 0, 0]], ['rightarm', [swingBy, 0, 0]], ['leftarm', [-swingBy, 0, 0]]].filter(([key]) => target.groups.has(key))));
           if (has(REC_FLAG.sneak) && target.groups.has('body')) add(new Map([['body', [-28.6, 0, 0]]]));
+          // Minecraft's swing: the arm comes up fast and down again
+          if (doing.attack_time > 0 && target.groups.has('rightarm')) {
+            const a = doing.attack_time;
+            add(new Map([['rightarm', [(Math.sin((1 - Math.pow(1 - a, 4)) * Math.PI) * 1.2 + Math.sin(a * Math.PI) * 0.5) * 57.3, 0, 0]]]));
+          }
         } else {
           const playing = always.concat(has(REC_FLAG.sneak) ? sneaking : [], has(REC_FLAG.swim) ? swimming : [], doing.attack_time > 0 ? attacking : []);
           for (const part of playing) add(animationDelta(target, content, part, t, base, doing));
@@ -3912,12 +4029,16 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
       },
       // which of the pack's states the player is in at time t (and what's on top: "walk", "jump+jump")
       stateAt(t) {
-        return recordingTicks(rec, clips).states[Math.max(0, Math.min(rec.n - 1, Math.round(t * ANIM_FPS)))];
+        return recordingTicks(rec, clips, swings).states[Math.max(0, Math.min(rec.n - 1, Math.round(t * ANIM_FPS)))];
+      },
+      // what the arm is doing at time t: the pack's state for a swing ("punch", "pickaxe.hit"…), '' when it has none
+      swingAt(t) {
+        return recordingTicks(rec, clips, swings).arm[Math.max(0, Math.min(rec.n - 1, Math.round(t * ANIM_FPS)))];
       },
       // where the player has got to at time t, from where the recording starts: [x, y, z] in
       // Blockbench pixels (as recorded: not yet turned with the player), and the body's turn in degrees
       rootAt(t) {
-        const math = recordingTicks(rec, clips);
+        const math = recordingTicks(rec, clips, swings);
         const f = Math.max(0, Math.min(rec.n - 1, t * ANIM_FPS));
         const i = Math.floor(f), j = Math.min(rec.n - 1, i + 1), k = f - i;
         const p = (n, axis) => (rec.t[n * REC.SIZE + axis] - rec.t[axis]) / 100;
@@ -11495,7 +11616,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     return { id: idItem.slice(2), name: scene.world || '', anchor: point('A|'), player: point('P|'), locations, removed: scene.removed || [], protocol: version ? Number(version.slice(2)) : 0 };
   }
 
-  const EXPECTED_PACK_PROTOCOL = 32; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
+  const EXPECTED_PACK_PROTOCOL = 33; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
   let warnedOldPack = false;
 
   // Scene files in the scenes folders that belong to a world (their pose_world says so), as
@@ -12330,6 +12451,14 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.81.0",
+      "date": "2026-10-07",
+      "changes": [
+        "Recorded players now swing their arm: punches, hits and mining, with the animation for what they hold.",
+        "Update the Minecraft packs."
+      ]
+    },
     {
       "version": "0.80.0",
       "date": "2026-10-07",
@@ -13345,7 +13474,7 @@ ${PLUGIN_URL}`,
 
   // for the plugin's own tests only (they set this flag); nothing happens otherwise
   if (typeof globalThis !== 'undefined' && globalThis.__POSE_STUDIO_TEST) {
-    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS, sceneSpot, addLight, lightRoots, stopPath, cameraPathsOn, cameraPose, sampleCameraAnimation, playCameraAnimation, animateCamera, zoomedFov, setupClipChannel, removeClipChannel, clipKeys, clipPose, clipState, displayClips, addAnimationKey, placeClipKey, clipKeyAt, parseRecording, tidyRecording, recordingTicks, recordingAnimation, importRecording, placeRecording, keepRecording, setRecording, poseState, showRecordedWalk, displayClipBones, displayClipRoot, updateRecordingLines, entityAnimations, clipDelta, sampleAnimation, liveRotation, liveOrigin, poseMessage, entityMessage, setContentCache: (c) => (contentCache = c), liveWorldName, adoptCopies, adoptTextures, poseKind, copyName, deckConnect, autoStartDeck, turnedEffect, turnVector, fxTurn, prepareTurned, turnedId, saddleParts, entityMessages, entityIds, flatParts, packFlat, partPlace, proxyModelFor, anyPartOn, prepareProxy, particleList, particleEntry, placeParticle, fxMessage, fxRoots };
+    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS, sceneSpot, addLight, lightRoots, stopPath, cameraPathsOn, cameraPose, sampleCameraAnimation, playCameraAnimation, animateCamera, zoomedFov, setupClipChannel, removeClipChannel, clipKeys, clipPose, clipState, displayClips, addAnimationKey, placeClipKey, clipKeyAt, parseRecording, tidyRecording, recordingTicks, recordingAnimation, importRecording, placeRecording, keepRecording, setRecording, poseState, showRecordedWalk, displayClipBones, displayClipRoot, updateRecordingLines, entityAnimations, clipDelta, sampleAnimation, liveRotation, liveOrigin, poseMessage, entityMessage, setContentCache: (c) => (contentCache = c), liveWorldName, adoptCopies, adoptTextures, poseKind, copyName, deckConnect, autoStartDeck, swingStates, heldItemAnswers, turnedEffect, turnVector, fxTurn, prepareTurned, turnedId, saddleParts, entityMessages, entityIds, flatParts, packFlat, partPlace, proxyModelFor, anyPartOn, prepareProxy, particleList, particleEntry, placeParticle, fxMessage, fxRoots };
   }
 
   Plugin.register('pose_studio', {

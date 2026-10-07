@@ -1,5 +1,13 @@
 [
   {
+    "version": "0.81.0",
+    "date": "2026-10-07",
+    "changes": [
+      "Recorded players now swing their arm: punches, hits and mining, with the animation for what they hold.",
+      "Update the Minecraft packs."
+    ]
+  },
+  {
     "version": "0.80.0",
     "date": "2026-10-07",
     "changes": [
