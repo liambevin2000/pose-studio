@@ -1,5 +1,13 @@
 [
   {
+    "version": "0.85.0",
+    "date": "2026-10-07",
+    "changes": [
+      "Animations for a player or mob are now a sequence: add them in order and each starts when the one before ends.",
+      "Set how long each plays, reorder or remove them, and play the whole sequence before applying."
+    ]
+  },
+  {
     "version": "0.84.0",
     "date": "2026-10-07",
     "changes": [

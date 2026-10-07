@@ -128,10 +128,14 @@ Animate the camera, players and mobs on Blockbench's timeline and have the game 
 
 **Players and mobs.** Each has an **Animation** track on the timeline.
 
-- In the Animate tab, select a player or mob, put the playhead where an animation should start, and open **Animation…** (the same window as in the Edit tab). Click an animation to preview it, with Play and the frame slider.
-- **Place keyframe** is ticked there: Apply puts the animation showing on the track at the playhead. Set its speed, whether it loops, and how long it blends in from what was playing before. The frame the slider is on is where the animation starts. With no animation showing, the keyframe goes back to the pose from the Edit tab.
-- Untick Place keyframe to use the window as in the Edit tab (the frame becomes the pose).
-- The keyframe is a normal timeline keyframe: drag it to change when the animation starts, copy it, delete it. Open Animation… with it selected (or the playhead on it) to change it.
+- In the Animate tab, select a player or mob and open **Animation…** (or **Animate ▸ Animation Sequence…** from anywhere). The window shows its Animation track as a **sequence**: a list of animations, played one after the other.
+- **Building it:** click an animation on the left to look at it (Play, the frame slider), then **＋** next to it, or double-click it. It goes after the row that is picked, or at the end, and **starts when the one before it ends**. You never line keyframes up yourself.
+- **Each row:** *for N s* is how long it plays before the next one starts (**1×** sets it to exactly once through). **Loop** plays it round and round for that long; without it, it plays once and holds its last frame. **×** is its speed, **ease** the seconds it blends in from the one before.
+- **Changing it:** ▲ ▼ move a row, ✕ takes it out, **Swap** gives the picked row the animation that is showing, **＋ Pause** adds a stretch with no animation (the pose from the Edit tab). Everything after a change moves along by itself.
+- **Starts at** is when the first one starts. **Play sequence** plays the whole thing on the model before you apply it.
+- **Apply** puts the keyframes on the track, each at the time shown on its row, and makes the timeline long enough. After the last row its animation goes on: looping, or holding its last frame.
+- Untick **Sequence on the timeline** to use the window as in the Edit tab (the frame becomes the pose).
+- They are normal timeline keyframes, so you can still drag one. Open the window again and the sequence is read back from where they are.
 - Move and turn the player or mob itself with Blockbench's own Position and Rotation keyframes on it. Rotation keyframes on single bones add to the animation.
 - The pose you made in the Edit tab is not changed by any of this.
 

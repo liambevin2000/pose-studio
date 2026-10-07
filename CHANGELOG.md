@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.85.0 (2026-10-07)
+
+- Animations for a player or mob are now a sequence: add them in order and each starts when the one before ends.
+- Set how long each plays, reorder or remove them, and play the whole sequence before applying.
+
 ## 0.84.0 (2026-10-07)
 
 - New: Animate ▸ Export Video. Plays the animation in Minecraft and saves it as an .mp4 in the Videos folder (Pose Studio).
