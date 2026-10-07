@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.81.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.82.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -1563,6 +1563,55 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
     return JSON.stringify({ id: mannequinId(root.name), p: toWorld(liveOrigin(root)), q: code, s: root.pose_skin_slot || 0, sl: root.pose_slim ? 1 : 0 });
   }
 
+  // ---- Cameras shown in Minecraft ----
+  // Camera ▸ Show Cameras in Minecraft (on unless unticked): every camera of the scene stands in
+  // the world as a little camera, where it is and looking the way it looks, its name over it. So
+  // walking about in the game you see where the shots are taken from (and where to play to when
+  // recording yourself). They're only there while the game shows your own view: gone while the game
+  // camera is Pose Studio's (Sync Game Camera, Player View), during a capture and Play in Game, so
+  // they can't end up in a picture. A camera whose eye is off in the outliner isn't shown either.
+  // The game takes one out that it hasn't heard of for a few seconds (see pose:cammark), so each
+  // is said again now and then.
+  const CAMERA_MARKS_KEY = 'pose_studio_camera_markers';
+  const CAMERA_MARK_AGAIN = 2000; // ms
+  let cameraMarks = (() => {
+    try {
+      return localStorage.getItem(CAMERA_MARKS_KEY) !== '0';
+    } catch (e) {
+      return true;
+    }
+  })();
+  let cameraMarkToggle = null;
+  let capturing = false; // a screenshot is being taken
+  const cameraMarkSaid = new Map(); // camera id -> when it was last said (ms)
+  const cameraMarksShown = () => cameraMarks && !cameraSync && !playerView && !shooting && !capturing && !pathPlaying;
+
+  function cameraMarkMessage(cam) {
+    const pose = cameraPose(cam);
+    const target = pose.pos.clone().add(pose.forward.clone().multiplyScalar(160));
+    return JSON.stringify({ id: mannequinId(cam.name), n: cam.name, p: toWorld(pose.pos.toArray()), t: toWorld(target.toArray()) });
+  }
+
+  // Takes the cameras out of the world now, and waits until the game has: before a picture.
+  async function hideCameraMarks() {
+    if (!link.connected || typeof Project === 'undefined' || !Project) return;
+    const ids = cameraRoots().map((cam) => mannequinId(cam.name)).filter((id) => lastSent.has(id));
+    for (const id of ids) {
+      lastSent.delete(id);
+      cameraMarkSaid.delete(id);
+    }
+    await Promise.all(ids.map((id) => link.command(`scriptevent pose:remove ${JSON.stringify({ id })}`).catch(logFailure)));
+  }
+
+  function setCameraMarks(value) {
+    cameraMarks = !!value;
+    try {
+      localStorage.setItem(CAMERA_MARKS_KEY, cameraMarks ? '1' : '0');
+    } catch (e) {
+      // not remembered
+    }
+  }
+
   // The game camera follows the selected cam_ group, or the Blockbench viewport if none is selected.
   function cameraMessage() {
     const preview = viewportPreview();
@@ -1686,6 +1735,19 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
       if (link.inFlight >= MAX_IN_FLIGHT) return;
       send(off ? `scriptevent pose:remove ${JSON.stringify({ id })}` : `scriptevent pose:light ${msg}`);
       lastSent.set(id, msg);
+    }
+    for (const cam of cameraMarksShown() ? cameraRoots() : []) {
+      if (!shownInGame(cam)) continue;
+      const id = mannequinId(cam.name);
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const msg = cameraMarkMessage(cam);
+      // (said again every so often: the game drops the ones it stops hearing of)
+      if (lastSent.get(id) === msg && Date.now() - (cameraMarkSaid.get(id) || 0) < CAMERA_MARK_AGAIN) continue;
+      if (link.inFlight >= MAX_IN_FLIGHT) return;
+      send(`scriptevent pose:cammark ${msg}`);
+      lastSent.set(id, msg);
+      cameraMarkSaid.set(id, Date.now());
     }
     for (const id of Array.from(lastSent.keys())) {
       if (seen.has(id)) continue;
@@ -2164,6 +2226,7 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
     // Give the player their model and camera back before the socket goes away.
     if (playerHidden && link.connected) await link.command('scriptevent pose:hideplayer {"hide":false}').catch(logFailure);
     if (cameraSync && link.connected) await link.command('scriptevent pose:camclear').catch(logFailure);
+    if (link.connected) await hideCameraMarks().catch(logFailure);
     await unfreezeWorldClock().catch(() => {});
     // ticked again while that was going on (straight after a disconnect unticked it): it stays up
     if (linkToggle && linkToggle.value) return;
@@ -2288,6 +2351,8 @@ Write-Output $Out
     if (!childProcess) return;
     const encoded = bufferClass().from(CAPTURE_PS1, 'utf16le').toString('base64');
 
+    capturing = true; // (the cameras shown in the world stay out of the picture)
+    await hideCameraMarks();
     await link.command('hud @s hide all').catch(logFailure);
     await sleep(250);
     try {
@@ -2303,6 +2368,7 @@ Write-Output $Out
     } catch (e) {
       Blockbench.showMessageBox({ title: 'Pose Studio capture failed', message: String(e.message || e) });
     } finally {
+      capturing = false;
       link.command('hud @s reset all').catch(logFailure);
       if (typeof currentwindow !== 'undefined' && currentwindow.focus) currentwindow.focus();
     }
@@ -2817,6 +2883,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     shooting = true;
     Blockbench.showQuickMessage('Taking the entity shots… keep Minecraft in view', 6000);
     try {
+      await hideCameraMarks();
       await link.command('hud @s hide all');
       await sleep(250);
       // the normal shots, in the scene's own light (nothing cleared yet)
@@ -4343,6 +4410,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     pathPlaying = true;
     Blockbench.showQuickMessage(`Sending the animation to Minecraft (${lines.length} updates)…`, 2500);
     try {
+      await hideCameraMarks(); // (the cameras shown in the world aren't in what's played)
       await link.command(`scriptevent pose:path ${JSON.stringify({ n: count, step: 0.05, ramp: [0, 0, 1, 1], loop: anim.loop === 'loop' ? 1 : 0, hud: 1, cam: camera ? 1 : 0, smooth: smoothPlayback() ? 1 : 0 })}`);
       const TOGETHER = 6;
       for (let i = 0; i < lines.length; i += TOGETHER) await Promise.all(lines.slice(i, i + TOGETHER).map((line) => link.command(line)));
@@ -5032,7 +5100,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
           { name: 'Add Camera', id: 'pose_studio_add_camera', icon: 'videocam', children: [a.grabcam, a.savecam] },
           { name: 'Lights', id: 'pose_studio_light_menu', icon: 'lightbulb', children: [a.addlight, a.lightlevel] },
           { name: 'Particles', id: 'pose_studio_fx_menu', icon: 'auto_awesome', children: [a.addfx, a.editfx] },
-          { name: 'Camera', id: 'pose_studio_camera_menu', icon: 'photo_camera_front', children: [a.pov, a.camera, a.playerview, '_', a.fov, aspect, a.timeweather, '_', a.lookcam, a.follow] },
+          { name: 'Camera', id: 'pose_studio_camera_menu', icon: 'photo_camera_front', children: [a.pov, a.camera, a.playerview, a.cameramarks, '_', a.fov, aspect, a.timeweather, '_', a.lookcam, a.follow] },
           ...(cameraPathsOn() ? [{ name: 'Animate (experimental)', id: 'pose_studio_animate_menu', icon: 'movie_filter', children: [a.record, '_', a.camanimate, a.animkey, '_', a.camanimplay, a.camanimstop, a.smoothplay] }] : []),
           '_',
           a.scan,
@@ -5162,6 +5230,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
       command: `/connect 127.0.0.1:${PORT}`,
       sync: !!cameraSync,
       playerView: !!playerView,
+      cameraMarks: !!cameraMarks,
       recording: !!recordingOn,
       pov: !!(povToggle && povToggle.value),
       cameras: hasProject ? cameraRoots().map((c) => c.name) : [],
@@ -5325,6 +5394,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
                 <div class="ps-btn" :class="{ 'ps-on': s.sync }" @click="run('pose_studio_camera')" title="The Minecraft camera follows the active camera"><i class="material-icons">videocam</i><span>Sync Game</span></div>
                 <div class="ps-btn ps-wide" :class="{ 'ps-on': s.playerView }" @click="run('pose_studio_player_view')" title="Stands you at the active camera: the game's own first-person view, hand included"><i class="material-icons">person</i><span>Player View</span></div>
                 <div class="ps-btn" :class="{ 'ps-on': s.pov }" @click="run('pose_studio_pov')" title="A second view locked to the active camera"><i class="material-icons">splitscreen</i><span>POV View</span></div>
+                <div class="ps-btn ps-wide" :class="{ 'ps-on': s.cameraMarks }" @click="run('pose_studio_camera_marks')" title="Shows every camera in Minecraft as a little camera with its name, while the game shows your own view (never in a capture)"><i class="material-icons">videocam</i><span>Show in Game</span></div>
               </div>
               <div class="ps-note" v-if="!s.cameras.length">No cameras yet: add one above.</div>
               <div class="ps-grid" style="margin-top: 4px" v-if="s.paths">
@@ -11616,7 +11686,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     return { id: idItem.slice(2), name: scene.world || '', anchor: point('A|'), player: point('P|'), locations, removed: scene.removed || [], protocol: version ? Number(version.slice(2)) : 0 };
   }
 
-  const EXPECTED_PACK_PROTOCOL = 33; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
+  const EXPECTED_PACK_PROTOCOL = 34; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
   let warnedOldPack = false;
 
   // Scene files in the scenes folders that belong to a world (their pose_world says so), as
@@ -12451,6 +12521,15 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.82.0",
+      "date": "2026-10-07",
+      "changes": [
+        "Cameras now show in Minecraft as a little camera with its name, while you look through your own eyes.",
+        "They are hidden in captures and Play in Game. Turn them off in Camera ▸ Show Cameras in Minecraft.",
+        "Update the Minecraft packs."
+      ]
+    },
     {
       "version": "0.81.0",
       "date": "2026-10-07",
@@ -13474,7 +13553,7 @@ ${PLUGIN_URL}`,
 
   // for the plugin's own tests only (they set this flag); nothing happens otherwise
   if (typeof globalThis !== 'undefined' && globalThis.__POSE_STUDIO_TEST) {
-    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS, sceneSpot, addLight, lightRoots, stopPath, cameraPathsOn, cameraPose, sampleCameraAnimation, playCameraAnimation, animateCamera, zoomedFov, setupClipChannel, removeClipChannel, clipKeys, clipPose, clipState, displayClips, addAnimationKey, placeClipKey, clipKeyAt, parseRecording, tidyRecording, recordingTicks, recordingAnimation, importRecording, placeRecording, keepRecording, setRecording, poseState, showRecordedWalk, displayClipBones, displayClipRoot, updateRecordingLines, entityAnimations, clipDelta, sampleAnimation, liveRotation, liveOrigin, poseMessage, entityMessage, setContentCache: (c) => (contentCache = c), liveWorldName, adoptCopies, adoptTextures, poseKind, copyName, deckConnect, autoStartDeck, swingStates, heldItemAnswers, turnedEffect, turnVector, fxTurn, prepareTurned, turnedId, saddleParts, entityMessages, entityIds, flatParts, packFlat, partPlace, proxyModelFor, anyPartOn, prepareProxy, particleList, particleEntry, placeParticle, fxMessage, fxRoots };
+    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS, sceneSpot, addLight, lightRoots, stopPath, cameraPathsOn, cameraPose, sampleCameraAnimation, playCameraAnimation, animateCamera, zoomedFov, setupClipChannel, removeClipChannel, clipKeys, clipPose, clipState, displayClips, addAnimationKey, placeClipKey, clipKeyAt, parseRecording, tidyRecording, recordingTicks, recordingAnimation, importRecording, placeRecording, keepRecording, setRecording, poseState, showRecordedWalk, displayClipBones, displayClipRoot, updateRecordingLines, entityAnimations, clipDelta, sampleAnimation, liveRotation, liveOrigin, poseMessage, entityMessage, setContentCache: (c) => (contentCache = c), liveWorldName, adoptCopies, adoptTextures, poseKind, copyName, deckConnect, autoStartDeck, swingStates, heldItemAnswers, cameraMarkMessage, hideCameraMarks, cameraMarksShown, setCameraMarks, turnedEffect, turnVector, fxTurn, prepareTurned, turnedId, saddleParts, entityMessages, entityIds, flatParts, packFlat, partPlace, proxyModelFor, anyPartOn, prepareProxy, particleList, particleEntry, placeParticle, fxMessage, fxRoots };
   }
 
   Plugin.register('pose_studio', {
@@ -13614,6 +13693,10 @@ ${PLUGIN_URL}`,
         playerview: (playerViewToggle = new Toggle('pose_studio_player_view', {
           name: 'Player View (First Person)', icon: 'person', value: false, onChange: setPlayerView,
           description: "With Sync Game Camera on, you're stood at the active camera instead of a free camera flying there: Minecraft shows its own first-person view, with your hand and held item.",
+        })),
+        cameramarks: (cameraMarkToggle = new Toggle('pose_studio_camera_marks', {
+          name: 'Show Cameras in Minecraft', icon: 'videocam', value: cameraMarks, onChange: setCameraMarks,
+          description: "Every camera of the scene stands in the world as a little camera with its name, while the game shows your own view. They're gone while the game camera is Pose Studio's, during captures and Play in Game.",
         })),
         scan: new Action('pose_studio_scan', { name: 'Import World…', icon: 'travel_explore', click: () => scanWorldDialog(false),
           description: 'Brings the terrain around you in Minecraft into Blockbench as one mesh (replacing terrain imported before).' }),

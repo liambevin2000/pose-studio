@@ -1,0 +1,28 @@
+{
+  "format_version": "1.10.0",
+  "minecraft:client_entity": {
+    "description": {
+      "identifier": "pose:camera",
+      "materials": {
+        "default": "entity_emissive"
+      },
+      "textures": {
+        "default": "textures/entity/pose_studio/camera"
+      },
+      "geometry": {
+        "default": "geometry.pose_studio.camera"
+      },
+      "animations": {
+        "aim": "animation.pose_studio.camera.aim"
+      },
+      "scripts": {
+        "animate": [
+          "aim"
+        ]
+      },
+      "render_controllers": [
+        "controller.render.pose_studio.camera"
+      ]
+    }
+  }
+}

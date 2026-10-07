@@ -1,0 +1,27 @@
+{
+  "format_version": "1.20.80",
+  "minecraft:entity": {
+    "description": {
+      "identifier": "pose:camera",
+      "is_spawnable": false,
+      "is_summonable": true,
+      "properties": {
+        "pose:yaw": { "type": "float", "range": [-180.0, 180.0], "default": 0.0, "client_sync": true },
+        "pose:pitch": { "type": "float", "range": [-90.0, 90.0], "default": 0.0, "client_sync": true }
+      }
+    },
+    "components": {
+      "minecraft:type_family": { "family": ["pose_studio", "inanimate"] },
+      "minecraft:collision_box": { "width": 0.1, "height": 0.1 },
+      "minecraft:health": { "value": 20, "max": 20 },
+      "minecraft:physics": { "has_gravity": false, "has_collision": false },
+      "minecraft:pushable": { "is_pushable": false, "is_pushable_by_piston": false },
+      "minecraft:knockback_resistance": { "value": 1 },
+      "minecraft:damage_sensor": { "triggers": [{ "cause": "all", "deals_damage": false }] },
+      "minecraft:fire_immune": {},
+      "minecraft:nameable": { "always_show": true, "allow_name_tag_renaming": false },
+      "minecraft:body_rotation_blocked": {},
+      "minecraft:persistent": {}
+    }
+  }
+}

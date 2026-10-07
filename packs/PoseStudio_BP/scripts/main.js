@@ -452,7 +452,69 @@ try {
   console.warn(`[Pose Studio] swings aren't recorded here: ${e}`);
 }
 
+// `pose:cammark {"id","n","p":[x,y,z],"t":[x,y,z]}` — a Blockbench camera, shown in the world: a
+// little camera (pose:camera) where the camera's eye is (p, from the anchor), looking towards t,
+// its name (n) over it. Blockbench asks for them only while the game shows the player's own view,
+// takes them out (pose:remove) before any picture, and says each one again every couple of
+// seconds: one it has stopped saying (Blockbench closed or disconnected, another scene open, a
+// world saved with them in) goes by itself.
+const CAMERA_TYPE = "pose:camera";
+const CAMERA_MARK_TICKS = 120; // how long one stays without being said again (6 seconds)
+const cameraMarks = new Map(); // id -> the tick it was last said
+
+function setCameraMark(player, data) {
+  if (!data.id || !finite(data.p) || !finite(data.t)) throw new Error("invalid camera");
+  const anchor = requireAnchor(player);
+  const dim = world.getDimension(anchor.dim);
+  const loc = toWorld(anchor, data.p);
+  // the way it looks, as the turns of the model's two bones (it looks south, +Z, unturned)
+  const d = [0, 1, 2].map((i) => Number(data.t[i]) - Number(data.p[i]));
+  const flat = Math.hypot(d[0], d[2]);
+  const yaw = flat > 1e-6 ? (-Math.atan2(d[0], d[2]) * 180) / Math.PI : 0;
+  const pitch = flat + Math.abs(d[1]) > 1e-6 ? (-Math.atan2(d[1], flat) * 180) / Math.PI : 0;
+  try {
+    let entity = findMannequins(dim, data.id)[0];
+    if (entity && entity.typeId !== CAMERA_TYPE) return; // (the name is something else's)
+    if (!entity) {
+      entity = dim.spawnEntity(CAMERA_TYPE, loc);
+      entity.addTag(TAG_PREFIX + data.id);
+    }
+    entity.teleport(loc, { rotation: { x: 0, y: 0 } });
+    entity.setProperty("pose:yaw", Math.max(-180, Math.min(180, Math.round(yaw * 100) / 100)));
+    entity.setProperty("pose:pitch", Math.max(-90, Math.min(90, Math.round(pitch * 100) / 100)));
+    const name = String(data.n || "").slice(0, 32);
+    if (entity.nameTag !== name) entity.nameTag = name;
+    cameraMarks.set(String(data.id), system.currentTick);
+  } catch (e) {
+    if (!isUnloaded(e)) throw e; // (too far off to be seen from here: nothing to show)
+  }
+}
+
+// the ones nobody has said for a while go (and any a world was saved with)
+system.runInterval(() => {
+  const now = system.currentTick;
+  for (const dimId of ["overworld", "nether", "the_end"]) {
+    let found = [];
+    try {
+      found = world.getDimension(dimId).getEntities({ type: CAMERA_TYPE });
+    } catch {
+      // dimension not loaded
+    }
+    for (const e of found) {
+      try {
+        const tag = e.getTags().find((t) => t.startsWith(TAG_PREFIX));
+        const said = tag ? cameraMarks.get(tag.slice(TAG_PREFIX.length)) : undefined;
+        if (said === undefined || now - said > CAMERA_MARK_TICKS) e.remove();
+      } catch {
+        // gone already
+      }
+    }
+  }
+  for (const [id, said] of cameraMarks) if (now - said > CAMERA_MARK_TICKS) cameraMarks.delete(id);
+}, 40);
+
 function removeMannequin(data) {
+  cameraMarks.delete(String(data.id));
   if (effects.delete(String(data.id))) return;
   if (removeLight(String(data.id))) return;
   const anchor = getAnchor();
@@ -464,6 +526,7 @@ function removeMannequin(data) {
 function clearAll() {
   removeAllLights();
   effects.clear();
+  cameraMarks.clear();
   for (const dimId of ["overworld", "nether", "the_end"]) {
     for (const e of world.getDimension(dimId).getEntities({ families: ["pose_studio"] })) e.remove();
   }
@@ -1196,7 +1259,7 @@ function debug(player) {
 // Every name looks like `PSD[op|page|item]`; page 0 always carries
 // `M|ready|<pages>|<items>|<items per page>` or `M|busy|<percent>`.
 // What this script understands; Blockbench warns when the world runs an older one.
-const PACK_PROTOCOL = 33;
+const PACK_PROTOCOL = 34;
 const IO_OBJECTIVE = "pose_io";
 const ITEMS_PER_PAGE = 30;
 const MAX_PAGES_PER_BATCH = 16;
@@ -2022,6 +2085,8 @@ function handle(ev) {
       return setEntity(player, data);
     case "pose:hold":
       return setHolder(player, data);
+    case "pose:cammark":
+      return setCameraMark(ev.sourceEntity, data);
     case "pose:remove":
       return removeMannequin(data);
     case "pose:clear":

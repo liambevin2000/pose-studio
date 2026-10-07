@@ -159,6 +159,15 @@ In Minecraft a Pose Studio player's limbs move smoothly from each pose to the ne
 
 Limits: Minecraft's camera can't roll. Bones in the game update 20 times a second. Items held by mobs follow the playhead but not Play Animation in Minecraft. Position keyframes on single bones are not sent to the game.
 
+## Cameras shown in Minecraft
+
+Every camera of the scene stands in the Minecraft world as a little camera: where it is, pointing the way it looks (a yellow line runs out of the lens), with its name over it. Move or turn the camera in Blockbench and it moves in the game. So walking about in the game you can see where your shots are taken from, and where to play to when you record yourself.
+
+- They are only there while the game shows **your own view**. They are gone while **Sync Game Camera** or **Player View** is on (you are looking through a camera then), during **Capture Screenshot**, **Capture Entities Only** and **Play in Game**, so they never end up in a picture taken by Pose Studio.
+- A camera whose eye is off in the outliner is not shown.
+- They go a few seconds after Blockbench disconnects.
+- **Camera ▸ Show Cameras in Minecraft** (also on the panel) turns them off. A screenshot you take yourself (F2, a recorder) while they show will have them in it.
+
 ## Player View (first-person shots)
 
 **Camera ▸ Player View (First Person)** (also on the panel) changes what Sync Game Camera does: instead of flying a free camera to the active camera, Minecraft stands you there, eyes where the camera is, looking the way it looks. The game then shows its own first-person view, with your hand and what you hold.
@@ -190,7 +199,7 @@ An effect that repeats by itself can't be stopped by Pose Studio once started: i
 
 ## Hiding, copying and pasting
 
-- **Hide:** click the eye next to a player or mob in the outliner. It disappears from Minecraft too, and comes back, with its pose, skin and equipment, when you show it again. Alt+click an eye to show only that one. Hidden players and mobs are also left out of animations and entity shots. Cameras, lights and particles are not affected by their eye.
+- **Hide:** click the eye next to a player or mob in the outliner. It disappears from Minecraft too, and comes back, with its pose, skin and equipment, when you show it again. Alt+click an eye to show only that one. Hidden players and mobs are also left out of animations and entity shots. A hidden camera is not shown in Minecraft either; lights and particles are not affected by their eye.
 - **Copy and paste:** select a player, mob, camera, light or particle in the outliner, press Ctrl+C, go to another scene's tab and press Ctrl+V. Ctrl+D duplicates it in the same scene. The copy keeps its pose, skin, equipment, look and settings, gets the next free name (`Player_2`, `cam_3`…) and stands in the same place measured from its scene's anchor. Keep the scene you copied from open while you paste, so its textures can be brought over.
 - Timeline keyframes are not copied by a paste. A rider stays on its mount only when both are copied together.
 

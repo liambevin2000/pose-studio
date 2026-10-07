@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.82.0 (2026-10-07)
+
+- Cameras now show in Minecraft as a little camera with its name, while you look through your own eyes.
+- They are hidden in captures and Play in Game. Turn them off in Camera ▸ Show Cameras in Minecraft.
+- Update the Minecraft packs.
+
 ## 0.81.0 (2026-10-07)
 
 - Recorded players now swing their arm: punches, hits and mining, with the animation for what they hold.
