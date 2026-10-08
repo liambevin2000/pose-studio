@@ -179,15 +179,14 @@ Things to know: playing a take changes the world (the mobs within its range are 
 
 Takes add up. A second actor recorded with the whole scene on (acting along with the first) keeps only what was new in that take: the blocks that player changed, the mobs that were not there before, and what that player did to the first take's mobs (a hit, a kill). When the animation plays, every take on the timeline plays together, each from its own keyframe, so the first take's world changes are still there.
 
-**Mob actions.** Select a mob and open **Animate ▸ Mob Actions…**. On the left is everything that mob can do, read from its own pack; search it, set the time, and click:
+**Mob actions.** Select a mob and open **Animate ▸ Mob Actions…**. The window has two halves:
 
-- **States:** what its own animations go by (for a DragonCraft boss: intro, sit stomp, take off, slam, vomit…; for other mobs: attacking, pouncing, dying). This is how a boss is put through its attacks and phases. One that ends by itself shows how long it takes, and the time moves on by that much, so clicking one after the other lays them out in a row. A switch (attacking: on) is kept for as long as its animation takes and then goes back; type a number under **for** to keep any state that long.
-- **Events:** its pack's events.
-- **Animations:** one of its animations, played once.
-- **Particles:** its own, and (when you search) the world's.
-- **Hit it**, and **Run a command…** (run as the mob).
+- **The board (top):** a card for everything that mob can do, read from its own pack. Search it, or pick a tab. Click a card and it happens at the white line on the timeline below, and is shown in Minecraft straight away (when connected).
+  - **States** are what its own animations go by (for a DragonCraft boss: intro, sit stomp, take off, slam, vomit…; for other mobs: attacking, pouncing, dying). This is how a boss is put through its attacks and phases. Red cards are attacks, blue is moving about, green is idling, grey is dying. A card shows how long the state takes when it ends by itself, and the white line moves on by that much, so clicking one card after another lays them out in a row.
+  - **Events** (its pack's events), **Animations** (one of its animations, played once), **Particles** (its own, and the world's when you search), **Hit it**, and **Run a command…** (run as the mob).
+- **The timeline (bottom):** a lane each for States, Events, Animations and Effects. A state's block lasts until the next state. Drag a block to change when it happens; click the timeline to move the white line; click a block to change its time, keep a state for a number of seconds (**for**: it then goes back to what it was doing), show it in Minecraft again, or remove it (or press Delete). **Play in Minecraft** runs through it from the white line, in time, on the real mob. − and + zoom the timeline.
 
-What you click is shown in Minecraft straight away (when connected), and listed on the right with its time; ▶ shows it again, ✕ takes it out. Each one is a keyframe on the mob's **Actions** track, so you can also drag them on the timeline.
+Each block is a keyframe on the mob's **Actions** track, so they can also be dragged on Blockbench's own timeline.
 
 - States, events, animations and hits are things only the real mob has, so while the animation plays in Minecraft (Play Animation in Minecraft, Export Video, a recording acted along) the real mob stands in for the copy: where the copy is on the timeline, facing the way it faces, with its pack's own animations, sounds and particles. Its Animation Sequence is not used then. When the animation stops, the copy is back.
 - A mob with only particles and commands is still played by its copy; they happen where it stands.

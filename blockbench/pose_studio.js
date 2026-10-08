@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.88.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.89.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -3999,6 +3999,334 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     triedMobs.clear();
   }
 
+  // ---- The Mob Actions window ----
+  // What the mob can do is a board of cards to click; what it does when is a timeline of blocks
+  // to drag: a lane each for its states (a block lasts until the next state, or as long as it's
+  // kept), its events, its animations and its effects (particles, hits, commands).
+  const ACT_LANES = [['state', 'States'], ['event', 'Events'], ['anim', 'Animations'], ['fx', 'Effects']];
+  const ACT_TRACK_PX = 740; // how wide the timeline is in the window before it's zoomed
+
+  // How an action looks: its lane, colour and icon. A state goes by what its name says it is:
+  // an attack is red, moving about is blue, dying is grey, anything else (idling, sitting) is green.
+  function actLook(act) {
+    if (act.k === 'property') {
+      const text = `${act.label || ''} ${act.hint || ''}`.toLowerCase();
+      if (/death|dead|dying|outro|alive: off/.test(text)) return { lane: 'state', colour: '#6e7681', icon: 'close' };
+      if (/attack|bite|slam|stomp|vomit|leap|pounc|dash|melee|rang|tail|dive|wind|quake|erupt|squash|rock|swipe|charge|shoot|beam|hurt/.test(text)) return { lane: 'state', colour: '#d1453b', icon: 'flash_on' };
+      if (/fly|flight|aerial|take ?off|land|glide|walk|run|turn|move|hover|swim|jump/.test(text)) return { lane: 'state', colour: '#3b82c4', icon: 'directions_run' };
+      return { lane: 'state', colour: '#3d9a50', icon: 'accessibility' };
+    }
+    if (act.k === 'event') return { lane: 'event', colour: '#8957c9', icon: 'flag' };
+    if (act.k === 'anim') return { lane: 'anim', colour: '#b7791f', icon: 'movie' };
+    if (act.k === 'particle') return { lane: 'fx', colour: '#c2528b', icon: 'grain' };
+    if (act.k === 'hit') return { lane: 'fx', colour: '#d1453b', icon: 'gavel' };
+    return { lane: 'fx', colour: '#57606a', icon: 'code' };
+  }
+
+  const ACTS_CSS = `
+    .ps-acts { display: flex; flex-direction: column; gap: 8px; outline: none; user-select: none; }
+    .ps-acts-bar { display: flex; gap: 8px; align-items: center; }
+    .ps-acts-bar input { width: 220px; flex: none; }
+    .ps-acts-tabs { display: flex; gap: 4px; flex-wrap: wrap; }
+    .ps-acts-tab { padding: 3px 12px; border-radius: 14px; background: var(--color-button); cursor: pointer; font-size: 0.9em; }
+    .ps-acts-tab:hover { color: var(--color-light); }
+    .ps-acts-tab.on { background: var(--color-accent); color: var(--color-accent_text, #000); }
+    .ps-acts-cards { height: 208px; overflow-y: auto; display: flex; flex-wrap: wrap; gap: 6px; align-content: flex-start; padding: 6px; background: var(--color-back); border: 1px solid var(--color-border); border-radius: 4px; }
+    .ps-acts-group { flex-basis: 100%; font-size: 0.78em; text-transform: uppercase; letter-spacing: 0.05em; color: var(--color-subtle_text); margin-top: 2px; }
+    .ps-acts-card { width: 160px; height: 42px; box-sizing: border-box; display: flex; align-items: center; gap: 6px; padding: 0 8px; background: var(--color-button); border-left: 4px solid; border-radius: 4px; cursor: pointer; overflow: hidden; }
+    .ps-acts-card:hover { background: var(--color-selected); color: var(--color-light); }
+    .ps-acts-card:active { transform: scale(0.96); }
+    .ps-acts-card i { font-size: 20px; flex: none; }
+    .ps-acts-card div { min-width: 0; display: flex; flex-direction: column; line-height: 1.2; }
+    .ps-acts-card b, .ps-acts-card span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .ps-acts-card b { font-weight: 600; font-size: 0.92em; }
+    .ps-acts-card span { font-size: 0.78em; opacity: 0.6; }
+    .ps-acts-empty { opacity: 0.7; margin: 8px; }
+    .ps-acts-row { display: flex; align-items: center; gap: 10px; min-height: 32px; }
+    .ps-acts-row button { min-width: 0; height: 30px; padding: 0 12px; display: flex; align-items: center; gap: 4px; }
+    .ps-acts-row button i { font-size: 18px; }
+    .ps-acts-row button.ps-acts-go { background: var(--color-accent); color: var(--color-accent_text, #000); font-weight: 600; }
+    .ps-acts-row button.ps-acts-small { width: 30px; padding: 0; justify-content: center; }
+    .ps-acts-row input[type=number] { width: 70px; }
+    .ps-acts-tip { opacity: 0.6; font-size: 0.85em; }
+    .ps-acts-fill { flex: 1; min-width: 0; }
+    .ps-acts-time { display: flex; border: 1px solid var(--color-border); border-radius: 4px; background: var(--color-back); overflow: hidden; }
+    .ps-acts-names { width: 96px; flex: none; border-right: 1px solid var(--color-border); }
+    .ps-acts-names div { display: flex; align-items: center; padding: 0 8px; font-size: 0.85em; color: var(--color-subtle_text); box-sizing: border-box; }
+    .ps-acts-names div + div { border-top: 1px solid var(--color-border); }
+    .ps-acts-scroll { flex: 1; min-width: 0; overflow-x: auto; overflow-y: hidden; }
+    .ps-acts-track { position: relative; min-width: 100%; cursor: pointer; }
+    .ps-acts-ruler { position: relative; height: 20px; }
+    .ps-acts-tick { position: absolute; top: 0; height: 100%; border-left: 1px solid var(--color-border); padding-left: 3px; font-size: 0.75em; color: var(--color-subtle_text); pointer-events: none; }
+    .ps-acts-lane { position: relative; border-top: 1px solid var(--color-border); box-sizing: border-box; }
+    .ps-acts-block { position: absolute; height: 20px; box-sizing: border-box; display: flex; align-items: center; gap: 3px; padding: 0 5px; border-radius: 4px; color: #fff; font-size: 0.8em; cursor: grab; overflow: hidden; white-space: nowrap; box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.3); }
+    .ps-acts-block.point { border-radius: 10px; }
+    .ps-acts-block.on { box-shadow: 0 0 0 2px var(--color-light); z-index: 2; }
+    .ps-acts-block i { font-size: 14px; flex: none; }
+    .ps-acts-block span { overflow: hidden; text-overflow: ellipsis; }
+    .ps-acts-playhead { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: var(--color-light); pointer-events: none; z-index: 3; }
+    .ps-acts-playhead:before { content: ''; position: absolute; left: -4px; top: 0; border: 5px solid transparent; border-top-color: var(--color-light); }
+    .ps-acts-sel { padding: 4px 8px; border: 1px solid var(--color-border); border-radius: 4px; }
+    .ps-acts-sel > i { font-size: 20px; }
+    .ps-acts-sel b { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .ps-acts-foot { font-size: 0.85em; }
+    .ps-acts-foot label { display: flex; gap: 6px; align-items: center; flex: none; font-size: 1.1em; }
+    .ps-acts-foot span { opacity: 0.7; }
+  `;
+
+  // The window's Vue component. o: { name, type, free, connected, length (of the animation), playhead,
+  // choices (see mobActionChoices), rows (the actions there are, with label, hint, len), show(row) }.
+  function mobActionsComponent(o) {
+    let uid = 0;
+    let timer = null;
+    return {
+      data: () => ({
+        name: o.name,
+        type: o.type,
+        free: !!o.free,
+        connected: !!o.connected,
+        length: Number(o.length) || 0,
+        choices: o.choices.map((c) => Object.assign({}, c, actLook(c))),
+        rows: o.rows.map((r) => Object.assign({}, r, { uid: ++uid }, actLook(r))),
+        filter: '',
+        tab: 'All',
+        playhead: round(o.playhead, 2),
+        zoom: 1,
+        selected: null,
+        playing: false,
+      }),
+      beforeDestroy() {
+        this.stop();
+      },
+      computed: {
+        tabs() {
+          const names = ['All'];
+          for (const c of this.choices) if (c.group !== 'More particles' && !names.includes(c.group)) names.push(c.group);
+          return names;
+        },
+        // what's offered, by the tab and what was typed: [{ name, items }]
+        groups() {
+          const words = this.filter.toLowerCase().split(/\s+/).filter(Boolean);
+          const groups = [];
+          for (const c of this.choices) {
+            const more = c.group === 'More particles';
+            if (more && !words.length) continue; // (the world's particles: when searched for)
+            if (this.tab !== 'All' && c.group !== this.tab && !(more && this.tab === 'Particles')) continue;
+            const text = `${c.label} ${c.hint} ${c.title} ${c.group}`.toLowerCase();
+            if (!words.every((w) => text.includes(w))) continue;
+            let g = groups.find((x) => x.name === c.group);
+            if (!g) groups.push((g = { name: c.group, items: [] }));
+            if (g.items.length < 200) g.items.push(c);
+          }
+          return groups;
+        },
+        // whether the real mob plays it in Minecraft
+        real() {
+          return this.free || this.rows.some((r) => r.k !== 'particle' && r.k !== 'command');
+        },
+        // when the last thing it does is over
+        lastEnd() {
+          return this.rows.reduce((t, r) => Math.max(t, r.time + Math.max(Number(r.d) || 0, Number(r.len) || 0)), 0);
+        },
+        // the seconds the timeline shows, and the pixels a second takes
+        span() {
+          return Math.max(4, Math.ceil(Math.max(this.length, this.lastEnd + 1, this.playhead + 0.5)));
+        },
+        pps() {
+          return (ACT_TRACK_PX * this.zoom) / this.span;
+        },
+        ticks() {
+          const step = [0.25, 0.5, 1, 2, 5, 10, 15, 30, 60].find((s) => s * this.pps >= 46) || 60;
+          const out = [];
+          for (let i = 0; i * step <= this.span + 1e-6; i++) out.push({ t: round(i * step, 2), x: i * step * this.pps });
+          return out;
+        },
+        // the blocks of each lane: [{ id, title, rows: how many it's high, blocks: [{ row, x, w, y }] }]
+        lanes() {
+          const pps = this.pps;
+          return ACT_LANES.map(([id, title]) => {
+            const mine = this.rows.filter((r) => r.lane === id).sort((a, b) => a.time - b.time);
+            const ends = [];
+            const blocks = mine.map((r) => {
+              let w;
+              if (id === 'state') {
+                // it's what the mob does until its next state (or for as long as it's kept)
+                const next = mine.find((x) => x.v === r.v && x.time > r.time);
+                let end = Number(r.d) > 0 ? r.time + Number(r.d) : next ? next.time : this.span;
+                if (next) end = Math.min(end, next.time);
+                w = Math.max(14, (end - r.time) * pps - 1);
+              } else if (id === 'anim' && r.len > 0) w = Math.max(60, r.len * pps);
+              else w = Math.min(150, 34 + 6.2 * String(r.label).length);
+              const x = r.time * pps;
+              let y = ends.findIndex((e) => e <= x + 0.5);
+              if (y < 0) y = ends.length;
+              ends[y] = x + w + (id === 'state' ? 0 : 2); // (one state follows straight on from another)
+              return { row: r, x, w, y };
+            });
+            return { id, title, blocks, rows: Math.max(1, ends.length) };
+          });
+        },
+      },
+      methods: {
+        snap(t) {
+          return Math.max(0, Math.round((Number(t) || 0) * 20) / 20);
+        },
+        // a card clicked: it's done at the white line, and shown in Minecraft now
+        add(c) {
+          const row = Object.assign({ uid: ++uid, time: this.snap(this.playhead), k: c.k, v: c.v, n: c.n, d: c.d, label: c.label, hint: c.hint, len: c.len }, actLook(c));
+          this.rows.push(row);
+          this.sorted();
+          this.selected = row;
+          this.show(row);
+          if (c.len > 0) this.playhead = round(this.playhead + c.len, 2); // (the next one after it)
+        },
+        show(row) {
+          o.show(row);
+        },
+        remove(row) {
+          const i = this.rows.indexOf(row);
+          if (i >= 0) this.rows.splice(i, 1);
+          if (this.selected === row) this.selected = null;
+        },
+        sorted() {
+          this.rows.sort((a, b) => a.time - b.time);
+        },
+        height(lane) {
+          return `${lane.rows * 24 + 4}px`;
+        },
+        // the time at a place on the timeline, and a block dragged dx pixels from the time it had
+        timeAt(px) {
+          return this.snap(px / this.pps);
+        },
+        dragTo(row, from, dx) {
+          row.time = this.snap(from + dx / this.pps);
+        },
+        downBlock(ev, row) {
+          this.selected = row;
+          const x0 = ev.clientX;
+          const from = row.time;
+          let moved = false;
+          const move = (e) => {
+            if (Math.abs(e.clientX - x0) > 2) moved = true;
+            if (moved) this.dragTo(row, from, e.clientX - x0);
+          };
+          const up = () => {
+            window.removeEventListener('mousemove', move);
+            window.removeEventListener('mouseup', up);
+            if (moved) this.sorted();
+          };
+          window.addEventListener('mousemove', move);
+          window.addEventListener('mouseup', up);
+        },
+        // the white line goes where the timeline is clicked, and follows a drag
+        downTrack(ev) {
+          const track = ev.currentTarget;
+          const put = (e) => {
+            this.playhead = this.timeAt(e.clientX - track.getBoundingClientRect().left);
+          };
+          const up = () => {
+            window.removeEventListener('mousemove', put);
+            window.removeEventListener('mouseup', up);
+          };
+          put(ev);
+          window.addEventListener('mousemove', put);
+          window.addEventListener('mouseup', up);
+        },
+        // Played through from the white line: each thing is shown in Minecraft as the line gets to it.
+        play() {
+          if (this.playing) return this.stop();
+          const end = Math.max(this.lastEnd, 0.5);
+          if (this.playhead >= end) this.playhead = 0;
+          const from = this.playhead;
+          // (what it's doing by then: the last state before the line, of each of its properties)
+          const doing = new Map();
+          for (const r of this.rows) if (r.k === 'property' && r.time < from && !(Number(r.d) > 0 && r.time + Number(r.d) <= from)) doing.set(r.v, r);
+          for (const r of doing.values()) this.show(r);
+          const due = this.rows.filter((r) => r.time >= from).sort((a, b) => a.time - b.time);
+          const started = Date.now();
+          this.playing = true;
+          timer = setInterval(() => {
+            const t = from + (Date.now() - started) / 1000;
+            while (due.length && due[0].time <= t) {
+              const row = due.shift();
+              if (this.rows.includes(row)) this.show(row);
+            }
+            this.playhead = round(Math.min(t, end), 2);
+            if (t >= end) this.stop();
+          }, 50);
+        },
+        stop() {
+          if (timer) clearInterval(timer);
+          timer = null;
+          this.playing = false;
+        },
+        key(ev) {
+          if (this.selected && ev.target && !/^(INPUT|TEXTAREA)$/.test(ev.target.tagName)) this.remove(this.selected);
+        },
+      },
+      template: `
+        <div class="ps-acts" tabindex="0" @keydown.delete="key($event)">
+          <div class="ps-acts-bar">
+            <input type="text" class="dark_bordered" v-model="filter" placeholder="Search: slam, phase, smoke…">
+            <div class="ps-acts-tabs">
+              <div v-for="t in tabs" :key="t" class="ps-acts-tab" :class="{ on: tab === t }" @click="tab = t">{{ t }}</div>
+            </div>
+          </div>
+          <div class="ps-acts-cards">
+            <template v-for="g in groups">
+              <div class="ps-acts-group" :key="'group ' + g.name">{{ g.name }}</div>
+              <div v-for="(c, i) in g.items" :key="g.name + i" class="ps-acts-card" :style="{ borderLeftColor: c.colour }" :title="c.title" @click="add(c)">
+                <i class="material-icons" :style="{ color: c.colour }">{{ c.icon }}</i>
+                <div><b>{{ c.label }}</b><span v-if="c.hint">{{ c.hint }}</span></div>
+              </div>
+            </template>
+            <p v-if="!groups.length" class="ps-acts-empty">Nothing of this mob's matches.</p>
+          </div>
+          <div class="ps-acts-row">
+            <button class="ps-acts-go" @click="play()"><i class="material-icons">{{ playing ? 'stop' : 'play_arrow' }}</i>{{ playing ? 'Stop' : connected ? 'Play in Minecraft' : 'Play' }}</button>
+            <span>at <input type="number" class="dark_bordered" v-model.number="playhead" min="0" step="0.05"> s</span>
+            <span class="ps-acts-tip ps-acts-fill">Click a card: it happens at the white line. Drag a block to change when.</span>
+            <button class="ps-acts-small" @click="zoom = Math.max(1, zoom / 1.5)" title="Show more time">−</button>
+            <button class="ps-acts-small" @click="zoom = Math.min(16, zoom * 1.5)" title="Show less time, bigger">+</button>
+          </div>
+          <div class="ps-acts-time">
+            <div class="ps-acts-names">
+              <div style="height: 20px;"></div>
+              <div v-for="l in lanes" :key="l.id" :style="{ height: height(l) }">{{ l.title }}</div>
+            </div>
+            <div class="ps-acts-scroll">
+              <div class="ps-acts-track" :style="{ width: span * pps + 'px' }" @mousedown="downTrack($event)">
+                <div class="ps-acts-ruler">
+                  <div v-for="k in ticks" :key="k.t" class="ps-acts-tick" :style="{ left: k.x + 'px' }">{{ k.t }}s</div>
+                </div>
+                <div v-for="l in lanes" :key="l.id" class="ps-acts-lane" :style="{ height: height(l) }">
+                  <div v-for="b in l.blocks" :key="b.row.uid" class="ps-acts-block" :class="{ on: selected === b.row, point: l.id !== 'state' && !(l.id === 'anim' && b.row.len > 0) }" :style="{ left: b.x + 'px', width: b.w + 'px', top: b.y * 24 + 2 + 'px', background: b.row.colour }" :title="b.row.label + ' · ' + b.row.time + ' s'" @mousedown.stop="downBlock($event, b.row)">
+                    <i class="material-icons">{{ b.row.icon }}</i><span>{{ b.row.label }}</span>
+                  </div>
+                </div>
+                <div class="ps-acts-playhead" :style="{ left: playhead * pps + 'px' }"></div>
+              </div>
+            </div>
+          </div>
+          <div class="ps-acts-row ps-acts-sel" v-if="selected">
+            <i class="material-icons" :style="{ color: selected.colour }">{{ selected.icon }}</i>
+            <b v-if="selected.k !== 'command'" :title="selected.v">{{ selected.label }}</b>
+            <input v-else type="text" class="dark_bordered ps-acts-fill" v-model="selected.v" placeholder="a command (@s is the mob)">
+            <span>at <input type="number" class="dark_bordered" v-model.number="selected.time" min="0" step="0.05" @change="sorted()"> s</span>
+            <span v-if="selected.k === 'property'" title="How long it does this before going back to what it was doing. Empty: until its next state.">for <input type="text" class="dark_bordered" v-model="selected.d" placeholder="ever" style="width: 56px;"> s</span>
+            <span class="ps-acts-fill"></span>
+            <button v-if="connected" @click="show(selected)"><i class="material-icons">visibility</i>Show in Minecraft</button>
+            <button @click="remove(selected)"><i class="material-icons">delete</i>Remove</button>
+          </div>
+          <div class="ps-acts-row ps-acts-sel ps-acts-tip" v-else>Click a block on the timeline to change it or take it out.</div>
+          <div class="ps-acts-row ps-acts-foot">
+            <label title="Off: it stays where it is on the timeline. On: it starts there, then walks and fights as the game has it."><input type="checkbox" v-model="free"> Let it walk and fight by itself</label>
+            <span>{{ real ? 'In Minecraft the real ' + type + ' plays ' + name + ' while the animation plays (not its Animation Sequence).' : 'Particles and commands happen where ' + name + ' stands.' }}</span>
+          </div>
+        </div>`,
+    };
+  }
+
   // Animate ▸ Mob Actions…: what the selected mob does when, picked from what it can do.
   async function openMobActions() {
     const root = selectedPoseRoot();
@@ -4032,106 +4360,33 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
       const same = choiceOf(act);
       if (same && act.k !== 'command') return same.label;
       const kind = (ACT_KINDS.find(([k]) => k === act.k) || ['', act.k])[1];
-      return act.k === 'hit' ? 'Hit it' : act.k === 'property' ? `${actName(act.v)}: ${act.n}` : `${kind}: ${act.v}`;
+      return act.k === 'hit' ? 'Hit it' : act.k === 'property' ? `${actName(act.v)}: ${act.n}` : act.k === 'command' ? 'Command' : `${kind}: ${act.v}`;
     };
-    let uid = 0;
+    const component = mobActionsComponent({
+      name: root.name,
+      type: root.pose_entity.entity,
+      free: !!(root.pose_live && root.pose_live.free),
+      connected: !!link.connected,
+      length: Number(spot.anim && spot.anim.length) || 0,
+      playhead,
+      choices,
+      rows: actKeys(spot.animator).map((a) => Object.assign(a, { label: labelOf(a), hint: (choiceOf(a) || {}).hint || '', len: (choiceOf(a) || {}).len || 0 })),
+      show: (row) => tryAct(root, row),
+    });
     let vm = null;
+    component.mounted = function () {
+      vm = this;
+    };
     const dialog = new Dialog({
       id: 'pose_studio_mob_actions',
       title: `What ${root.name} does`,
-      width: 860,
+      width: 900,
       buttons: ['Apply', 'Cancel'],
       cancelIndex: 1,
       cancel_on_click_outside: false,
-      component: {
-        data: () => ({
-          name: root.name,
-          type: root.pose_entity.entity,
-          free: !!(root.pose_live && root.pose_live.free),
-          rows: actKeys(spot.animator).map((a) => Object.assign(a, { uid: ++uid, label: labelOf(a), len: (choiceOf(a) || {}).len || 0 })),
-          choices,
-          filter: '',
-          playhead: round(playhead, 2),
-          connected: !!link.connected,
-        }),
-        mounted() {
-          vm = this;
-        },
-        computed: {
-          // what's offered, by what was typed: [{ name, items }]
-          groups() {
-            const words = this.filter.toLowerCase().split(/\s+/).filter(Boolean);
-            const groups = [];
-            for (const c of this.choices) {
-              if (!words.length && c.group === 'More particles') continue; // (the world's particles: when searched for)
-              const text = `${c.label} ${c.hint} ${c.title} ${c.group}`.toLowerCase();
-              if (!words.every((w) => text.includes(w))) continue;
-              let g = groups.find((x) => x.name === c.group);
-              if (!g) groups.push((g = { name: c.group, items: [] }));
-              if (g.items.length < 200) g.items.push(c);
-            }
-            return groups;
-          },
-          // whether the real mob plays it in Minecraft
-          real() {
-            return this.free || this.rows.some((r) => r.k !== 'particle' && r.k !== 'command');
-          },
-        },
-        methods: {
-          // picked: it's done at the playhead, and shown in Minecraft now
-          add(c) {
-            const row = { uid: ++uid, time: this.playhead, k: c.k, v: c.v, n: c.n, d: c.d, label: c.label, len: c.len };
-            this.rows.push(row);
-            this.sorted();
-            this.show(row);
-            if (c.len > 0) this.playhead = round(this.playhead + c.len, 2); // (the next one after it)
-          },
-          show(row) {
-            tryAct(root, row);
-          },
-          remove(row) {
-            this.rows.splice(this.rows.indexOf(row), 1);
-          },
-          sorted() {
-            this.rows.sort((a, b) => a.time - b.time);
-          },
-        },
-        template: `
-          <div style="display: flex; gap: 12px; align-items: stretch;">
-            <div style="width: 340px; display: flex; flex-direction: column; gap: 6px;">
-              <b>At <input type="number" class="dark_bordered" v-model.number="playhead" min="0" step="0.05" style="width: 64px;"> s, click what it should do:</b>
-              <input type="text" class="dark_bordered" v-model="filter" placeholder="Search: slam, phase, smoke…" style="width: 100%;">
-              <div style="height: 340px; overflow-y: auto; border: 1px solid var(--color-border); border-radius: 4px;">
-                <div v-for="g in groups" :key="g.name">
-                  <div style="position: sticky; top: 0; background: var(--color-back); padding: 3px 8px; font-size: 0.85em; opacity: 0.85; border-bottom: 1px solid var(--color-border);">{{ g.name }}</div>
-                  <div v-for="(c, i) in g.items" :key="g.name + i" class="ps-act-choice" @click="add(c)" :title="c.title" style="padding: 3px 8px; cursor: pointer; display: flex; gap: 8px; align-items: baseline;">
-                    <span>{{ c.label }}</span><span style="opacity: 0.55; font-size: 0.85em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{{ c.hint }}</span>
-                  </div>
-                </div>
-                <p v-if="!groups.length" style="opacity: 0.7; margin: 8px;">Nothing of this mob's matches.</p>
-              </div>
-            </div>
-            <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px;">
-              <b>On the timeline</b>
-              <div style="height: 300px; overflow-y: auto; border: 1px solid var(--color-border); border-radius: 4px; padding: 4px; display: flex; flex-direction: column; gap: 4px;">
-                <div v-for="r in rows" :key="r.uid" style="display: flex; gap: 6px; align-items: center;">
-                  <input type="number" class="dark_bordered" v-model.number="r.time" min="0" step="0.05" @change="sorted()" style="width: 64px;" title="When, in seconds on the timeline"> s
-                  <input v-if="r.k === 'command'" type="text" class="dark_bordered" v-model="r.v" placeholder="a command (@s is the mob)" style="flex: 1; min-width: 0;">
-                  <span v-else style="flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" :title="r.v">{{ r.label }}</span>
-                  <label v-if="r.k === 'property'" title="How long it does this before going back to what it was doing. Empty: it stays like this.">for <input type="text" class="dark_bordered" v-model="r.d" placeholder="ever" style="width: 48px;"> s</label>
-                  <button v-if="connected" @click="show(r)" title="Show it in Minecraft now" style="min-width: 0; width: 28px; padding: 0;">▶</button>
-                  <button @click="remove(r)" title="Take it out" style="min-width: 0; width: 28px; padding: 0;">✕</button>
-                </div>
-                <p v-if="!rows.length" style="opacity: 0.7; margin: 4px;">Nothing yet. Click something on the left: it happens at the time above{{ connected ? ', and you see it in Minecraft straight away' : '' }}.</p>
-              </div>
-              <label style="display: flex; gap: 6px; align-items: center;" title="Off: it stays where it is on the timeline. On: it starts there, then walks and fights as the game has it.">
-                <input type="checkbox" v-model="free"> Let it walk and fight by itself
-              </label>
-              <p style="opacity: 0.7; margin: 0; font-size: 0.85em;">{{ real ? 'In Minecraft the real ' + type + ' plays ' + name + ' while the animation plays (not its Animation Sequence).' : 'Particles and commands happen where ' + name + ' stands.' }} Each one is a keyframe on its Actions track: drag it to change when.</p>
-            </div>
-          </div>`,
-      },
+      component,
       onButton(index) {
+        if (vm) vm.stop();
         endTries();
         if (index !== 0 || !vm) return;
         const next = vm.free ? { on: true, free: true } : null;
@@ -6400,7 +6655,6 @@ try {
   const PANEL_FOLDED_KEY = 'pose_studio_panel_folded';
 
   const PANEL_CSS = `
-    .ps-act-choice:hover { background: var(--color-selected); color: var(--color-light); }
     .pose_studio_panel { padding: 6px 8px 10px; overflow-y: auto; height: 100%; box-sizing: border-box; container-type: inline-size; }
     .pose_studio_panel .ps-head { display: flex; align-items: center; gap: 4px; margin: 8px 0 4px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--color-subtle_text); cursor: pointer; user-select: none; }
     .pose_studio_panel .ps-head i { font-size: 16px; }
@@ -6470,7 +6724,7 @@ try {
 
   function setupPosePanel() {
     if (typeof Panel === 'undefined' || posePanel) return;
-    if (Blockbench.addCSS) posePanelCss = Blockbench.addCSS(PANEL_CSS);
+    if (Blockbench.addCSS) posePanelCss = Blockbench.addCSS(PANEL_CSS + ACTS_CSS);
     let folded = {};
     try {
       folded = JSON.parse(localStorage.getItem(PANEL_FOLDED_KEY) || '{"structure":true}') || {};
@@ -14311,6 +14565,14 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // <changelog>
   const CHANGELOG = [
     {
+      "version": "0.89.0",
+      "date": "2026-10-08",
+      "changes": [
+        "Mob Actions is visual: cards to click, and a timeline of blocks to drag.",
+        "New: Play in Minecraft runs through the mob's actions in time."
+      ]
+    },
+    {
       "version": "0.88.0",
       "date": "2026-10-08",
       "changes": [
@@ -15425,7 +15687,7 @@ ${PLUGIN_URL}`,
 
   // for the plugin's own tests only (they set this flag); nothing happens otherwise
   if (typeof globalThis !== 'undefined' && globalThis.__POSE_STUDIO_TEST) {
-    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS, sceneSpot, addLight, lightRoots, stopPath, cameraPathsOn, cameraPose, sampleCameraAnimation, playCameraAnimation, animateCamera, zoomedFov, setupClipChannel, removeClipChannel, clipKeys, clipPose, clipState, displayClips, addAnimationKey, placeClipKey, clipKeyAt, parseRecording, tidyRecording, recordingTicks, recordingAnimation, importRecording, placeRecording, keepRecording, setRecording, poseState, showRecordedWalk, displayClipBones, displayClipRoot, updateRecordingLines, entityAnimations, clipDelta, sampleAnimation, liveRotation, liveOrigin, poseMessage, entityMessage, setContentCache: (c) => (contentCache = c), liveWorldName, adoptCopies, adoptTextures, poseKind, copyName, deckConnect, autoStartDeck, swingStates, heldItemAnswers, sequenceRows, sequenceKeys, sequenceEnd, writeSequence, clipPass, worldPlaces, parseLocate, locatePlace, goToPlace, openPlaces, doLaundry, LOCATE_VERSIONS, sceneTakes, liveMobs, actKeys, writeActs, mobActionChoices, openMobActions, actNumber, propertyStates, rootYaw, isLiveMob, tryAct, endTries, actTicks, cameraMarkMessage, hideCameraMarks, cameraMarksShown, setCameraMarks, sendTimelineForTake, placeRecording, sampleAnimation, sendAnimation, exportVideo, startRecorder, RECORDER_CS, RECORD_PS1, turnedEffect, turnVector, fxTurn, prepareTurned, turnedId, saddleParts, entityMessages, entityIds, flatParts, packFlat, partPlace, proxyModelFor, anyPartOn, prepareProxy, particleList, particleEntry, placeParticle, fxMessage, fxRoots };
+    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS, sceneSpot, addLight, lightRoots, stopPath, cameraPathsOn, cameraPose, sampleCameraAnimation, playCameraAnimation, animateCamera, zoomedFov, setupClipChannel, removeClipChannel, clipKeys, clipPose, clipState, displayClips, addAnimationKey, placeClipKey, clipKeyAt, parseRecording, tidyRecording, recordingTicks, recordingAnimation, importRecording, placeRecording, keepRecording, setRecording, poseState, showRecordedWalk, displayClipBones, displayClipRoot, updateRecordingLines, entityAnimations, clipDelta, sampleAnimation, liveRotation, liveOrigin, poseMessage, entityMessage, setContentCache: (c) => (contentCache = c), liveWorldName, adoptCopies, adoptTextures, poseKind, copyName, deckConnect, autoStartDeck, swingStates, heldItemAnswers, sequenceRows, sequenceKeys, sequenceEnd, writeSequence, clipPass, worldPlaces, parseLocate, locatePlace, goToPlace, openPlaces, doLaundry, LOCATE_VERSIONS, sceneTakes, liveMobs, actKeys, writeActs, mobActionChoices, openMobActions, actNumber, propertyStates, rootYaw, isLiveMob, tryAct, endTries, actTicks, mobActionsComponent, actLook, ACTS_CSS, cameraMarkMessage, hideCameraMarks, cameraMarksShown, setCameraMarks, sendTimelineForTake, placeRecording, sampleAnimation, sendAnimation, exportVideo, startRecorder, RECORDER_CS, RECORD_PS1, turnedEffect, turnVector, fxTurn, prepareTurned, turnedId, saddleParts, entityMessages, entityIds, flatParts, packFlat, partPlace, proxyModelFor, anyPartOn, prepareProxy, particleList, particleEntry, placeParticle, fxMessage, fxRoots };
   }
 
   Plugin.register('pose_studio', {

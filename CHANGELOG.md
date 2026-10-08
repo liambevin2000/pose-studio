@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.89.0 (2026-10-08)
+
+- Mob Actions is visual: cards to click, and a timeline of blocks to drag.
+- New: Play in Minecraft runs through the mob's actions in time.
+
 ## 0.88.0 (2026-10-08)
 
 - Mob Actions is now one list of what the mob can do: click it, and it's on the timeline and shown in Minecraft.
