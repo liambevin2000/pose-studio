@@ -1,5 +1,14 @@
 [
   {
+    "version": "0.86.0",
+    "date": "2026-10-08",
+    "changes": [
+      "New: Locations ▸ Find Biome or Structure. Lists the world's biomes and structures, including the packs' own, and teleports you to the nearest one.",
+      "Back to where I was returns you to where you started.",
+      "Update the Minecraft packs."
+    ]
+  },
+  {
     "version": "0.85.0",
     "date": "2026-10-07",
     "changes": [

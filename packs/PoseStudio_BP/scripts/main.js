@@ -532,6 +532,76 @@ system.runInterval(() => {
   for (const [id, said] of cameraMarks) if (now - said > CAMERA_MARK_TICKS) cameraMarks.delete(id);
 }, 40);
 
+// `pose:goto {"at":[x,y,z],"surface":1}`: to the ground at x, z, whatever its height (a structure
+// that /locate found: it doesn't say how high it is). The player is put high above the place
+// first, so the game loads it, and held there until it has; then onto the highest block (in the
+// Nether, the highest floor under the roof). `"remember":1` keeps where they stood before the
+// first such trip, and `{"back":1}` takes them back there.
+const returnPlaces = new Map(); // player id -> { at, rotation, dim }
+let surfaceRun;
+
+function rememberPlace(player) {
+  if (returnPlaces.has(player.id)) return;
+  const at = player.location;
+  returnPlaces.set(player.id, { at: { x: at.x, y: at.y, z: at.z }, rotation: player.getRotation(), dim: player.dimension.id });
+}
+
+function goBack(player) {
+  const place = returnPlaces.get(player.id);
+  if (!place) return;
+  returnPlaces.delete(player.id);
+  if (surfaceRun !== undefined) system.clearRun(surfaceRun);
+  surfaceRun = undefined;
+  player.teleport(place.at, { dimension: world.getDimension(place.dim), rotation: place.rotation, keepVelocity: false });
+}
+
+// the height to stand at in a column, or null while the place isn't loaded
+function groundAt(dim, x, z) {
+  if (dim.id !== "minecraft:nether") {
+    const top = dim.getTopmostBlock({ x, z });
+    return top ? top.location.y + 1 : null;
+  }
+  for (let y = 120; y > 4; y--) {
+    const block = dim.getBlock({ x, y, z });
+    if (!block) return null;
+    if (block.isAir || block.isLiquid) continue;
+    const above = dim.getBlock({ x, y: y + 1, z });
+    const head = dim.getBlock({ x, y: y + 2, z });
+    if (above && head && above.isAir && head.isAir) return y + 1;
+  }
+  return 100;
+}
+
+function goToSurface(player, dim, x, z) {
+  if (surfaceRun !== undefined) system.clearRun(surfaceRun);
+  const column = { x: Math.floor(x), z: Math.floor(z) };
+  const range = dim.heightRange || { max: 320 };
+  const high = { x: column.x + 0.5, y: dim.id === "minecraft:nether" ? 100 : Math.min(range.max - 1, 319), z: column.z + 0.5 };
+  player.teleport(high, { dimension: dim, keepVelocity: false });
+  let tries = 0;
+  surfaceRun = system.runInterval(() => {
+    tries++;
+    let y = null;
+    try {
+      y = groundAt(dim, column.x, column.z);
+    } catch {
+      // the place isn't loaded yet
+    }
+    try {
+      if (y !== null) player.teleport({ x: high.x, y, z: high.z }, { dimension: dim, keepVelocity: false });
+      else player.teleport(high, { dimension: dim, keepVelocity: false }); // (held up there meanwhile)
+    } catch {
+      // the player has gone
+      tries = 1000;
+    }
+    if (y !== null || tries > 300) {
+      // (15 seconds and still nothing there: left in the air above it)
+      system.clearRun(surfaceRun);
+      surfaceRun = undefined;
+    }
+  }, 1);
+}
+
 function removeMannequin(data) {
   cameraMarks.delete(String(data.id));
   if (effects.delete(String(data.id))) return;
@@ -1307,7 +1377,7 @@ function debug(player) {
 // Every name looks like `PSD[op|page|item]`; page 0 always carries
 // `M|ready|<pages>|<items>|<items per page>` or `M|busy|<percent>`.
 // What this script understands; Blockbench warns when the world runs an older one.
-const PACK_PROTOCOL = 35;
+const PACK_PROTOCOL = 36;
 const IO_OBJECTIVE = "pose_io";
 const ITEMS_PER_PAGE = 30;
 const MAX_PAGES_PER_BATCH = 16;
@@ -2181,9 +2251,14 @@ function handle(ev) {
       return debug(player);
     case "pose:goto": {
       // takes the player to a location (any dimension), so Minecraft loads and draws it
-      if (!player || !Array.isArray(data.at)) return;
+      // (with "surface", "remember" and "back": see goToSurface)
+      if (!player) return;
+      if (data.back) return goBack(player);
+      if (!Array.isArray(data.at)) return;
       const [x, y, z] = data.at.map(Number);
       const dim = data.dim ? world.getDimension(String(data.dim)) : player.dimension;
+      if (data.remember) rememberPlace(player);
+      if (data.surface) return goToSurface(player, dim, x, z);
       player.teleport({ x, y, z }, { dimension: dim, keepVelocity: false });
       return;
     }

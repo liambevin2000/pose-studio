@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.85.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.86.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -312,7 +312,7 @@
       }
     },
 
-    command(commandLine) {
+    command(commandLine, timeout = COMMAND_TIMEOUT_MS) {
       if (!this.socket) return Promise.reject(new Error('Minecraft is not connected'));
       const requestId = this.nodeCrypto.randomUUID();
       const message = JSON.stringify({
@@ -324,7 +324,7 @@
         const timer = setTimeout(() => {
           this.pending.delete(requestId);
           reject(new Error(`timed out: ${commandLine}`));
-        }, COMMAND_TIMEOUT_MS);
+        }, timeout);
         this.pending.set(requestId, { resolve, reject, timer });
       });
     },
@@ -5769,7 +5769,7 @@ try {
       delete MenuBar.menus.pose_studio;
       menu = null;
     }
-    const locations = { name: 'Locations', id: 'pose_studio_scene_menu', icon: 'place', children: [a.savescene, a.newlocation, a.locations, a.goscene, '_', a.refreshloc, a.realign, a.unlinkscene, '_', a.pickworld] };
+    const locations = { name: 'Locations', id: 'pose_studio_scene_menu', icon: 'place', children: [a.savescene, a.newlocation, a.locations, a.goscene, a.places, '_', a.refreshloc, a.realign, a.unlinkscene, '_', a.pickworld] };
     const aspect = { name: 'Aspect Ratio', id: 'pose_studio_aspect', icon: 'aspect_ratio', children: aspectMenuItems };
     const items = newInterface()
       ? [
@@ -6057,6 +6057,7 @@ try {
               <div class="ps-btn" @click="run('pose_studio_go_scene')" title="Takes you to where this scene's players, mobs and cameras are"><i class="material-icons">near_me</i><span>Go to Scene</span></div>
               <div class="ps-btn" @click="run('pose_studio_save_scene')"><i class="material-icons">save</i><span>Save</span></div>
               <div class="ps-btn" @click="run('pose_studio_new_location')" title="A new location where you're standing"><i class="material-icons">add_location_alt</i><span>New Here<b class="ps-dots">…</b></span></div>
+              <div class="ps-btn ps-wide" @click="run('pose_studio_places')" title="Find the nearest biome or structure and go there"><i class="material-icons">explore</i><span>Find Biome / Structure<b class="ps-dots">…</b></span></div>
             </div>
 
             <div class="ps-head" @click="fold('scene')"><i class="material-icons">{{ folded.scene ? 'chevron_right' : 'expand_more' }}</i>Scene</div>
@@ -7709,6 +7710,93 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     return depth ? merged : withDefaults(merged);
   }
 
+  // ---- The world's biomes and structures (for Find Biome or Structure…) ----
+  // What /locate can be asked for: Minecraft's own biomes (read from its behavior packs) and the
+  // biomes and structures the world's packs add (biomes\*.json, and the jigsaw structures in
+  // worldgen\structures\, which /locate structure takes by their identifier).
+  // places: { biomes: [{ id, pack ('' = Minecraft's), dim }], structures: [{ id, pack, group }] }
+  function biomePlace(json, pack) {
+    const biome = json && json['minecraft:biome'];
+    const id = biome && biome.description && biome.description.identifier;
+    if (!id) return null;
+    const about = JSON.stringify(biome.components || {});
+    return { id: String(id), pack, dim: /"nether"|minecraft:nether/.test(about) ? 'nether' : /"the_end"|minecraft:the_end/.test(about) ? 'the_end' : '' };
+  }
+
+  function readVanillaBiomes(fs, installData, places) {
+    const seen = new Map();
+    const take = (text) => {
+      try {
+        const place = biomePlace(parseLooseJson(text), '');
+        if (place) seen.set(place.id.replace(/^minecraft:/, ''), Object.assign(place, { id: place.id.replace(/^minecraft:/, '') }));
+      } catch (e) {
+        // skip
+      }
+    };
+    for (const dir of vanillaBehaviorDirs(fs, installData)) {
+      const archive = `${dir}\\__brarchive\\biomes.brarchive`;
+      try {
+        if (fs.existsSync(archive)) for (const entry of readBrarchive(fs.readFileSync(archive))) if (/\.json$/i.test(entry.name) && entry.size) take(entry.read());
+      } catch (e) {
+        // not readable: the loose files, if there are any
+      }
+      let names = [];
+      try {
+        names = fs.readdirSync(`${dir}\\biomes`);
+      } catch (e) {
+        continue;
+      }
+      for (const name of names) {
+        if (!/\.json$/i.test(name)) continue;
+        try {
+          take(fs.readFileSync(`${dir}\\biomes\\${name}`));
+        } catch (e) {
+          // skip
+        }
+      }
+    }
+    places.biomes.push(...seen.values());
+  }
+
+  function readPackPlaces(fs, pack, places) {
+    const walk = (dir, depth, each) => {
+      let names = [];
+      try {
+        names = fs.readdirSync(dir);
+      } catch (e) {
+        return;
+      }
+      for (const name of names) {
+        const full = `${dir}\\${name}`;
+        if (/\.json$/i.test(name)) {
+          try {
+            each(parseLooseJson(fs.readFileSync(full)), full);
+          } catch (e) {
+            // skip
+          }
+        } else if (depth < 6 && !/\.[a-z0-9]{1,5}$/i.test(name)) walk(full, depth + 1, each);
+      }
+    };
+    walk(`${pack.dir}\\biomes`, 0, (json) => {
+      const place = biomePlace(json, pack.name);
+      if (!place) return;
+      // (a pack's own version of one of Minecraft's biomes is still that biome)
+      const plain = place.id.replace(/^minecraft:/, '');
+      const had = places.biomes.find((b) => b.id === plain || b.id === place.id);
+      if (had) return;
+      places.biomes.push(Object.assign(place, { id: /^minecraft:/.test(place.id) ? plain : place.id }));
+    });
+    const base = `${pack.dir}\\worldgen\\structures`;
+    walk(base, 0, (json, full) => {
+      const jigsaw = json && json['minecraft:jigsaw'];
+      const id = jigsaw && jigsaw.description && jigsaw.description.identifier;
+      if (!id || places.structures.some((s) => s.id === String(id))) return;
+      // the folder it's in says what kind it is (arenas, villages…)
+      const inside = full.slice(base.length + 1).split('\\');
+      places.structures.push({ id: String(id), pack: pack.name, group: inside.length > 1 ? inside[0] : '' });
+    });
+  }
+
   // ---- Content for a world ----
   function loadContent(fs, { installData, bedrockRoot, world }) {
     const layers = []; // lowest priority first
@@ -7779,6 +7867,13 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     }
     const items = new Map();
     for (const pack of bp) if (pack.dir) readPackItems(fs, pack, items);
+    const places = { biomes: [], structures: [] };
+    try {
+      readVanillaBiomes(fs, installData, places);
+    } catch (e) {
+      // Minecraft's own aren't to be had: the world's packs' still are
+    }
+    for (const pack of bp) if (pack.dir) readPackPlaces(fs, pack, places);
     const entityProperties = new Map(); // entity id -> { property -> enum values }
     const seats = new Map(); // entity id -> [{ group, family, seats: [{ position }] }]
     try {
@@ -7787,7 +7882,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
       // Minecraft's own behavior files unreadable: pack mobs still have theirs
     }
     for (const pack of bp) if (pack.dir) readPackEntityProperties(fs, pack, entityProperties, seats);
-    return { layers, rp, bp, entities, geometries, controllers, animations, animationControllers, names, attachables, itemNames, itemTextures, items, entityProperties, seats };
+    return { layers, rp, bp, entities, geometries, controllers, animations, animationControllers, names, attachables, itemNames, itemTextures, items, entityProperties, seats, places };
   }
 
   // The seats a mob offers riders (minecraft:rideable, in its components or component groups).
@@ -11596,6 +11691,187 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     return (await loadWorldContent(world)).content;
   }
 
+  // ---- Find a biome or a structure -----------------------------------------------------------------
+  // Pose Studio ▸ Locations ▸ Find Biome or Structure…: every biome and structure of the world
+  // (Minecraft's, and the ones the world's packs add), found with the game's own /locate from
+  // where you stand, and a teleport to what was found: onto the ground there, since /locate
+  // doesn't say how high a structure is. "Back to where I was" takes you back to where you stood
+  // before the first of those teleports.
+  const VANILLA_STRUCTURES = [
+    ['village', 'Village'], ['pillager_outpost', 'Pillager Outpost'], ['mansion', 'Woodland Mansion'], ['temple', 'Temple (desert, jungle, igloo, witch hut)'],
+    ['monument', 'Ocean Monument'], ['shipwreck', 'Shipwreck'], ['ruins', 'Ocean Ruins'], ['buried_treasure', 'Buried Treasure'], ['ruined_portal', 'Ruined Portal'],
+    ['trail_ruins', 'Trail Ruins'], ['mineshaft', 'Mineshaft', '', true], ['stronghold', 'Stronghold', '', true], ['ancient_city', 'Ancient City', '', true], ['trial_chambers', 'Trial Chambers', '', true],
+    ['fortress', 'Nether Fortress', 'nether'], ['bastion_remnant', 'Bastion Remnant', 'nether'], ['end_city', 'End City', 'the_end'],
+  ];
+  // what Minecraft calls the biomes whose ids are from before they were renamed
+  const BIOME_NAMES = {
+    hell: 'Nether Wastes', soulsand_valley: 'Soul Sand Valley', the_end: 'The End', roofed_forest: 'Dark Forest', mesa: 'Badlands', mesa_bryce: 'Eroded Badlands',
+    mesa_plateau_stone: 'Wooded Badlands', ice_plains: 'Snowy Plains', ice_plains_spikes: 'Ice Spikes', cold_taiga: 'Snowy Taiga', cold_beach: 'Snowy Beach',
+    stone_beach: 'Stony Shore', extreme_hills: 'Windswept Hills', extreme_hills_plus_trees: 'Windswept Forest', extreme_hills_mutated: 'Windswept Gravelly Hills',
+    savanna_mutated: 'Windswept Savanna', mega_taiga: 'Old Growth Pine Taiga', redwood_taiga_mutated: 'Old Growth Spruce Taiga', birch_forest_mutated: 'Old Growth Birch Forest',
+    jungle_edge: 'Sparse Jungle', swampland: 'Swamp', mushroom_island: 'Mushroom Fields',
+  };
+  // Minecraft's main biomes, for when its own files can't be read (they're read with the world's packs)
+  const MAIN_BIOMES = ('plains sunflower_plains forest flower_forest birch_forest roofed_forest pale_garden taiga mega_taiga cold_taiga jungle bamboo_jungle jungle_edge savanna desert mesa swampland ' +
+    'mangrove_swamp cherry_grove meadow grove snowy_slopes jagged_peaks frozen_peaks stony_peaks ice_plains ice_plains_spikes extreme_hills mushroom_island beach stone_beach river ocean deep_ocean warm_ocean ' +
+    'lukewarm_ocean cold_ocean frozen_ocean lush_caves dripstone_caves deep_dark hell crimson_forest warped_forest soulsand_valley basalt_deltas the_end').split(' ');
+  const DIMENSION_NAMES = { nether: 'Nether', the_end: 'The End' };
+  const CAVE_BIOME = /cave|deep_dark|underground/i;
+  const titleCase = (id) => String(id).replace(/^[^:]+:/, '').split(/[_.\s]+/).filter(Boolean).map((w) => w[0].toUpperCase() + w.slice(1)).join(' ');
+
+  // Everything that can be looked for, the world's own first: [{ key, kind: 'biome' | 'structure',
+  // id, name, note (where it's from, or which dimension it's in), own, under }].
+  function worldPlaces(content) {
+    const places = (content && content.places) || { biomes: [], structures: [] };
+    const out = [];
+    const biomes = places.biomes.some((b) => !b.pack)
+      ? places.biomes
+      : MAIN_BIOMES.map((id) => ({ id, pack: '', dim: /^(hell|crimson_forest|warped_forest|soulsand_valley|basalt_deltas)$/.test(id) ? 'nether' : id === 'the_end' ? 'the_end' : '' })).concat(places.biomes);
+    for (const b of biomes) {
+      out.push({ key: `b|${b.id}`, kind: 'biome', id: b.id, name: BIOME_NAMES[b.id] || titleCase(b.id), own: !!b.pack, under: CAVE_BIOME.test(b.id), note: [b.pack, DIMENSION_NAMES[b.dim]].filter(Boolean).join(' · ') });
+    }
+    for (const [id, name, dim, under] of VANILLA_STRUCTURES) out.push({ key: `s|${id}`, kind: 'structure', id, name, own: false, under: !!under, note: DIMENSION_NAMES[dim] || '' });
+    for (const s of places.structures) {
+      out.push({ key: `s|${s.id}`, kind: 'structure', id: s.id, name: titleCase(s.id), own: true, under: /underground|cave/i.test(s.group), note: [s.pack, s.group.replace(/_/g, ' ')].filter(Boolean).join(' · ') });
+    }
+    return out.sort((a, b) => Number(b.own) - Number(a.own) || a.name.localeCompare(b.name));
+  }
+
+  // Where /locate said a thing is: { x, y (null when it doesn't say), z, distance (null when it
+  // doesn't say) }, from the command's answer; null when no place can be made out of it.
+  function parseLocate(body, id) {
+    const d = body && (body.destination || body.position);
+    if (d && Number.isFinite(Number(d.x)) && Number.isFinite(Number(d.z))) {
+      return { x: Math.round(Number(d.x)), y: Number.isFinite(Number(d.y)) ? Math.round(Number(d.y)) : null, z: Math.round(Number(d.z)), distance: null };
+    }
+    let text = String((body && body.statusMessage) || '').replace(/§./g, '');
+    // (the name asked for can have numbers of its own)
+    for (const part of [String(id), String(id).replace(/^[^:]+:/, '')]) if (part) text = text.split(part).join(' ');
+    const n = (text.match(/-?\d+(?:\.\d+)?/g) || []).map(Number);
+    if (n.length >= 4) return { x: n[0], y: n[1], z: n[2], distance: n[3] };
+    if (n.length === 3) return { x: n[0], y: null, z: n[1], distance: n[2] }; // "… at block x, (y?), z (n blocks away)"
+    if (n.length === 2) return { x: n[0], y: null, z: n[1], distance: null };
+    return null;
+  }
+
+  const LOCATE_TIMEOUT_MS = 90000; // (the game can be a while about a rare one)
+  async function locatePlace(place) {
+    const body = await link.command(`locate ${place.kind === 'biome' ? 'biome' : 'structure'} ${place.id}`, LOCATE_TIMEOUT_MS);
+    const found = parseLocate(body, place.id);
+    if (!found) throw new Error(`Minecraft answered, but not with a place: ${String((body && body.statusMessage) || JSON.stringify(body)).slice(0, 160)}`);
+    return found;
+  }
+
+  // Takes you there: onto the ground at what was found (a cave biome: to the height /locate gave).
+  function goToPlace(place, found) {
+    const exact = place.kind === 'biome' && place.under && found.y !== null;
+    send(`scriptevent pose:goto ${JSON.stringify(Object.assign({ at: [found.x, found.y === null ? 0 : found.y, found.z], remember: 1 }, exact ? {} : { surface: 1 }))}`);
+  }
+
+  async function openPlaces() {
+    if (!requireConnection()) return;
+    let content = null;
+    try {
+      content = await previewContent();
+    } catch (e) {
+      console.warn('[Pose Studio] the world\'s biomes and structures', e);
+    }
+    const places = worldPlaces(content);
+    const dialog = new Dialog({
+      id: 'pose_studio_places',
+      title: 'Find Biome or Structure',
+      width: 760,
+      buttons: ['Close'],
+      component: {
+        data: () => ({ places, search: '', kind: 'all', picked: '', busy: '', found: {}, failed: {}, moved: false, said: '' }),
+        computed: {
+          shown() {
+            const q = this.search.trim().toLowerCase();
+            return this.places.filter((p) => (this.kind === 'all' || p.kind === this.kind) && (!q || p.name.toLowerCase().includes(q) || p.id.toLowerCase().includes(q) || p.note.toLowerCase().includes(q)));
+          },
+          counts() {
+            return { biome: this.places.filter((p) => p.kind === 'biome').length, structure: this.places.filter((p) => p.kind === 'structure').length };
+          },
+        },
+        methods: {
+          where(p) {
+            const f = this.found[p.key];
+            if (!f) return '';
+            return `${f.x}, ${f.y === null ? '~' : f.y}, ${f.z}${f.distance === null ? '' : ` · ${Math.round(f.distance)} blocks away`}`;
+          },
+          // asks the game where the nearest one is, from where you stand
+          async find(p) {
+            if (this.busy) return null;
+            this.picked = p.key;
+            this.busy = p.key;
+            this.said = `Looking for the nearest ${p.name}… (Minecraft can freeze for a moment)`;
+            try {
+              const found = await locatePlace(p);
+              this.$set ? this.$set(this.found, p.key, found) : (this.found = Object.assign({}, this.found, { [p.key]: found }));
+              this.failed = Object.assign({}, this.failed, { [p.key]: '' });
+              this.said = `${p.name}: ${this.where(p)}`;
+              return found;
+            } catch (e) {
+              const why = String((e && e.message) || e).replace(/§./g, '');
+              this.failed = Object.assign({}, this.failed, { [p.key]: why });
+              this.said = `${p.name}: ${why}`;
+              return null;
+            } finally {
+              this.busy = '';
+            }
+          },
+          // there (found first, if it hasn't been)
+          async go(p) {
+            const found = this.found[p.key] || (await this.find(p));
+            if (!found) return;
+            goToPlace(p, found);
+            this.moved = true;
+            this.said = `Taking you to ${p.name} at ${found.x}, ${found.z}${p.under ? ' (it is underground: you land above it)' : ''}`;
+          },
+          back() {
+            send('scriptevent pose:goto {"back":1}');
+            this.moved = false;
+            this.said = 'Back to where you were';
+          },
+          copy(p) {
+            const f = this.found[p.key];
+            if (f) copyText(`/tp @s ${f.x} ${f.y === null ? '~' : f.y} ${f.z}`);
+          },
+        },
+        template: `
+          <div style="display: flex; flex-direction: column; gap: 8px;">
+            <div style="display: flex; gap: 10px; align-items: center;">
+              <input type="text" v-model="search" placeholder="Search biomes and structures…" class="dark_bordered" style="flex: 1; min-width: 0;">
+              <label><input type="radio" value="all" v-model="kind"> All</label>
+              <label><input type="radio" value="biome" v-model="kind"> Biomes ({{ counts.biome }})</label>
+              <label><input type="radio" value="structure" v-model="kind"> Structures ({{ counts.structure }})</label>
+            </div>
+            <div style="height: 380px; overflow-y: auto; border: 1px solid var(--color-border); border-radius: 4px;">
+              <div v-for="p in shown" :key="p.key" @click="picked = p.key" @dblclick="go(p)" :title="p.id + ': Find asks Minecraft where the nearest one is, Go takes you there (or double-click)'"
+                   :style="{ display: 'flex', alignItems: 'center', gap: '8px', padding: '3px 8px', cursor: 'pointer', background: p.key === picked ? 'var(--color-selected)' : '' }">
+                <i class="material-icons" style="font-size: 18px; flex: none; opacity: 0.8;">{{ p.kind === 'biome' ? 'park' : 'fort' }}</i>
+                <span style="flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                  <b v-if="p.own">{{ p.name }}</b><span v-else>{{ p.name }}</span>
+                  <span style="opacity: 0.55; font-size: 0.85em;"> {{ p.note }}</span>
+                </span>
+                <span v-if="found[p.key]" style="flex: none; font-size: 0.85em; color: var(--color-accent);">{{ where(p) }}</span>
+                <span v-else-if="failed[p.key]" style="flex: none; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.85em; opacity: 0.7;" :title="failed[p.key]">not found</span>
+                <button @click.stop="find(p)" :disabled="!!busy" style="min-width: 0; padding: 0 10px; flex: none;">{{ busy === p.key ? '…' : 'Find' }}</button>
+                <button @click.stop="go(p)" :disabled="!!busy" style="min-width: 0; padding: 0 10px; flex: none;" title="Takes you to the nearest one (finds it first)">Go</button>
+                <button v-if="found[p.key]" @click.stop="copy(p)" style="min-width: 0; padding: 0 8px; flex: none;" title="Copy a /tp command to it">⧉</button>
+              </div>
+              <p v-if="!shown.length" style="padding: 8px; opacity: 0.7;">Nothing matches.</p>
+            </div>
+            <div style="display: flex; gap: 10px; align-items: center; justify-content: space-between;">
+              <span style="flex: 1; min-width: 0; opacity: 0.85;">{{ said || 'The nearest one is looked for from where you stand in Minecraft, in the dimension you are in. Bold: from this world\\'s packs.' }}</span>
+              <button @click="back()" :disabled="!moved" style="min-width: 0; padding: 0 12px; flex: none;" title="Takes you back to where you stood before the first Go">Back to where I was</button>
+            </div>
+          </div>`,
+      },
+    });
+    dialog.show();
+  }
+
   // ---- Custom armour ----
   // Armour from the world's packs: items with a wearable armour slot (behavior pack) drawn by an
   // attachable (resource pack). Attachable models are built on the player's bones (head, body,
@@ -12556,7 +12832,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     return { id: idItem.slice(2), name: scene.world || '', anchor: point('A|'), player: point('P|'), locations, removed: scene.removed || [], protocol: version ? Number(version.slice(2)) : 0 };
   }
 
-  const EXPECTED_PACK_PROTOCOL = 35; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
+  const EXPECTED_PACK_PROTOCOL = 36; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
   let warnedOldPack = false;
 
   // Scene files in the scenes folders that belong to a world (their pose_world says so), as
@@ -13391,6 +13667,15 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.86.0",
+      "date": "2026-10-08",
+      "changes": [
+        "New: Locations ▸ Find Biome or Structure. Lists the world's biomes and structures, including the packs' own, and teleports you to the nearest one.",
+        "Back to where I was returns you to where you started.",
+        "Update the Minecraft packs."
+      ]
+    },
     {
       "version": "0.85.0",
       "date": "2026-10-07",
@@ -14448,7 +14733,7 @@ ${PLUGIN_URL}`,
 
   // for the plugin's own tests only (they set this flag); nothing happens otherwise
   if (typeof globalThis !== 'undefined' && globalThis.__POSE_STUDIO_TEST) {
-    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS, sceneSpot, addLight, lightRoots, stopPath, cameraPathsOn, cameraPose, sampleCameraAnimation, playCameraAnimation, animateCamera, zoomedFov, setupClipChannel, removeClipChannel, clipKeys, clipPose, clipState, displayClips, addAnimationKey, placeClipKey, clipKeyAt, parseRecording, tidyRecording, recordingTicks, recordingAnimation, importRecording, placeRecording, keepRecording, setRecording, poseState, showRecordedWalk, displayClipBones, displayClipRoot, updateRecordingLines, entityAnimations, clipDelta, sampleAnimation, liveRotation, liveOrigin, poseMessage, entityMessage, setContentCache: (c) => (contentCache = c), liveWorldName, adoptCopies, adoptTextures, poseKind, copyName, deckConnect, autoStartDeck, swingStates, heldItemAnswers, sequenceRows, sequenceKeys, sequenceEnd, writeSequence, clipPass, cameraMarkMessage, hideCameraMarks, cameraMarksShown, setCameraMarks, sendTimelineForTake, placeRecording, sampleAnimation, sendAnimation, exportVideo, startRecorder, RECORDER_CS, RECORD_PS1, turnedEffect, turnVector, fxTurn, prepareTurned, turnedId, saddleParts, entityMessages, entityIds, flatParts, packFlat, partPlace, proxyModelFor, anyPartOn, prepareProxy, particleList, particleEntry, placeParticle, fxMessage, fxRoots };
+    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS, sceneSpot, addLight, lightRoots, stopPath, cameraPathsOn, cameraPose, sampleCameraAnimation, playCameraAnimation, animateCamera, zoomedFov, setupClipChannel, removeClipChannel, clipKeys, clipPose, clipState, displayClips, addAnimationKey, placeClipKey, clipKeyAt, parseRecording, tidyRecording, recordingTicks, recordingAnimation, importRecording, placeRecording, keepRecording, setRecording, poseState, showRecordedWalk, displayClipBones, displayClipRoot, updateRecordingLines, entityAnimations, clipDelta, sampleAnimation, liveRotation, liveOrigin, poseMessage, entityMessage, setContentCache: (c) => (contentCache = c), liveWorldName, adoptCopies, adoptTextures, poseKind, copyName, deckConnect, autoStartDeck, swingStates, heldItemAnswers, sequenceRows, sequenceKeys, sequenceEnd, writeSequence, clipPass, worldPlaces, parseLocate, locatePlace, goToPlace, openPlaces, cameraMarkMessage, hideCameraMarks, cameraMarksShown, setCameraMarks, sendTimelineForTake, placeRecording, sampleAnimation, sendAnimation, exportVideo, startRecorder, RECORDER_CS, RECORD_PS1, turnedEffect, turnVector, fxTurn, prepareTurned, turnedId, saddleParts, entityMessages, entityIds, flatParts, packFlat, partPlace, proxyModelFor, anyPartOn, prepareProxy, particleList, particleEntry, placeParticle, fxMessage, fxRoots };
   }
 
   Plugin.register('pose_studio', {
@@ -14669,6 +14954,10 @@ ${PLUGIN_URL}`,
         wildmobs: new Action('pose_studio_clear_mobs', {
           name: 'Remove Wild Mobs…', icon: 'pest_control', click: removeWildMobsDialog,
           description: "Takes the mobs Pose Studio didn't place out of the scene, without drops (boats, minecarts and armour stands stay).",
+        }),
+        places: new Action('pose_studio_places', {
+          name: 'Find Biome or Structure…', icon: 'explore', click: () => openPlaces(),
+          description: "Lists the world's biomes and structures (Minecraft's and its packs'), finds the nearest one from where you stand, and takes you there.",
         }),
         goscene: new Action('pose_studio_go_scene', {
           name: 'Go to Scene', icon: 'near_me', click: () => goToScene(),

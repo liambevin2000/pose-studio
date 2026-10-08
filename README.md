@@ -182,6 +182,18 @@ In Minecraft a Pose Studio player's limbs move smoothly from each pose to the ne
 
 Limits: Minecraft's camera can't roll. Bones in the game update 20 times a second. Items held by mobs follow the playhead but not Play Animation in Minecraft. Position keyframes on single bones are not sent to the game.
 
+## Finding biomes and structures
+
+**Pose Studio ▸ Locations ▸ Find Biome or Structure…** (also on the panel) lists every biome and structure of the world and takes you to the nearest one.
+
+- The list has Minecraft's own and the ones the world's packs add (in bold, with the pack and the folder they are in: DragonCraft's arenas, villages, wilderness structures…). Search by name or id; show only biomes or only structures.
+- **Find** asks Minecraft where the nearest one is, from where you stand, and shows the coordinates and the distance. Minecraft can freeze for a moment while it looks for a rare one.
+- **Go** (or a double-click) takes you there. You land on the ground at that spot: Minecraft does not say how high a structure is, so one that is underground is below where you land. A cave biome takes you to the spot it gave.
+- **Back to where I was** returns you to where you stood before the first Go, so you can look at a few places and come back to your scene.
+- **⧉** copies a `/tp` command to what was found.
+- It looks in the dimension you are in: go to the Nether first for a fortress or a bastion.
+- To shoot there, use **New Location Here…** once you have arrived.
+
 ## Cameras shown in Minecraft
 
 Every camera of the scene stands in the Minecraft world as a little camera: where it is, pointing the way it looks (a yellow line runs out of the lens), with its name over it. Move or turn the camera in Blockbench and it moves in the game. So walking about in the game you can see where your shots are taken from, and where to play to when you record yourself.

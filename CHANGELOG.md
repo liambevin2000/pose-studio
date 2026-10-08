@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.86.0 (2026-10-08)
+
+- New: Locations ▸ Find Biome or Structure. Lists the world's biomes and structures, including the packs' own, and teleports you to the nearest one.
+- Back to where I was returns you to where you started.
+- Update the Minecraft packs.
+
 ## 0.85.0 (2026-10-07)
 
 - Animations for a player or mob are now a sequence: add them in order and each starts when the one before ends.
