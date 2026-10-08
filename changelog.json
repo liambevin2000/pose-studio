@@ -1,5 +1,13 @@
 [
   {
+    "version": "0.86.1",
+    "date": "2026-10-08",
+    "changes": [
+      "New in the settings: Do the Laundry. It does the laundry.",
+      "Fixed: the Go to Locations setting was not being read at startup."
+    ]
+  },
+  {
     "version": "0.86.0",
     "date": "2026-10-08",
     "changes": [

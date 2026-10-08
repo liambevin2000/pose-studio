@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.86.1 (2026-10-08)
+
+- New in the settings: Do the Laundry. It does the laundry.
+- Fixed: the Go to Locations setting was not being read at startup.
+
 ## 0.86.0 (2026-10-08)
 
 - New: Locations ▸ Find Biome or Structure. Lists the world's biomes and structures, including the packs' own, and teleports you to the nearest one.

@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.86.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.86.1'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -11691,6 +11691,88 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     return (await loadWorldContent(world)).content;
   }
 
+  // ---- Do the Laundry --------------------------------------------------------------------------------
+  // Settings ▸ Pose Studio: Do the Laundry. A washing machine spins for a moment ("Doing
+  // Laundry…"), then it says "Laundry Done". That is all it does. A click sends it away sooner.
+  const LAUNDRY_SPIN_MS = 2400;
+  const LAUNDRY_DONE_MS = 1600;
+  const LAUNDRY_CSS = `
+    .ps-laundry { position: fixed; left: 0; top: 0; right: 0; bottom: 0; z-index: 99999; display: flex; align-items: center; justify-content: center; background: rgba(0, 0, 0, 0.4); cursor: pointer; }
+    .ps-laundry-card { background: var(--color-ui, #282c34); color: var(--color-text, #fff); border: 1px solid var(--color-border, #181a1f); border-radius: 12px; padding: 26px 40px 20px; text-align: center; box-shadow: 0 10px 34px rgba(0, 0, 0, 0.55); }
+    .ps-laundry-machine { position: relative; width: 116px; height: 136px; margin: 0 auto 14px; border-radius: 10px; background: #eef2f5; border: 3px solid #9aa7b1; animation: ps-laundry-shake 0.16s linear infinite; }
+    .ps-laundry-top { position: absolute; left: 0; right: 0; top: 0; height: 22px; border-bottom: 3px solid #9aa7b1; }
+    .ps-laundry-top i { position: absolute; top: 6px; width: 9px; height: 9px; border-radius: 50%; background: #9aa7b1; }
+    .ps-laundry-top i:nth-child(1) { left: 10px; background: #e0362c; animation: ps-laundry-blink 0.5s steps(1) infinite; }
+    .ps-laundry-top i:nth-child(2) { left: 26px; }
+    .ps-laundry-top i:nth-child(3) { right: 10px; width: 30px; border-radius: 4px; }
+    .ps-laundry-door { position: absolute; left: 50%; top: 76px; width: 76px; height: 76px; margin: -38px 0 0 -38px; border-radius: 50%; border: 6px solid #7d8a94; background: #7fd6ff; overflow: hidden; }
+    .ps-laundry-water { position: absolute; left: -30%; right: -30%; bottom: -34%; height: 80%; border-radius: 42%; background: rgba(255, 255, 255, 0.6); animation: ps-laundry-spin 1.1s linear infinite; }
+    .ps-laundry-drum { position: absolute; left: 0; top: 0; right: 0; bottom: 0; animation: ps-laundry-spin 0.6s linear infinite; }
+    .ps-laundry-drum span { position: absolute; font-size: 22px; line-height: 1; }
+    .ps-laundry-drum span:nth-child(1) { left: 8px; top: 6px; }
+    .ps-laundry-drum span:nth-child(2) { right: 6px; top: 24px; }
+    .ps-laundry-drum span:nth-child(3) { left: 22px; bottom: 4px; }
+    .ps-laundry-bubbles i { position: absolute; bottom: 100%; width: 10px; height: 10px; border-radius: 50%; border: 2px solid #7fd6ff; opacity: 0; animation: ps-laundry-bubble 1.2s ease-out infinite; }
+    .ps-laundry-bubbles i:nth-child(1) { left: 18px; }
+    .ps-laundry-bubbles i:nth-child(2) { left: 54px; width: 14px; height: 14px; animation-delay: 0.4s; }
+    .ps-laundry-bubbles i:nth-child(3) { left: 88px; animation-delay: 0.8s; }
+    .ps-laundry-text { font-size: 1.25em; font-weight: bold; min-width: 190px; }
+    .ps-laundry-done .ps-laundry-machine, .ps-laundry-done .ps-laundry-drum, .ps-laundry-done .ps-laundry-water, .ps-laundry-done .ps-laundry-top i { animation: none; }
+    .ps-laundry-done .ps-laundry-top i:nth-child(1) { background: #5be04a; }
+    .ps-laundry-done .ps-laundry-bubbles { display: none; }
+    .ps-laundry-done .ps-laundry-door { background: #dff3e0; }
+    .ps-laundry-done .ps-laundry-text { color: #5be04a; animation: ps-laundry-pop 0.35s ease-out; }
+    @keyframes ps-laundry-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+    @keyframes ps-laundry-shake { 0% { transform: translate(-1px, 0) rotate(-0.6deg); } 50% { transform: translate(1px, 1px) rotate(0.6deg); } 100% { transform: translate(-1px, 0) rotate(-0.6deg); } }
+    @keyframes ps-laundry-blink { 0% { opacity: 1; } 50% { opacity: 0.25; } }
+    @keyframes ps-laundry-bubble { 0% { transform: translateY(6px) scale(0.5); opacity: 0; } 30% { opacity: 0.9; } 100% { transform: translateY(-34px) scale(1.1); opacity: 0; } }
+    @keyframes ps-laundry-pop { 0% { transform: scale(0.7); } 70% { transform: scale(1.15); } 100% { transform: scale(1); } }
+  `;
+  let laundryOn = false;
+  function doLaundry() {
+    if (laundryOn) return Promise.resolve(false);
+    if (typeof document === 'undefined' || !document.body || !document.createElement) {
+      Blockbench.showQuickMessage('Laundry Done', 2000);
+      return Promise.resolve(true);
+    }
+    laundryOn = true;
+    const make = (tag, name, inside = '') => {
+      const el = document.createElement(tag);
+      el.className = name;
+      if (inside) el.innerHTML = inside;
+      return el;
+    };
+    const box = make('div', 'ps-laundry');
+    const style = document.createElement('style');
+    style.textContent = LAUNDRY_CSS;
+    const card = make('div', 'ps-laundry-card');
+    const machine = make('div', 'ps-laundry-machine',
+      '<div class="ps-laundry-bubbles"><i></i><i></i><i></i></div><div class="ps-laundry-top"><i></i><i></i><i></i></div>' +
+      '<div class="ps-laundry-door"><div class="ps-laundry-water"></div><div class="ps-laundry-drum"><span>👕</span><span>🧦</span><span>🩳</span></div></div>');
+    const text = make('div', 'ps-laundry-text');
+    text.textContent = 'Doing Laundry…';
+    card.appendChild(machine);
+    card.appendChild(text);
+    box.appendChild(style);
+    box.appendChild(card);
+    document.body.appendChild(box);
+    return new Promise((resolve) => {
+      let timer = null;
+      const away = () => {
+        clearTimeout(timer);
+        if (box.remove) box.remove();
+        laundryOn = false;
+        resolve(true);
+      };
+      box.onclick = away;
+      timer = setTimeout(() => {
+        box.className = 'ps-laundry ps-laundry-done';
+        text.textContent = 'Laundry Done';
+        timer = setTimeout(away, LAUNDRY_DONE_MS);
+      }, LAUNDRY_SPIN_MS);
+    });
+  }
+
   // ---- Find a biome or a structure -----------------------------------------------------------------
   // Pose Studio ▸ Locations ▸ Find Biome or Structure…: every biome and structure of the world
   // (Minecraft's, and the ones the world's packs add), found with the game's own /locate from
@@ -13668,6 +13750,14 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // <changelog>
   const CHANGELOG = [
     {
+      "version": "0.86.1",
+      "date": "2026-10-08",
+      "changes": [
+        "New in the settings: Do the Laundry. It does the laundry.",
+        "Fixed: the Go to Locations setting was not being read at startup."
+      ]
+    },
+    {
       "version": "0.86.0",
       "date": "2026-10-08",
       "changes": [
@@ -14733,7 +14823,7 @@ ${PLUGIN_URL}`,
 
   // for the plugin's own tests only (they set this flag); nothing happens otherwise
   if (typeof globalThis !== 'undefined' && globalThis.__POSE_STUDIO_TEST) {
-    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS, sceneSpot, addLight, lightRoots, stopPath, cameraPathsOn, cameraPose, sampleCameraAnimation, playCameraAnimation, animateCamera, zoomedFov, setupClipChannel, removeClipChannel, clipKeys, clipPose, clipState, displayClips, addAnimationKey, placeClipKey, clipKeyAt, parseRecording, tidyRecording, recordingTicks, recordingAnimation, importRecording, placeRecording, keepRecording, setRecording, poseState, showRecordedWalk, displayClipBones, displayClipRoot, updateRecordingLines, entityAnimations, clipDelta, sampleAnimation, liveRotation, liveOrigin, poseMessage, entityMessage, setContentCache: (c) => (contentCache = c), liveWorldName, adoptCopies, adoptTextures, poseKind, copyName, deckConnect, autoStartDeck, swingStates, heldItemAnswers, sequenceRows, sequenceKeys, sequenceEnd, writeSequence, clipPass, worldPlaces, parseLocate, locatePlace, goToPlace, openPlaces, cameraMarkMessage, hideCameraMarks, cameraMarksShown, setCameraMarks, sendTimelineForTake, placeRecording, sampleAnimation, sendAnimation, exportVideo, startRecorder, RECORDER_CS, RECORD_PS1, turnedEffect, turnVector, fxTurn, prepareTurned, turnedId, saddleParts, entityMessages, entityIds, flatParts, packFlat, partPlace, proxyModelFor, anyPartOn, prepareProxy, particleList, particleEntry, placeParticle, fxMessage, fxRoots };
+    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS, sceneSpot, addLight, lightRoots, stopPath, cameraPathsOn, cameraPose, sampleCameraAnimation, playCameraAnimation, animateCamera, zoomedFov, setupClipChannel, removeClipChannel, clipKeys, clipPose, clipState, displayClips, addAnimationKey, placeClipKey, clipKeyAt, parseRecording, tidyRecording, recordingTicks, recordingAnimation, importRecording, placeRecording, keepRecording, setRecording, poseState, showRecordedWalk, displayClipBones, displayClipRoot, updateRecordingLines, entityAnimations, clipDelta, sampleAnimation, liveRotation, liveOrigin, poseMessage, entityMessage, setContentCache: (c) => (contentCache = c), liveWorldName, adoptCopies, adoptTextures, poseKind, copyName, deckConnect, autoStartDeck, swingStates, heldItemAnswers, sequenceRows, sequenceKeys, sequenceEnd, writeSequence, clipPass, worldPlaces, parseLocate, locatePlace, goToPlace, openPlaces, doLaundry, cameraMarkMessage, hideCameraMarks, cameraMarksShown, setCameraMarks, sendTimelineForTake, placeRecording, sampleAnimation, sendAnimation, exportVideo, startRecorder, RECORDER_CS, RECORD_PS1, turnedEffect, turnVector, fxTurn, prepareTurned, turnedId, saddleParts, entityMessages, entityIds, flatParts, packFlat, partPlace, proxyModelFor, anyPartOn, prepareProxy, particleList, particleEntry, placeParticle, fxMessage, fxRoots };
   }
 
   Plugin.register('pose_studio', {
@@ -15062,7 +15152,8 @@ ${PLUGIN_URL}`,
       actions = Object.values(a);
 
       // Rarely needed options live on the plugin's page (File > Plugins > Pose Studio > Settings).
-      const setting = (id, options) => new Setting(id, Object.assign({ category: 'general', plugin: 'pose_studio' }, options));
+      const settingsById = {};
+      const setting = (id, options) => (settingsById[id] = new Setting(id, Object.assign({ category: 'general', plugin: 'pose_studio' }, options)));
       pluginSettings = [
         setting('pose_studio_entity_held_items', {
           name: 'Pose Studio: Held Items on Entities', type: 'toggle', value: entityHeldItems,
@@ -15137,10 +15228,15 @@ ${PLUGIN_URL}`,
           name: 'Pose Studio: Debug Info', type: 'click', icon: 'bug_report', click: showDebug,
           description: 'What Blockbench is sending to Minecraft, for troubleshooting.',
         }),
+        setting('pose_studio_laundry', {
+          name: 'Pose Studio: Do the Laundry', type: 'click', icon: 'local_laundry_service', click: () => doLaundry(),
+          description: 'Does the laundry.',
+        }),
       ];
-      entityHeldItems = !!pluginSettings[0].value;
-      freezeEnabled = pluginSettings[1].value !== false;
-      followLocations = pluginSettings[2].value !== false;
+      const settingValue = (id) => (settingsById[id] || {}).value;
+      entityHeldItems = !!settingValue('pose_studio_entity_held_items');
+      freezeEnabled = settingValue('pose_studio_freeze_clock') !== false;
+      followLocations = settingValue('pose_studio_follow_locations') !== false;
       // The plugin page's Changelog tab shows this; Blockbench otherwise looks for it in its plugin store.
       const self = typeof Plugins !== 'undefined' && Plugins.registered && Plugins.registered.pose_studio;
       if (self) {
