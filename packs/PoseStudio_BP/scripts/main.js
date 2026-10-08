@@ -375,6 +375,11 @@ let recording = null; // { player, anchor, ticks, swing, wait, run }
 // cry out when the recorded one was hurt, die when it died, and the blocks change when they
 // changed. While they act, the copies can't walk off by themselves or hurt anything; afterwards
 // they're left where the take ended, as ordinary mobs.
+//
+// Takes are layers. One recorded while others play (a second actor, acting along) holds only what
+// was new in it: the mobs that weren't copies of an earlier take's, the blocks its player changed,
+// and what was done in it to the earlier takes' mobs (a hit, a kill). All the takes of an
+// animation are played together, each from its own tick, so nothing of an earlier one is lost.
 const TAKES_PROPERTY = "pose:takes"; // { id: { c: chunks, n: ticks } }
 const TAKE_CHUNK = 30000; // characters a dynamic property (a take is kept in several)
 const TAKE_MAX_ACTORS = 80;
@@ -383,6 +388,7 @@ const takes = new Map(); // id -> take, read from the world when first asked for
 let sceneRec = null; // the take being recorded: { take, seen: Map(entity id -> { actor, entity, last }), palette: Map, tick, dim }
 let takePlays = []; // the takes being played: see startTakes
 let takeHurting = false; // a recorded hurt is being dealt (any other hurt of a copy is undone)
+let takeKilling = false; // a recorded death, likewise
 let lootWas; // the doMobLoot rule, while copies act
 
 function takeIndex() {
@@ -443,8 +449,10 @@ function startSceneRecording(player, radius) {
   // actors: [{ t: type, s: the structure it's saved as ("" = none: a plain one of its type), f: the first tick it's there,
   //   e: the tick it's gone from (-1: there to the end), d: the tick it dies at (-1: it doesn't), k: [[tick, x, y, z, yaw, pitch]] (hundredths of a block from `at`, degrees; only the ticks it changes) }]
   // hurts: [[tick, actor, damage, cause]]; blocks: [[tick, x, y, z, from, to]] (from and to: places in `p`, the block states met)
+  // xh: [[tick, take, actor, damage, cause]] and xd: [[tick, take, actor]]: hurts and deaths of the mobs of other takes that
+  //   were playing while this one was recorded. v 2: a take that holds only what was new in it (see above)
   sceneRec = {
-    take: { id, dim: player.dimension.id, at: [Math.round(at.x * 100) / 100, Math.round(at.y * 100) / 100, Math.round(at.z * 100) / 100], r: Math.max(8, Math.min(96, Number(radius) || 48)), n: 0, actors: [], hurts: [], blocks: [], p: [] },
+    take: { id, dim: player.dimension.id, at: [Math.round(at.x * 100) / 100, Math.round(at.y * 100) / 100, Math.round(at.z * 100) / 100], r: Math.max(8, Math.min(96, Number(radius) || 48)), n: 0, v: 2, actors: [], hurts: [], blocks: [], p: [], xh: [], xd: [] },
     seen: new Map(), palette: new Map(), tick: 0, dim: player.dimension, player,
   };
 }
@@ -453,6 +461,11 @@ function trackActor(entity) {
   const s = sceneRec;
   if (!s || s.seen.has(entity.id) || s.take.actors.length >= TAKE_MAX_ACTORS) return;
   if (!isWildMob(entity)) return;
+  try {
+    if (entity.hasTag(TAKE_ACTOR_TAG)) return; // (a copy acting another take: that take has it)
+  } catch {
+    return;
+  }
   const n = s.take.actors.length;
   const actor = { t: entity.typeId, s: "", f: s.tick, e: -1, d: -1, k: [] };
   // the mob as it is (its look, what it wears, what the pack keeps on it), to make the copy from
@@ -548,8 +561,15 @@ try {
     after.entityHurt.subscribe((ev) => {
       try {
         const hurt = ev.hurtEntity;
-        // a copy acting a take: only what was recorded hurts it
-        if (!takeHurting && takePlays.length && hurt.hasTag(TAKE_ACTOR_TAG)) {
+        const copy = takePlays.length && hurt.hasTag(TAKE_ACTOR_TAG) ? takeCopy(hurt) : null;
+        if (copy) {
+          if (takeHurting) return; // (what was recorded, dealt again)
+          if (sceneRec) {
+            // done to it now, in the take that's being recorded along: that take has it
+            sceneRec.take.xh.push([sceneRec.tick, copy.play.take.id, copy.n, Math.round(ev.damage * 100) / 100, String((ev.damageSource && ev.damageSource.cause) || "entityAttack")]);
+            return;
+          }
+          // nothing recorded this: it's undone
           const health = hurt.getComponent("minecraft:health");
           if (health && health.currentValue > 0) health.setCurrentValue(Math.min(health.effectiveMax, health.currentValue + ev.damage));
           return;
@@ -563,6 +583,17 @@ try {
   }
   if (after.entityDie) {
     after.entityDie.subscribe((ev) => {
+      try {
+        const copy = takePlays.length ? takeCopy(ev.deadEntity) : null;
+        if (copy) {
+          // a copy that dies has played its part (and when it's of this take's making, the take has that)
+          if (sceneRec && !takeKilling && !takeHurting) sceneRec.take.xd.push([sceneRec.tick, copy.play.take.id, copy.n]);
+          copy.state.over = true;
+          return;
+        }
+      } catch {
+        // not a copy
+      }
       const seen = sceneRec && sceneRec.seen.get(ev.deadEntity.id);
       if (seen && seen.actor.d < 0) seen.actor.d = sceneRec.tick;
     });
@@ -647,27 +678,36 @@ function spawnTakeActor(dim, take, actor, k) {
   return copy;
 }
 
-// Sets a take up to be played from one of its ticks: the blocks as they were then, the mobs that
-// are there now gone, and a copy of everyone who was there at that tick in their place.
-function startTake(spec) {
+// A take as it's played: from one of its ticks (skip), at a tick of the animation (at).
+function takePlay(spec) {
   const take = loadTake(String(spec.id));
   if (!take) return null;
-  const dim = world.getDimension(take.dim);
   const skip = Math.max(0, Math.min(take.n - 1, Math.round(Number(spec.skip) || 0)));
-  const play = { take, dim, at: Math.max(0, Math.round(Number(spec.at) || 0)), skip, done: skip - 1, actors: take.actors.map((actor) => ({ actor, copy: null, i: 0, over: false })), hurt: 0, block: 0 };
-  // the blocks: back to how they were before the take, then on to the tick it's played from
-  for (let i = take.blocks.length - 1; i >= 0; i--) setTakeBlock(dim, take, take.blocks[i], take.blocks[i][4]);
-  while (play.block < take.blocks.length && take.blocks[play.block][0] < skip) setTakeBlock(dim, take, take.blocks[play.block], take.blocks[play.block++][5]);
-  while (play.hurt < take.hurts.length && take.hurts[play.hurt][0] < skip) play.hurt++;
-  // the mobs that are there (the copies of the last time it was played among them)
-  const centre = { x: take.at[0], y: take.at[1], z: take.at[2] };
-  try {
-    for (const e of dim.getEntities({ location: centre, maxDistance: take.r + 8 })) if (isWildMob(e)) e.remove();
-    for (const e of dim.getEntities({ tags: [TAKE_ACTOR_TAG] })) e.remove();
-  } catch {
-    // not loaded
-  }
+  const play = { take, dim: world.getDimension(take.dim), at: Math.max(0, Math.round(Number(spec.at) || 0)), skip, done: skip - 1, actors: take.actors.map((actor) => ({ actor, copy: null, i: 0, over: false })), hurt: 0, block: 0, xh: 0, xd: 0 };
+  for (const [list, key] of [[take.hurts, "hurt"], [take.xh || [], "xh"], [take.xd || [], "xd"]]) while (play[key] < list.length && list[play[key]][0] < skip) play[key]++;
   return play;
+}
+
+// the copy of a recorded mob that an entity is, in the takes that are playing
+function takeCopy(entity) {
+  for (const play of takePlays) {
+    const n = play.actors.findIndex((state) => state.copy && state.copy.id === entity.id);
+    if (n >= 0) return { play, n, state: play.actors[n] };
+  }
+  return null;
+}
+
+// a recorded hurt, dealt to the copy
+function hurtTakeActor(state, damage, cause) {
+  if (!state || !state.copy || state.over) return;
+  takeHurting = true;
+  try {
+    if (state.copy.isValid) state.copy.applyDamage(Math.max(0.01, damage), { cause });
+  } catch {
+    // gone
+  } finally {
+    takeHurting = false;
+  }
 }
 
 // One tick of a take: `tick` is the take's own (held at its first one before it starts, at its last one after it ends).
@@ -700,7 +740,12 @@ function playTakeTick(play, tick) {
       }
       state.copy.teleport(takePlace(take, k), { rotation: { x: k[5], y: k[4] }, keepVelocity: false });
       if (dies) {
-        state.copy.kill(); // (it falls as its kind falls, and the game takes it away)
+        takeKilling = true;
+        try {
+          state.copy.kill(); // (it falls as its kind falls, and the game takes it away)
+        } finally {
+          takeKilling = false;
+        }
         state.over = true;
       }
     } catch {
@@ -710,24 +755,66 @@ function playTakeTick(play, tick) {
   if (fresh) {
     while (play.hurt < take.hurts.length && take.hurts[play.hurt][0] <= now) {
       const [, n, damage, cause] = take.hurts[play.hurt++];
-      const state = play.actors[n];
+      hurtTakeActor(play.actors[n], damage, cause);
+    }
+    // what was done in this take to the mobs of the takes it was recorded along with
+    const other = (id, n) => {
+      const of = takePlays.find((p) => p.take.id === id);
+      return of ? of.actors[n] : null;
+    };
+    const xh = take.xh || [];
+    while (play.xh < xh.length && xh[play.xh][0] <= now) {
+      const [, id, n, damage, cause] = xh[play.xh++];
+      hurtTakeActor(other(id, n), damage, cause);
+    }
+    const xd = take.xd || [];
+    while (play.xd < xd.length && xd[play.xd][0] <= now) {
+      const [, id, n] = xd[play.xd++];
+      const state = other(id, n);
       if (!state || !state.copy || state.over) continue;
-      takeHurting = true;
+      takeKilling = true;
       try {
-        if (state.copy.isValid) state.copy.applyDamage(Math.max(0.01, damage), { cause });
+        if (state.copy.isValid) state.copy.kill();
       } catch {
         // gone
       } finally {
-        takeHurting = false;
+        takeKilling = false;
       }
+      state.over = true;
     }
     play.done = now;
   }
 }
 
+// Sets the takes of an animation up to be played: the blocks as they were before any of them, the
+// mobs that are there now gone, and (see playTakeTick) a copy of everyone who's there at the start.
 function startTakes(specs) {
   endTakes();
-  takePlays = (specs || []).map(startTake).filter(Boolean);
+  const plays = (specs || []).map(takePlay).filter(Boolean).sort((a, b) => (a.take.id < b.take.id ? -1 : a.take.id > b.take.id ? 1 : 0));
+  // (a take from before takes were layers has in it the mobs of the takes it was recorded along
+  // with: beside an earlier take, only its blocks are played)
+  plays.forEach((play, i) => {
+    if (i > 0 && play.take.v !== 2) play.actors = [];
+  });
+  // the blocks: every change undone, the last on the timeline first; then what each take changed before the tick it's played from
+  const changes = [];
+  plays.forEach((play, order) => play.take.blocks.forEach((change, i) => changes.push({ play, change, when: change[0] - play.skip + play.at, order, i })));
+  changes.sort((a, b) => b.when - a.when || b.order - a.order || b.i - a.i);
+  for (const { play, change } of changes) setTakeBlock(play.dim, play.take, change, change[4]);
+  for (const play of plays) {
+    const blocks = play.take.blocks;
+    while (play.block < blocks.length && blocks[play.block][0] < play.skip) setTakeBlock(play.dim, play.take, blocks[play.block], blocks[play.block++][5]);
+  }
+  // the mobs that are there (the copies of the last time among them)
+  for (const play of plays) {
+    try {
+      for (const e of play.dim.getEntities({ location: { x: play.take.at[0], y: play.take.at[1], z: play.take.at[2] }, maxDistance: play.take.r + 8 })) if (isWildMob(e)) e.remove();
+      for (const e of play.dim.getEntities({ tags: [TAKE_ACTOR_TAG] })) e.remove();
+    } catch {
+      // not loaded
+    }
+  }
+  takePlays = plays;
   if (takePlays.length) {
     try {
       // (a copy that dies drops nothing: what dropped then isn't in the take)
@@ -753,6 +840,7 @@ function endTakes() {
         if (!state.copy || !state.copy.isValid) continue;
         state.copy.removeEffect("slowness");
         state.copy.removeEffect("weakness");
+        state.copy.removeTag(TAKE_ACTOR_TAG);
       } catch {
         // gone
       }
@@ -1893,7 +1981,7 @@ function debug(player) {
 // Every name looks like `PSD[op|page|item]`; page 0 always carries
 // `M|ready|<pages>|<items>|<items per page>` or `M|busy|<percent>`.
 // What this script understands; Blockbench warns when the world runs an older one.
-const PACK_PROTOCOL = 37;
+const PACK_PROTOCOL = 38;
 const IO_OBJECTIVE = "pose_io";
 const ITEMS_PER_PAGE = 30;
 const MAX_PAGES_PER_BATCH = 16;

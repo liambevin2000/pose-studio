@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.87.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.87.1'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -3724,21 +3724,21 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     }
   })();
 
-  // The take of the whole scene an animation plays: the newest one of the recordings on its
-  // timeline (a later take was recorded with the earlier ones playing, so it has them in it).
+  // The takes of the whole scene an animation plays: one for every recording on its timeline that
+  // has one, oldest first. (Takes are layers: one recorded while others played holds only what was
+  // new in it, so they're all played together.)
   // [{ id, at: the tick of the animation it starts at, skip: the tick of the take that plays then }]
   function sceneTakes(anim) {
-    let best = null;
+    const takes = new Map();
     for (const root of mannequinRoots().filter(shownInGame)) {
       const scene = root.pose_recording && root.pose_recording.scene;
       const animator = anim && anim.animators && anim.animators[root.uuid];
       if (!scene || !scene.id || !animator) continue;
       const key = clipKeys(animator).find((k) => k.id === REC_ID);
       if (!key) continue;
-      const take = { id: String(scene.id), at: Math.round(key.time * ANIM_FPS), skip: Math.max(0, (Number(scene.skip) || 0) + Math.round(key.start * ANIM_FPS)) };
-      if (!best || take.id > best.id) best = take;
+      takes.set(String(scene.id), { id: String(scene.id), at: Math.round(key.time * ANIM_FPS), skip: Math.max(0, (Number(scene.skip) || 0) + Math.round(key.start * ANIM_FPS)) });
     }
-    return best ? [best] : [];
+    return [...takes.values()].sort((a, b) => (a.id < b.id ? -1 : 1));
   }
 
   const ACT_CHANNEL = 'pose_act';
@@ -13261,7 +13261,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     return { id: idItem.slice(2), name: scene.world || '', anchor: point('A|'), player: point('P|'), locations, removed: scene.removed || [], protocol: version ? Number(version.slice(2)) : 0 };
   }
 
-  const EXPECTED_PACK_PROTOCOL = 37; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
+  const EXPECTED_PACK_PROTOCOL = 38; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
   let warnedOldPack = false;
 
   // Scene files in the scenes folders that belong to a world (their pose_world says so), as
@@ -14096,6 +14096,15 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.87.1",
+      "date": "2026-10-08",
+      "changes": [
+        "Fixed: after recording a second player with the whole scene, the first recording's world changes no longer played.",
+        "All whole-scene recordings on the timeline now play together.",
+        "Update the Minecraft packs."
+      ]
+    },
     {
       "version": "0.87.0",
       "date": "2026-10-08",

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.87.1 (2026-10-08)
+
+- Fixed: after recording a second player with the whole scene, the first recording's world changes no longer played.
+- All whole-scene recordings on the timeline now play together.
+- Update the Minecraft packs.
+
 ## 0.87.0 (2026-10-08)
 
 - New: Record the Whole Scene. Mobs, hits, deaths and block changes around you are recorded and played back by real mobs.
