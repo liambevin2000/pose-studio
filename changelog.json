@@ -1,5 +1,12 @@
 [
   {
+    "version": "0.86.2",
+    "date": "2026-10-08",
+    "changes": [
+      "Fixed: Find Biome or Structure found no biomes (Minecraft wants the biome name with \"minecraft:\" in front)."
+    ]
+  },
+  {
     "version": "0.86.1",
     "date": "2026-10-08",
     "changes": [

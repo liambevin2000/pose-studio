@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.86.2 (2026-10-08)
+
+- Fixed: Find Biome or Structure found no biomes (Minecraft wants the biome name with "minecraft:" in front).
+
 ## 0.86.1 (2026-10-08)
 
 - New in the settings: Do the Laundry. It does the laundry.

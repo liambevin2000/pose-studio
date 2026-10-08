@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.86.1'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.86.2'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -11838,7 +11838,9 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
 
   const LOCATE_TIMEOUT_MS = 90000; // (the game can be a while about a rare one)
   async function locatePlace(place) {
-    const body = await link.command(`locate ${place.kind === 'biome' ? 'biome' : 'structure'} ${place.id}`, LOCATE_TIMEOUT_MS);
+    // (a biome has to be asked for with its namespace: minecraft:plains, not plains; a structure of Minecraft's own without)
+    const id = place.kind === 'biome' && !place.id.includes(':') ? `minecraft:${place.id}` : place.id;
+    const body = await link.command(`locate ${place.kind === 'biome' ? 'biome' : 'structure'} ${id}`, LOCATE_TIMEOUT_MS);
     const found = parseLocate(body, place.id);
     if (!found) throw new Error(`Minecraft answered, but not with a place: ${String((body && body.statusMessage) || JSON.stringify(body)).slice(0, 160)}`);
     return found;
@@ -11895,7 +11897,8 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
               return found;
             } catch (e) {
               const why = String((e && e.message) || e).replace(/§./g, '');
-              this.failed = Object.assign({}, this.failed, { [p.key]: why });
+              // (not found, or a command Minecraft didn't take: the line below says which)
+              this.failed = Object.assign({}, this.failed, { [p.key]: /syntax|unexpected|unknown|timed out/i.test(why) ? `failed: ${why}` : why });
               this.said = `${p.name}: ${why}`;
               return null;
             } finally {
@@ -11937,7 +11940,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
                   <span style="opacity: 0.55; font-size: 0.85em;"> {{ p.note }}</span>
                 </span>
                 <span v-if="found[p.key]" style="flex: none; font-size: 0.85em; color: var(--color-accent);">{{ where(p) }}</span>
-                <span v-else-if="failed[p.key]" style="flex: none; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.85em; opacity: 0.7;" :title="failed[p.key]">not found</span>
+                <span v-else-if="failed[p.key]" style="flex: none; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.85em; opacity: 0.7;" :title="failed[p.key]">{{ failed[p.key].indexOf('failed: ') === 0 ? 'failed' : 'not found' }}</span>
                 <button @click.stop="find(p)" :disabled="!!busy" style="min-width: 0; padding: 0 10px; flex: none;">{{ busy === p.key ? '…' : 'Find' }}</button>
                 <button @click.stop="go(p)" :disabled="!!busy" style="min-width: 0; padding: 0 10px; flex: none;" title="Takes you to the nearest one (finds it first)">Go</button>
                 <button v-if="found[p.key]" @click.stop="copy(p)" style="min-width: 0; padding: 0 8px; flex: none;" title="Copy a /tp command to it">⧉</button>
@@ -13749,6 +13752,13 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.86.2",
+      "date": "2026-10-08",
+      "changes": [
+        "Fixed: Find Biome or Structure found no biomes (Minecraft wants the biome name with \"minecraft:\" in front)."
+      ]
+    },
     {
       "version": "0.86.1",
       "date": "2026-10-08",
