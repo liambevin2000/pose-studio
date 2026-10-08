@@ -858,77 +858,158 @@ function endTakes() {
 }
 
 // ---- Live mobs and their actions ------------------------------------------------------------------
-// `pose:live {"id","t","free"}`: in the animation that was just sent (pose:path), the mob copy with
-// that id is played by the real mob of type t: it's there with everything the pack gives it (its
-// own animations, its attacks, its phases), stood where the copy is on the timeline ("free":1 lets
-// it go where it wants from where it starts). `pose:act {"id","i":tick,"k","v","n"}` is something
-// done to it at a tick: k "event" (v: one of its events, a boss's phase say), "anim" (v: an
-// animation to play on it), "particle" (v: a particle, at it; n: blocks above its feet),
-// "property" (v: the property, n: its value), "hit" (n: the damage, dealt as by the player),
-// "command" (v: any command, run as the mob, where it is). Stopping takes the real mob away again.
+// `pose:act {"id","i":tick,"k","v","n","d"}` is something done to a mob copy at a tick of the
+// animation that was just sent (pose:path): k "property" (v: one of its properties, n: its value;
+// with d, for that many ticks and then back to what it was: an attack that ends), "event" (v: one
+// of its events), "anim" (v: an animation to play on it), "hit" (n: the damage, dealt as by the
+// player), "particle" (v: a particle where it stands; n: blocks above its feet), "command" (v: any
+// command, run as the mob, where it is).
+//
+// A property, an event, an animation and a hit are things only the real mob has, so a mob they're
+// done to is live: `pose:live {"id","t","free","p","y"}` (sent before its acts) has the real mob
+// of type t play the copy's part, with everything its pack gives it. It stands where the copy is
+// on the timeline, facing the way the copy faces (its track: {"p","w"} at the ticks it changes;
+// "free":1 lets it go where it wants from where it starts). Stopping takes it away again.
+// A particle and a command need no real mob: without pose:live they're done where the copy is.
+//
+// `pose:livetry {"id","t","p","y","k","v","n","d","real"}` does one of them now, outside an
+// animation (Blockbench's Mob Actions window showing what an action looks like): with "real":1 the
+// real mob stands in for the copy, until `pose:livetry {"id","end":1}`.
 const LIVE_TAG = "pose_live";
+const liveTries = new Map(); // a mob copy's id -> the real mob standing in for it while actions are tried
 
 function setLive(data) {
   if (!cameraPath || !data.id || !data.t) return;
-  cameraPath.live.set(String(data.id), { type: String(data.t), free: !!data.free, start: finite(data.p) ? { p: data.p, y: data.y } : null, entity: null, acts: new Map() });
+  cameraPath.live.set(String(data.id), { type: String(data.t), free: !!data.free, start: finite(data.p) ? { p: data.p, w: Number(data.y) || 0 } : null, entity: null });
 }
 
 function setLiveAct(data) {
-  const live = cameraPath && cameraPath.live.get(String(data.id));
-  if (!live || !data.k) return;
+  if (!cameraPath || !data.id || !data.k) return;
+  const id = String(data.id);
+  let acts = cameraPath.acts.get(id);
+  if (!acts) cameraPath.acts.set(id, (acts = new Map()));
   const tick = Math.max(0, Math.round(Number(data.i) || 0));
-  if (!live.acts.has(tick)) live.acts.set(tick, []);
-  live.acts.get(tick).push({ k: String(data.k), v: data.v, n: data.n });
+  if (!acts.has(tick)) acts.set(tick, []);
+  acts.get(tick).push({ k: String(data.k), v: data.v, n: data.n, d: Math.max(0, Math.round(Number(data.d) || 0)) });
 }
 
-function doLiveAct(player, entity, act) {
+// Something done to a mob. `real`: it's the real mob (a copy takes only a particle or a command).
+function doLiveAct(player, entity, act, real = true) {
   const value = String(act.v === undefined ? "" : act.v);
-  if (act.k === "event") entity.triggerEvent(value);
-  else if (act.k === "anim") entity.playAnimation(value, { blendOutTime: 0.2 });
-  else if (act.k === "particle") {
+  if (act.k === "particle") {
     const l = entity.location;
     entity.dimension.spawnParticle(value, { x: l.x, y: l.y + (Number(act.n) || 0), z: l.z });
-  } else if (act.k === "property") entity.setProperty(value, act.n);
-  else if (act.k === "hit") entity.applyDamage(Math.max(0, Number(act.n) || 1), { cause: "entityAttack", damagingEntity: player });
-  else if (act.k === "command") entity.runCommand(value.replace(/^\//, ""));
+  } else if (act.k === "command") entity.runCommand(value.replace(/^\//, ""));
+  else if (!real) return;
+  else if (act.k === "event") entity.triggerEvent(value);
+  else if (act.k === "anim") entity.playAnimation(value, { blendOutTime: 0.2 });
+  else if (act.k === "property") {
+    const was = entity.getProperty(value);
+    entity.setProperty(value, act.n);
+    if (act.d > 0 && was !== undefined && was !== act.n) {
+      // for a while: then it's back to what it was (unless something else has changed it since)
+      system.runTimeout(() => {
+        try {
+          if (entity.isValid && entity.getProperty(value) === act.n) entity.setProperty(value, was);
+        } catch {
+          // gone
+        }
+      }, act.d);
+    }
+  } else if (act.k === "hit") entity.applyDamage(Math.max(0, Number(act.n) || 1), { cause: "entityAttack", damagingEntity: player });
+}
+
+// (something Minecraft refuses is said once)
+function sayActFailed(player, id, act, e) {
+  const said = `${id}: ${act.k} ${act.v === undefined ? "" : act.v} didn't work (${e})`;
+  if (reportedErrors.has(said)) return;
+  reportedErrors.add(said);
+  try {
+    player.sendMessage(`§c[Pose Studio] ${said}`);
+  } catch {
+    // nobody to tell
+  }
+}
+
+// where a live mob is kept: the place, and the way it faces
+function placeLive(entity, loc, yaw) {
+  entity.teleport(loc, { rotation: { x: 0, y: yaw }, keepVelocity: false });
+  entity.setRotation({ x: 0, y: yaw });
+}
+
+// The real mob in place of a copy (all of the copy steps aside: what it holds, and the other parts of a big one).
+function standIn(dim, anchor, id, type, at) {
+  for (const tag of [id, `${id}__main`, `${id}__off`].concat(Array.from({ length: 12 }, (unused, n) => `${id}__p${n + 1}`))) for (const e of findMannequins(dim, tag)) e.remove();
+  const loc = toWorld(anchor, at.p);
+  const entity = dim.spawnEntity(type, loc);
+  entity.addTag(LIVE_TAG);
+  placeLive(entity, loc, Number(at.w) || 0);
+  return entity;
 }
 
 // One tick of a live mob: `update` is what the timeline has for the copy at this tick (where it
-// stands and the way it faces), if it changed. Unless it's free, it's kept where the timeline last
-// had it; it turns as it likes until the timeline turns it.
+// stands and the way it faces), if it changed. Unless it's free, it's kept there.
 function playLive(player, anchor, id, live, tick, update) {
   if (update && finite(update.p)) live.at = update;
   const at = live.at || live.start;
   try {
     if (!live.entity || !live.entity.isValid) {
       if (live.entity || !at || !finite(at.p)) return; // (it died, or there's nowhere to put it yet)
-      const dim = world.getDimension(anchor.dim);
-      // the copy steps aside (all of it: what it holds, and the other parts of a big one)
-      for (const tag of [id, `${id}__main`, `${id}__off`].concat(Array.from({ length: 12 }, (unused, n) => `${id}__p${n + 1}`))) for (const e of findMannequins(dim, tag)) e.remove();
-      live.entity = dim.spawnEntity(live.type, toWorld(anchor, at.p));
-      live.entity.addTag(LIVE_TAG);
-      live.entity.teleport(toWorld(anchor, at.p), { rotation: { x: 0, y: Number(at.y) || 0 }, keepVelocity: false });
-    } else if (!live.free && at) {
-      live.entity.teleport(toWorld(anchor, at.p), update ? { rotation: { x: 0, y: Number(at.y) || 0 }, keepVelocity: false } : { keepVelocity: false });
-    }
+      live.entity = standIn(world.getDimension(anchor.dim), anchor, id, live.type, at);
+    } else if (!live.free && at) placeLive(live.entity, toWorld(anchor, at.p), Number(at.w) || 0);
   } catch {
     return; // not loaded
   }
-  for (const act of live.acts.get(tick) || []) {
+  const acts = cameraPath.acts.get(id);
+  for (const act of (acts && acts.get(tick)) || []) {
     try {
       doLiveAct(player, live.entity, act);
     } catch (e) {
-      const said = `${id}: ${act.k} ${act.v === undefined ? "" : act.v} didn't work (${e})`;
-      if (!reportedErrors.has(said)) {
-        reportedErrors.add(said);
-        try {
-          player.sendMessage(`§c[Pose Studio] ${said}`);
-        } catch {
-          // nobody to tell
-        }
+      sayActFailed(player, id, act, e);
+    }
+  }
+}
+
+// One tick of the mobs that aren't live but have something done where they stand.
+function playCopyActs(player, anchor, tick) {
+  for (const [id, acts] of cameraPath.acts) {
+    if (cameraPath.live.has(id)) continue; // (done to the real mob: see playLive)
+    for (const act of acts.get(tick) || []) {
+      try {
+        const copy = findMannequins(world.getDimension(anchor.dim), id)[0];
+        if (copy) doLiveAct(player, copy, act, false);
+      } catch (e) {
+        sayActFailed(player, id, act, e);
       }
     }
   }
+}
+
+function tryLive(player, data) {
+  const id = String(data.id || "");
+  if (!id) return;
+  const had = liveTries.get(id);
+  if (data.end) {
+    liveTries.delete(id);
+    try {
+      if (had && had.isValid) had.remove();
+    } catch {
+      // gone
+    }
+    return;
+  }
+  const anchor = requireAnchor(player);
+  const dim = world.getDimension(anchor.dim);
+  let entity = had && had.isValid ? had : null;
+  if (data.real && finite(data.p)) {
+    const at = { p: data.p, w: Number(data.y) || 0 };
+    if (entity) placeLive(entity, toWorld(anchor, at.p), at.w);
+    else if (data.t) liveTries.set(id, (entity = standIn(dim, anchor, id, String(data.t), at)));
+  }
+  const real = !!entity;
+  if (!entity) entity = findMannequins(dim, id)[0];
+  if (!entity || !data.k) return;
+  doLiveAct(player, entity, { k: String(data.k), v: data.v, n: data.n, d: Math.max(0, Math.round(Number(data.d) || 0)) }, real);
 }
 
 function endLive() {
@@ -939,6 +1020,7 @@ function endLive() {
       // not loaded
     }
   }
+  liveTries.clear();
   if (cameraPath && cameraPath.live) for (const live of cameraPath.live.values()) live.entity = live.at = null;
 }
 
@@ -1465,15 +1547,23 @@ function showPathStart(player) {
   if (!player || !cameraPath) return;
   stopPath();
   startTakes(cameraPath.takes); // (the scene as it was when a take begins)
-  for (const track of cameraPath.tracks.values()) {
+  for (const [id, track] of cameraPath.tracks) {
     const d = track.frames.get(0);
-    if (!d) continue;
+    if (!d || cameraPath.live.has(id.replace(/__p\d+$/, ""))) continue;
     try {
       if (track.k === "e") setEntity(player, d);
       else setPose(player, d);
     } catch {
       // not there right now (unloaded, or removed)
     }
+  }
+  const shown = getAnchor();
+  if (shown) {
+    for (const [id, live] of cameraPath.live) {
+      const track = cameraPath.tracks.get(id);
+      playLive(player, shown, id, live, -1, (track && track.frames.get(0)) || null);
+    }
+    cameraPath.liveShown = true; // (they carry on from here when it plays)
   }
   const first = cameraPath.cam ? cameraPath.keys[0] : null;
   if (!first) return;
@@ -1492,7 +1582,8 @@ function showPathStart(player) {
 function playPath(player, data) {
   if (!player) return;
   stopPath(true);
-  endLive();
+  if (!cameraPath || !cameraPath.liveShown) endLive(); // (each time it plays, the live mobs start afresh)
+  if (cameraPath) cameraPath.liveShown = false;
   if (!cameraPath || cameraPath.keys.length < 2) throw new Error("the animation didn't arrive: play it again from Blockbench");
   const flown = cameraPath.cam; // without a camera in it, only the players and mobs are played
   if (flown && cameraPath.keys.some((k) => !k)) throw new Error("the camera's animation didn't arrive whole: play it again from Blockbench");
@@ -1522,6 +1613,7 @@ function playPath(player, data) {
       const track = tracks.get(id);
       playLive(player, anchor, id, live, tick, (track && track.frames.get(tick)) || null);
     }
+    playCopyActs(player, anchor, tick);
   };
   if (!takePlays.length) startTakes(cameraPath.takes);
   let time = Math.max(0, Number(data.t) || 0);
@@ -1567,7 +1659,7 @@ function playPath(player, data) {
 function setPath(data) {
   stopPath();
   const n = Math.max(0, Math.min(6000, Number(data.n) || 0)); // 5 minutes of samples at most
-  cameraPath = { keys: new Array(n).fill(null), ramp: Array.isArray(data.ramp) ? data.ramp.map(Number) : [0, 0, 1, 1], loop: !!data.loop, hud: !!data.hud, step: Math.max(0.01, Number(data.step) || 0.05), cam: data.cam === undefined || !!data.cam, smooth: !!data.smooth, tracks: new Map(), takes: Array.isArray(data.takes) ? data.takes : [], live: new Map() };
+  cameraPath = { keys: new Array(n).fill(null), ramp: Array.isArray(data.ramp) ? data.ramp.map(Number) : [0, 0, 1, 1], loop: !!data.loop, hud: !!data.hud, step: Math.max(0.01, Number(data.step) || 0.05), cam: data.cam === undefined || !!data.cam, smooth: !!data.smooth, tracks: new Map(), takes: Array.isArray(data.takes) ? data.takes : [], live: new Map(), acts: new Map() };
 }
 
 // `pose:pathsamples {"i":index,"s":[x,y,z, dx,dy,dz, fov, …]}` — an animation sampled every `step`
@@ -1981,7 +2073,7 @@ function debug(player) {
 // Every name looks like `PSD[op|page|item]`; page 0 always carries
 // `M|ready|<pages>|<items>|<items per page>` or `M|busy|<percent>`.
 // What this script understands; Blockbench warns when the world runs an older one.
-const PACK_PROTOCOL = 38;
+const PACK_PROTOCOL = 39;
 const IO_OBJECTIVE = "pose_io";
 const ITEMS_PER_PAGE = 30;
 const MAX_PAGES_PER_BATCH = 16;
@@ -2853,6 +2945,8 @@ function handle(ev) {
       return setLive(data);
     case "pose:act":
       return setLiveAct(data);
+    case "pose:livetry":
+      return tryLive(player, data);
     case "pose:take":
       // {"del": id}: a take that isn't wanted any more
       if (data.del) deleteTake(String(data.del));

@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.87.1'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.88.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -3374,7 +3374,8 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
         clipProperties.push(
           new Property(KeyframeDataPoint, 'string', 'pose_act', { label: 'Action', condition: act }),
           new Property(KeyframeDataPoint, 'string', 'pose_act_value', { label: 'With', condition: act }),
-          new Property(KeyframeDataPoint, 'string', 'pose_act_number', { label: 'Value', condition: act })
+          new Property(KeyframeDataPoint, 'string', 'pose_act_number', { label: 'Value', condition: act }),
+          new Property(KeyframeDataPoint, 'string', 'pose_act_for', { label: 'For (s)', condition: act })
         );
       }
       BoneAnimator.addChannel(ACT_CHANNEL, {
@@ -3708,12 +3709,13 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
   // and broken. It stays in the world; Blockbench only keeps its id with the recording of the
   // player (pose_recording.scene), so it plays whenever that recording does, from the same tick.
   //
-  // A live mob (Animate ▸ Mob Actions…): a mob copy is a posed stand-in, it can't fight or change
-  // phase. Made live, the real mob stands in for it while the animation plays, with everything its
-  // pack gives it, where the copy is on the timeline (or free to roam). Its Actions track holds
-  // keyframes that do something to it when the playhead gets there: trigger one of its events (a
-  // boss's phase), play one of its animations (an attack), a particle at it, set one of its
-  // properties, hit it as the player would, or any command run as the mob.
+  // Mob actions (Animate ▸ Mob Actions…): a mob's Actions track holds keyframes that do something
+  // when the playhead gets there, picked from what the mob can do: one of its states (a value of
+  // one of its properties, which is what its pack's own animations go by: an attack, a phase of a
+  // boss), one of its events, one of its animations, a particle where it stands, a hit, a command.
+  // A mob copy is a posed stand-in and has none of the first four, so a mob they're done to is
+  // played by the real mob while the animation plays in Minecraft, with everything its pack gives
+  // it, where the copy is on the timeline and facing the way it faces (or let go by itself).
   const RECORD_SCENE_KEY = 'pose_studio_record_scene';
   const SCENE_RADIUS = 48; // blocks around you
   let recordScene = (() => {
@@ -3741,23 +3743,29 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     return [...takes.values()].sort((a, b) => (a.id < b.id ? -1 : 1));
   }
 
+  // The things a mob can be made to do, as keyframes on its Actions track.
   const ACT_CHANNEL = 'pose_act';
-  const ACT_KINDS = [['event', 'Trigger event'], ['anim', 'Play animation'], ['particle', 'Particle'], ['property', 'Set property'], ['hit', 'Hit it'], ['command', 'Run command']];
+  const ACT_KINDS = [['property', 'State'], ['event', 'Event'], ['anim', 'Animation'], ['particle', 'Particle'], ['hit', 'Hit it'], ['command', 'Command']];
+  const ACT_NEEDS_MOB = new Set(['property', 'event', 'anim', 'hit']); // only the real mob has these
   const isActRoot = (g) => g instanceof Group && g.parent === 'root' && ENTITY_PREFIX.test(g.name) && !!g.pose_entity;
 
   // The number of an action as the game takes it: a property's value can be true or false, a number or a word.
   function actNumber(kind, text) {
     const s = String(text === undefined || text === null ? '' : text).trim();
     if (kind === 'property') return s === 'true' ? true : s === 'false' ? false : s !== '' && Number.isFinite(Number(s)) ? Number(s) : s;
-    return s !== '' && Number.isFinite(Number(s)) ? Number(s) : kind === 'hit' ? 1 : 0;
+    return s !== '' && Number.isFinite(Number(s)) ? Number(s) : kind === 'hit' || kind === 'particle' ? 1 : 0;
   }
+  // how long a state is kept before it goes back to what it was, in game ticks (0: it stays)
+  const actTicks = (act) => (act.k === 'property' && Number(act.d) > 0 ? Math.max(1, Math.round(Number(act.d) * ANIM_FPS)) : 0);
 
-  // The keyframes of a mob's Actions track, in order: [{ time, k: what's done, v: with what, n: a number or value }].
+  // The keyframes of a mob's Actions track, in order:
+  // [{ time, k: what's done, v: with what, n: a number or value, d: for how many seconds ('' = it stays) }].
   function actKeys(animator) {
     return ((animator && animator[ACT_CHANNEL]) || [])
       .map((kf) => {
         const d = (kf.data_points && kf.data_points[0]) || {};
-        return { time: Number(kf.time) || 0, k: String(d.pose_act || ''), v: String(d.pose_act_value || ''), n: d.pose_act_number === undefined || d.pose_act_number === null ? '' : String(d.pose_act_number) };
+        const text = (v) => (v === undefined || v === null ? '' : String(v));
+        return { time: Number(kf.time) || 0, k: text(d.pose_act), v: text(d.pose_act_value), n: text(d.pose_act_number), d: text(d.pose_act_for) };
       })
       .filter((a) => ACT_KINDS.some(([k]) => k === a.k))
       .sort((a, b) => a.time - b.time);
@@ -3779,8 +3787,9 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
       if (list.includes(kf)) list.splice(list.indexOf(kf), 1);
     }
     const made = [];
+    const text = (v) => (v === undefined || v === null ? '' : String(v));
     for (const act of acts.slice().sort((a, b) => a.time - b.time)) {
-      const data = { pose_act: String(act.k), pose_act_value: String(act.v === undefined ? '' : act.v), pose_act_number: String(act.n === undefined || act.n === null ? '' : act.n) };
+      const data = { pose_act: text(act.k), pose_act_value: text(act.v), pose_act_number: text(act.n), pose_act_for: text(act.d) };
       const kf = animator.createKeyframe(data, Math.max(0, round(Number(act.time) || 0, 3)), ACT_CHANNEL, false, false);
       if (!kf) continue;
       if (!kf.data_points || !kf.data_points[0]) kf.data_points = [{}];
@@ -3792,41 +3801,205 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     } catch (e) {
       // as above
     }
-    const end = acts.reduce((t, a) => Math.max(t, Number(a.time) || 0), 0);
+    const end = acts.reduce((t, a) => Math.max(t, (Number(a.time) || 0) + Math.max(Number(a.d) || 0, Number(a.len) || 0)), 0); // (as long as the last one takes)
     if (Number(anim.length) < end && anim.setLength) anim.setLength(Math.ceil(end * 20 - 1e-6) / 20);
     return made;
   }
 
-  // The live mobs of an animation, as the game is told: [{ id, t: the real mob's type, free, p, y
-  // (where the copy is at the start), acts: [[tick, k, v, n]] }]. `first`: the copies' updates at the first tick.
+  // The way a mob faces in Minecraft (an entity's yaw: 0 looks south, 90 west), from how its copy
+  // is turned in Blockbench. (The copy itself is always sent at yaw 0, turned by its pose.)
+  function rootYaw(root) {
+    const [a, b, c] = liveRotation(root).map((v) => (Number(v) || 0) * DEG);
+    // Blockbench shows it facing -Z, turned Z·Y·X; in the game x and z are the other way round (see toWorld)
+    const dx = Math.cos(a) * Math.sin(b) * Math.cos(c) + Math.sin(a) * Math.sin(c);
+    const dz = Math.cos(a) * Math.cos(b);
+    if (Math.abs(dx) < 1e-6 && Math.abs(dz) < 1e-6) return 0; // (it looks straight up or down)
+    return round(wrap(Math.atan2(-dx, dz) / DEG), 2);
+  }
+
+  // A mob is played by the real mob in Minecraft when something on its Actions track is done to the
+  // real mob (a state, an event, an animation, a hit), or when it's let go by itself.
+  function isLiveMob(root, anim) {
+    if (!root || !root.pose_entity || !root.pose_entity.entity) return false;
+    if (root.pose_live && root.pose_live.on) return true;
+    const animator = anim && anim.animators && anim.animators[root.uuid];
+    return actKeys(animator).some((a) => ACT_NEEDS_MOB.has(a.k));
+  }
+
+  // What the game is told of the mobs with actions: [{ id, t: the real mob's type, free, p, y (where
+  // it starts and the way it faces), acts: [[tick, k, v, n, ticks it's kept]] }]; one whose copy plays
+  // it (only particles and commands) is { id, copy: 1, acts }. `first`: the mobs' updates at the first tick.
   function liveMobs(anim, first) {
     const out = [];
     for (const root of entityRoots().filter(shownInGame)) {
-      if (!root.pose_live || !root.pose_live.on || !root.pose_entity || !root.pose_entity.entity) continue;
-      const id = mannequinId(root.name);
-      const start = first.get(id) || {};
+      if (!root.pose_entity || !root.pose_entity.entity) continue;
       const animator = anim && anim.animators && anim.animators[root.uuid];
-      out.push({ id, t: root.pose_entity.entity, free: root.pose_live.free ? 1 : 0, p: start.p, y: start.y, acts: actKeys(animator).map((a) => [Math.round(a.time * ANIM_FPS), a.k, a.v, actNumber(a.k, a.n)]) });
+      const acts = actKeys(animator).map((a) => [Math.round(a.time * ANIM_FPS), a.k, a.v, actNumber(a.k, a.n), actTicks(a)]);
+      const id = mannequinId(root.name);
+      if (isLiveMob(root, anim)) {
+        const start = first.get(id) || {};
+        out.push({ id, t: root.pose_entity.entity, free: root.pose_live && root.pose_live.free ? 1 : 0, p: start.p, y: Number(start.w) || 0, acts });
+      } else if (acts.length) out.push({ id, copy: 1, acts });
     }
     return out;
   }
 
-  // What a mob's actions can be picked from: its own events and animations, the world's particles, its properties.
+  const actName = (s) => {
+    const t = String(s).replace(/^[a-z0-9_]+:/i, '').replace(/^(?:animation|anim|ctrl|controller)\./i, '').replace(/[._]+/g, ' ').trim();
+    return t ? t[0].toUpperCase() + t.slice(1) : String(s);
+  };
+
+  // What a mob's own animation controllers do when one of its properties takes a value:
+  // Map "property|value" -> { property, value, state, anims: [animation ids], terms }. Read from
+  // the transitions that test a property (q.property('x') == 3, !q.property('x'), or a variable its
+  // scripts set from one: v.visual_state == 6).
+  function propertyStates(content, client, defs) {
+    const out = new Map();
+    const d = client && client.description;
+    if (!d || !content.animationControllers) return out;
+    const list = (x) => (Array.isArray(x) ? x : x ? [x] : []);
+    const alias = new Map();
+    for (const line of list(d.scripts && d.scripts.pre_animation).concat(list(d.scripts && d.scripts.initialize))) {
+      const m = /^\s*(?:v|variable)\.([\w.]+)\s*=\s*(?:q|query)\.property\(\s*'([^']+)'\s*\)\s*;?\s*$/i.exec(String(line));
+      if (m) alias.set(m[1].toLowerCase(), m[2]);
+    }
+    const REF = "(?:(?:q|query)\\.property\\(\\s*'([^']+)'\\s*\\)|(?:v|variable)\\.([\\w.]+))";
+    const BARE = new RegExp(`^(!?)\\s*${REF}$`, 'i');
+    const EQUAL = new RegExp(`^${REF}\\s*==\\s*(-?\\d+(?:\\.\\d+)?|'[^']*'|true|false)$`, 'i');
+    const named = (m, at) => m[at] || alias.get(String(m[at + 1] || '').toLowerCase()) || null;
+    const typed = (property, value) => {
+      const def = defs && defs[property];
+      if (def && def.type === 'bool') return value === true || value === 1 || value === 'true';
+      return typeof value === 'boolean' && def ? null : value; // (a number or a word tested as if it were a switch says nothing)
+    };
+    for (const id of Object.values(d.animations || {})) {
+      const controller = typeof id === 'string' && content.animationControllers.get(id);
+      if (!controller || !controller.states) continue;
+      for (const state of Object.values(controller.states)) {
+        for (const transition of list(state && state.transitions)) {
+          for (const [target, condition] of Object.entries(transition || {})) {
+            if (typeof condition !== 'string' || /\|\|/.test(condition) || !controller.states[target]) continue;
+            const terms = condition.split('&&').map((s) => s.trim().replace(/^\((.*)\)$/, '$1').trim());
+            let found = null;
+            for (const term of terms) {
+              let m = BARE.exec(term);
+              if (m && named(m, 2)) found = [named(m, 2), !m[1]];
+              else if ((m = EQUAL.exec(term)) && named(m, 1)) {
+                const raw = m[3];
+                found = [named(m, 1), /^'/.test(raw) ? raw.slice(1, -1) : raw === 'true' ? true : raw === 'false' ? false : Number(raw)];
+              }
+              if (found) break;
+            }
+            if (!found || (defs && !defs[found[0]])) continue;
+            const value = typed(found[0], found[1]);
+            if (value === null) continue;
+            const key = `${found[0]}|${value}`;
+            const had = out.get(key);
+            if (had && had.terms <= terms.length) continue; // (the plainest test says what the value is for)
+            const anims = list(controller.states[target].animations).map((a) => (typeof a === 'string' ? a : Object.keys(a || {})[0])).map((short) => (d.animations || {})[short]).filter((a) => typeof a === 'string');
+            out.set(key, { property: found[0], value, state: target, anims, terms: terms.length });
+          }
+        }
+      }
+    }
+    return out;
+  }
+
+  // What a mob's actions can be picked from, read from its packs, in the order they're offered:
+  // [{ group, label, hint, title, k, v, n, d: the seconds it's kept ('' = it stays), len: how long it takes, when it ends by itself }].
   function mobActionChoices(content, root) {
     const type = root.pose_entity.entity;
     const client = content && content.entities && content.entities.get(type);
-    const anims = client ? Object.entries(client.description.animations || {}).filter(([, id]) => typeof id === 'string' && !/^controller\./.test(id)) : [];
-    const properties = (content && content.entityProperties && content.entityProperties.get(type)) || {};
-    return {
-      event: ((content && content.entityEvents && content.entityEvents.get(type)) || []).slice().sort(),
-      anim: anims.map(([name, id]) => ({ value: id, label: name })),
-      particle: content ? particleList(content).map((p) => p.id) : [],
-      property: Object.keys(properties),
-      values: properties,
+    const defs = (content && content.entityPropertyDefs && content.entityPropertyDefs.get(type)) || null;
+    const out = [];
+    // its states: the values of its properties its own animations go by, then the other values they can take
+    const states = client ? propertyStates(content, client, defs) : new Map();
+    const short = (property) => actName(property).toLowerCase();
+    const shown = (value) => (value === true ? 'on' : value === false ? 'off' : String(value));
+    // How long animations take that end by themselves: { len (0 when one of them loops, or none
+    // says), held: one of them stays on its last frame (what comes next is up to the timeline) }.
+    const lasts = (ids) => {
+      let len = 0;
+      let held = false;
+      for (const id of ids) {
+        const anim = content.animations && content.animations.get(id);
+        if (!anim || anim.loop === true || !(Number(anim.animation_length) > 0)) return { len: 0, held: false };
+        if (anim.loop === 'hold_on_last_frame') held = true;
+        len = Math.max(len, Number(anim.animation_length));
+      }
+      return { len: round(Math.min(len, 60), 2), held };
     };
+    const seconds = (len) => (len > 0 ? ` · ${len} s` : '');
+    const taken = new Set();
+    for (const s of states.values()) {
+      const def = defs && defs[s.property];
+      const usual = def && def.default !== undefined && String(def.default) === String(s.value);
+      taken.add(`${s.property}|${s.value}`);
+      const { len, held } = lasts(s.anims);
+      // A state that ends by itself is kept for as long as it takes, then the mob is back to what
+      // it was doing: a switch has only one way back; anything else only when its animation
+      // doesn't stay on its last frame (a take-off isn't followed by sitting down again). Dying stays.
+      const final = /death|dead|dying|alive/i.test(`${s.state} ${s.property}`);
+      const back = len > 0 && !usual && !final && ((def && def.type === 'bool') || !held);
+      const names = s.anims.map((id) => actName(Object.keys(client.description.animations).find((k) => client.description.animations[k] === id) || id).toLowerCase());
+      out.push({ group: 'States', label: actName(s.state), hint: (names.join(' + ') || `${short(s.property)}: ${shown(s.value)}`) + seconds(len), title: `${s.property} = ${shown(s.value)}`, k: 'property', v: s.property, n: String(s.value), d: back ? String(len) : '', len });
+    }
+    for (const [property, def] of Object.entries(defs || {})) {
+      const values = def.type === 'bool' ? [true, false] : def.type === 'enum' ? (def.values || []).map(String) : def.type === 'int' && Array.isArray(def.range) && def.range[1] - def.range[0] < 16 && ![...taken].some((k) => k.startsWith(`${property}|`)) ? Array.from({ length: def.range[1] - def.range[0] + 1 }, (unused, i) => def.range[0] + i) : [];
+      for (const value of values) {
+        if (taken.has(`${property}|${value}`)) continue;
+        out.push({ group: 'States', label: `${actName(property)}: ${shown(value)}`, hint: '', title: `${property} = ${shown(value)}`, k: 'property', v: property, n: String(value), d: '', len: 0 });
+      }
+    }
+    for (const event of ((content && content.entityEvents && content.entityEvents.get(type)) || []).slice().sort()) {
+      if (event === 'minecraft:entity_spawned') continue;
+      out.push({ group: 'Events', label: actName(event), hint: '', title: event, k: 'event', v: event, n: '', d: '', len: 0 });
+    }
+    const anims = client ? Object.entries(client.description.animations || {}).filter(([, id]) => typeof id === 'string' && !/^controller\./.test(id)) : [];
+    for (const [name, id] of anims) {
+      const { len } = lasts([id]);
+      out.push({ group: 'Animations', label: actName(name), hint: `once${seconds(len)}`, title: id, k: 'anim', v: id, n: '', d: '', len });
+    }
+    // its own particles first, then the world's
+    const own = client ? Object.entries(client.description.particle_effects || {}).filter(([, id]) => typeof id === 'string') : [];
+    const seen = new Set();
+    for (const [name, id] of own) {
+      if (seen.has(id)) continue;
+      seen.add(id);
+      out.push({ group: 'Particles', label: actName(name), hint: '', title: id, k: 'particle', v: id, n: '1', d: '', len: 0 });
+    }
+    for (const p of content ? particleList(content) : []) {
+      if (seen.has(p.id)) continue;
+      seen.add(p.id);
+      out.push({ group: 'More particles', label: actName(p.id), hint: p.id, title: p.id, k: 'particle', v: p.id, n: '1', d: '', len: 0 });
+    }
+    out.push({ group: 'Other', label: 'Hit it', hint: 'as if you hit it', title: '', k: 'hit', v: '', n: '1', d: '', len: 0 });
+    out.push({ group: 'Other', label: 'Run a command…', hint: 'as the mob', title: '', k: 'command', v: '', n: '', d: '', len: 0 });
+    return out;
   }
 
-  // Animate ▸ Mob Actions…: whether the selected mob is live, and its Actions track as a list.
+  // Shows one action in Minecraft now (the Mob Actions window: what does it look like?). For what
+  // only the real mob has, the real mob stands in for the copy until endTries.
+  const triedMobs = new Set();
+  function tryAct(root, act) {
+    if (!link.connected || pathPlaying || !root || !root.pose_entity || !shownInGame(root)) return false;
+    if (act.k === 'command' && !String(act.v || '').trim()) return false;
+    const real = ACT_NEEDS_MOB.has(act.k);
+    if (real) triedMobs.add(root);
+    send(`scriptevent pose:livetry ${JSON.stringify({ id: mannequinId(root.name), t: root.pose_entity.entity, p: toWorld(liveOrigin(root)), y: rootYaw(root), k: act.k, v: act.v, n: actNumber(act.k, act.n), d: actTicks(act), real: real ? 1 : 0 })}`);
+    return true;
+  }
+  // the real mobs that stood in are taken away, and the copies are sent again
+  function endTries() {
+    for (const root of triedMobs) {
+      const id = mannequinId(root.name);
+      if (link.connected) send(`scriptevent pose:livetry ${JSON.stringify({ id, end: 1 })}`);
+      for (const key of Array.from(lastSent.keys())) if (key === id || key.startsWith(`${id}__`)) lastSent.delete(key);
+    }
+    triedMobs.clear();
+  }
+
+  // Animate ▸ Mob Actions…: what the selected mob does when, picked from what it can do.
   async function openMobActions() {
     const root = selectedPoseRoot();
     const Anim = blockbenchAnimation();
@@ -3854,34 +4027,67 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     const spot = clipKeyAt(root);
     if (!spot) return;
     const choices = mobActionChoices(content, root);
+    const choiceOf = (act) => choices.find((c) => c.k === act.k && c.v === act.v && (act.k !== 'property' || c.n === act.n));
+    const labelOf = (act) => {
+      const same = choiceOf(act);
+      if (same && act.k !== 'command') return same.label;
+      const kind = (ACT_KINDS.find(([k]) => k === act.k) || ['', act.k])[1];
+      return act.k === 'hit' ? 'Hit it' : act.k === 'property' ? `${actName(act.v)}: ${act.n}` : `${kind}: ${act.v}`;
+    };
     let uid = 0;
     let vm = null;
     const dialog = new Dialog({
       id: 'pose_studio_mob_actions',
-      title: `Actions: ${root.name}`,
-      width: 800,
+      title: `What ${root.name} does`,
+      width: 860,
       buttons: ['Apply', 'Cancel'],
       cancelIndex: 1,
+      cancel_on_click_outside: false,
       component: {
         data: () => ({
+          name: root.name,
           type: root.pose_entity.entity,
-          live: !!(root.pose_live && root.pose_live.on),
           free: !!(root.pose_live && root.pose_live.free),
-          rows: actKeys(spot.animator).map((a) => Object.assign(a, { uid: ++uid })),
-          kinds: ACT_KINDS,
+          rows: actKeys(spot.animator).map((a) => Object.assign(a, { uid: ++uid, label: labelOf(a), len: (choiceOf(a) || {}).len || 0 })),
           choices,
+          filter: '',
           playhead: round(playhead, 2),
+          connected: !!link.connected,
         }),
         mounted() {
           vm = this;
         },
+        computed: {
+          // what's offered, by what was typed: [{ name, items }]
+          groups() {
+            const words = this.filter.toLowerCase().split(/\s+/).filter(Boolean);
+            const groups = [];
+            for (const c of this.choices) {
+              if (!words.length && c.group === 'More particles') continue; // (the world's particles: when searched for)
+              const text = `${c.label} ${c.hint} ${c.title} ${c.group}`.toLowerCase();
+              if (!words.every((w) => text.includes(w))) continue;
+              let g = groups.find((x) => x.name === c.group);
+              if (!g) groups.push((g = { name: c.group, items: [] }));
+              if (g.items.length < 200) g.items.push(c);
+            }
+            return groups;
+          },
+          // whether the real mob plays it in Minecraft
+          real() {
+            return this.free || this.rows.some((r) => r.k !== 'particle' && r.k !== 'command');
+          },
+        },
         methods: {
-          // a new one, at the playhead
-          add(kind) {
-            const first = (list) => (list && list.length ? (typeof list[0] === 'string' ? list[0] : list[0].value) : '');
-            this.rows.push({ uid: ++uid, time: this.playhead, k: kind, v: kind === 'hit' || kind === 'command' ? '' : first(this.choices[kind]), n: kind === 'hit' ? '1' : kind === 'particle' ? '1' : '' });
-            this.rows.sort((a, b) => a.time - b.time);
-            this.live = true; // (something is only done to the real mob)
+          // picked: it's done at the playhead, and shown in Minecraft now
+          add(c) {
+            const row = { uid: ++uid, time: this.playhead, k: c.k, v: c.v, n: c.n, d: c.d, label: c.label, len: c.len };
+            this.rows.push(row);
+            this.sorted();
+            this.show(row);
+            if (c.len > 0) this.playhead = round(this.playhead + c.len, 2); // (the next one after it)
+          },
+          show(row) {
+            tryAct(root, row);
           },
           remove(row) {
             this.rows.splice(this.rows.indexOf(row), 1);
@@ -3889,65 +4095,54 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
           sorted() {
             this.rows.sort((a, b) => a.time - b.time);
           },
-          kindChanged(row) {
-            row.v = '';
-            row.n = row.k === 'hit' || row.k === 'particle' ? '1' : '';
-          },
-          needsValue(row) {
-            return row.k !== 'hit';
-          },
-          numberLabel(row) {
-            return row.k === 'particle' ? 'blocks up' : row.k === 'property' ? 'value' : row.k === 'hit' ? 'damage' : '';
-          },
-          valueHint(row) {
-            return row.k === 'event' ? "one of the mob's events" : row.k === 'anim' ? 'an animation (animation.…)' : row.k === 'particle' ? 'a particle' : row.k === 'property' ? 'a property' : row.k === 'command' ? 'a command, run as the mob (@s is the mob)' : '';
-          },
         },
         template: `
-          <div style="display: flex; flex-direction: column; gap: 8px;">
-            <div style="border: 1px solid var(--color-accent); border-radius: 4px; padding: 6px 8px; display: flex; flex-direction: column; gap: 4px;">
-              <label style="display: flex; gap: 6px; align-items: center;" title="While the animation plays in Minecraft, the real mob stands in for this copy, with its own animations, attacks and phases.">
-                <input type="checkbox" v-model="live"> <b>Live in Minecraft</b> <span style="opacity: 0.7;">the real {{ type }} plays this one's part while the animation plays</span>
-              </label>
-              <label v-if="live" style="display: flex; gap: 6px; align-items: center;" title="Off: it's kept where this copy is on the timeline (it still turns, attacks and animates). On: it starts there and goes where it wants.">
-                <input type="checkbox" v-model="free"> Let it roam <span style="opacity: 0.7;">(off: it stays where the timeline has it)</span>
-              </label>
-            </div>
-            <div style="display: flex; flex-wrap: wrap; gap: 6px; align-items: center;">
-              <b>At <input type="number" class="dark_bordered" v-model.number="playhead" min="0" step="0.05" style="width: 64px;"> s add:</b>
-              <button v-for="k in kinds" :key="k[0]" @click="add(k[0])" style="min-width: 0; padding: 0 10px;">{{ k[1] }}</button>
-            </div>
-            <div style="height: 300px; overflow-y: auto; border: 1px solid var(--color-border); border-radius: 4px; padding: 4px; display: flex; flex-direction: column; gap: 4px;">
-              <div v-for="r in rows" :key="r.uid" style="display: flex; flex-wrap: wrap; gap: 6px; align-items: center;">
-                <input type="number" class="dark_bordered" v-model.number="r.time" min="0" step="0.05" @change="sorted()" style="width: 64px;" title="When, in seconds on the timeline"> s
-                <select v-model="r.k" @change="kindChanged(r)" class="dark_bordered" style="width: 130px;">
-                  <option v-for="k in kinds" :key="k[0]" :value="k[0]">{{ k[1] }}</option>
-                </select>
-                <input v-if="needsValue(r)" type="text" class="dark_bordered" v-model="r.v" :list="'ps-act-' + r.k" :placeholder="valueHint(r)" style="flex: 1; min-width: 180px;">
-                <span v-else style="flex: 1; opacity: 0.7;">as if the player hit it</span>
-                <label v-if="numberLabel(r)">{{ numberLabel(r) }} <input type="text" class="dark_bordered" v-model="r.n" :list="r.k === 'property' ? 'ps-act-value-' + r.v : null" style="width: 70px;"></label>
-                <button @click="remove(r)" title="Take it out" style="min-width: 0; width: 28px; padding: 0;">✕</button>
+          <div style="display: flex; gap: 12px; align-items: stretch;">
+            <div style="width: 340px; display: flex; flex-direction: column; gap: 6px;">
+              <b>At <input type="number" class="dark_bordered" v-model.number="playhead" min="0" step="0.05" style="width: 64px;"> s, click what it should do:</b>
+              <input type="text" class="dark_bordered" v-model="filter" placeholder="Search: slam, phase, smoke…" style="width: 100%;">
+              <div style="height: 340px; overflow-y: auto; border: 1px solid var(--color-border); border-radius: 4px;">
+                <div v-for="g in groups" :key="g.name">
+                  <div style="position: sticky; top: 0; background: var(--color-back); padding: 3px 8px; font-size: 0.85em; opacity: 0.85; border-bottom: 1px solid var(--color-border);">{{ g.name }}</div>
+                  <div v-for="(c, i) in g.items" :key="g.name + i" class="ps-act-choice" @click="add(c)" :title="c.title" style="padding: 3px 8px; cursor: pointer; display: flex; gap: 8px; align-items: baseline;">
+                    <span>{{ c.label }}</span><span style="opacity: 0.55; font-size: 0.85em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{{ c.hint }}</span>
+                  </div>
+                </div>
+                <p v-if="!groups.length" style="opacity: 0.7; margin: 8px;">Nothing of this mob's matches.</p>
               </div>
-              <p v-if="!rows.length" style="opacity: 0.7; margin: 4px;">Nothing is done to it yet. Pick a time and add what should happen then: a phase of a boss (an event), an attack (an animation), a particle, a hit.</p>
             </div>
-            <datalist id="ps-act-event"><option v-for="e in choices.event" :key="e" :value="e"></option></datalist>
-            <datalist id="ps-act-anim"><option v-for="a in choices.anim" :key="a.value + a.label" :value="a.value">{{ a.label }}</option></datalist>
-            <datalist id="ps-act-particle"><option v-for="p in choices.particle" :key="p" :value="p"></option></datalist>
-            <datalist id="ps-act-property"><option v-for="p in choices.property" :key="p" :value="p"></option></datalist>
-            <datalist v-for="p in choices.property" :key="'v' + p" :id="'ps-act-value-' + p"><option v-for="v in choices.values[p]" :key="v" :value="v"></option></datalist>
-            <p style="opacity: 0.7; margin: 0; font-size: 0.85em;">These are keyframes on the mob's Actions track: drag them on the timeline to change when. They are done to the real mob in Play Animation in Minecraft, Export Video and a recording acted along; Blockbench itself shows the copy as posed.</p>
+            <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px;">
+              <b>On the timeline</b>
+              <div style="height: 300px; overflow-y: auto; border: 1px solid var(--color-border); border-radius: 4px; padding: 4px; display: flex; flex-direction: column; gap: 4px;">
+                <div v-for="r in rows" :key="r.uid" style="display: flex; gap: 6px; align-items: center;">
+                  <input type="number" class="dark_bordered" v-model.number="r.time" min="0" step="0.05" @change="sorted()" style="width: 64px;" title="When, in seconds on the timeline"> s
+                  <input v-if="r.k === 'command'" type="text" class="dark_bordered" v-model="r.v" placeholder="a command (@s is the mob)" style="flex: 1; min-width: 0;">
+                  <span v-else style="flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" :title="r.v">{{ r.label }}</span>
+                  <label v-if="r.k === 'property'" title="How long it does this before going back to what it was doing. Empty: it stays like this.">for <input type="text" class="dark_bordered" v-model="r.d" placeholder="ever" style="width: 48px;"> s</label>
+                  <button v-if="connected" @click="show(r)" title="Show it in Minecraft now" style="min-width: 0; width: 28px; padding: 0;">▶</button>
+                  <button @click="remove(r)" title="Take it out" style="min-width: 0; width: 28px; padding: 0;">✕</button>
+                </div>
+                <p v-if="!rows.length" style="opacity: 0.7; margin: 4px;">Nothing yet. Click something on the left: it happens at the time above{{ connected ? ', and you see it in Minecraft straight away' : '' }}.</p>
+              </div>
+              <label style="display: flex; gap: 6px; align-items: center;" title="Off: it stays where it is on the timeline. On: it starts there, then walks and fights as the game has it.">
+                <input type="checkbox" v-model="free"> Let it walk and fight by itself
+              </label>
+              <p style="opacity: 0.7; margin: 0; font-size: 0.85em;">{{ real ? 'In Minecraft the real ' + type + ' plays ' + name + ' while the animation plays (not its Animation Sequence).' : 'Particles and commands happen where ' + name + ' stands.' }} Each one is a keyframe on its Actions track: drag it to change when.</p>
+            </div>
           </div>`,
       },
       onButton(index) {
+        endTries();
         if (index !== 0 || !vm) return;
-        const next = vm.live ? { on: true, free: !!vm.free } : null;
+        const next = vm.free ? { on: true, free: true } : null;
         if (JSON.stringify(next) !== JSON.stringify(root.pose_live || null)) {
           Undo.initEdit({ groups: [root] });
           root.pose_live = next;
           Undo.finishEdit('Live mob');
         }
-        writeActs(root, vm.rows.map((r) => ({ time: r.time, k: r.k, v: r.v, n: r.n })), spot);
-        Blockbench.showQuickMessage(next ? `${root.name}: the real mob plays it in Minecraft${vm.rows.length ? `, with ${vm.rows.length} action${vm.rows.length === 1 ? '' : 's'}` : ''}` : `${root.name}: played by its copy`, 3500);
+        const rows = vm.rows.filter((r) => r.k !== 'command' || String(r.v).trim());
+        writeActs(root, rows.map((r) => ({ time: r.time, k: r.k, v: r.v, n: r.n, d: r.k === 'property' && Number(r.d) > 0 ? r.d : '', len: r.len })), spot);
+        Blockbench.showQuickMessage(`${root.name}: ${rows.length} action${rows.length === 1 ? '' : 's'}${isLiveMob(root, spot.anim) ? ', played by the real mob in Minecraft' : ''}`, 3500);
       },
     });
     dialog.show();
@@ -4746,6 +4941,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     const camera = cam ? [] : null;
     const tracks = new Map();
     const first = new Map(); // a mob copy's id -> its update at the first tick (where a live mob starts)
+    const liveRoots = new Set(entityRoots().filter((r) => isLiveMob(r, anim)));
     const roots = mannequinRoots().filter(shownInGame).map((r) => ['s', r]).concat(entityRoots().filter(shownInGame).map((r) => ['e', r]));
     try {
       for (let i = 0; i < count; i++) {
@@ -4759,7 +4955,11 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
         for (const [k, root] of roots) {
           try {
             if (k === 's') updates.push([k, mannequinId(root.name), poseMessage(root)]);
-            else for (const copy of entityMessages(root)) updates.push([k, copy.id, copy.msg]);
+            else if (liveRoots.has(root)) {
+              // (played by the real mob: where it stands, and the way it faces)
+              const id = mannequinId(root.name);
+              updates.push([k, id, JSON.stringify({ id, p: toWorld(liveOrigin(root)), w: rootYaw(root) })]);
+            } else for (const copy of entityMessages(root)) updates.push([k, copy.id, copy.msg]);
           } catch (e) {
             // not this tick
           }
@@ -4810,11 +5010,11 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
         else lines.push(line);
       }
     }
-    // the live mobs, and what's done to them when
+    // the mobs with actions: the ones the real mob plays, and what's done to each when
     for (const mob of live) {
-      lines.push(`scriptevent pose:live ${JSON.stringify({ id: mob.id, t: mob.t, free: mob.free, p: mob.p, y: mob.y })}`);
-      for (const [i, k, v, n] of mob.acts) {
-        const line = `scriptevent pose:act ${JSON.stringify({ id: mob.id, i, k, v, n })}`;
+      if (!mob.copy) lines.push(`scriptevent pose:live ${JSON.stringify({ id: mob.id, t: mob.t, free: mob.free, p: mob.p, y: mob.y })}`);
+      for (const [i, k, v, n, d] of mob.acts) {
+        const line = `scriptevent pose:act ${JSON.stringify(Object.assign({ id: mob.id, i, k, v, n }, d ? { d } : {}))}`;
         if (line.length > MAX_COMMAND) skipped++;
         else lines.push(line);
       }
@@ -6200,6 +6400,7 @@ try {
   const PANEL_FOLDED_KEY = 'pose_studio_panel_folded';
 
   const PANEL_CSS = `
+    .ps-act-choice:hover { background: var(--color-selected); color: var(--color-light); }
     .pose_studio_panel { padding: 6px 8px 10px; overflow-y: auto; height: 100%; box-sizing: border-box; container-type: inline-size; }
     .pose_studio_panel .ps-head { display: flex; align-items: center; gap: 4px; margin: 8px 0 4px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--color-subtle_text); cursor: pointer; user-select: none; }
     .pose_studio_panel .ps-head i { font-size: 16px; }
@@ -8189,13 +8390,14 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     const entityProperties = new Map(); // entity id -> { property -> enum values }
     const seats = new Map(); // entity id -> [{ group, family, seats: [{ position }] }]
     const entityEvents = new Map(); // entity id -> the names of its events
+    const entityPropertyDefs = new Map(); // entity id -> { property -> { type, values, range, default } }
     try {
-      for (const dir of vanillaBehaviorDirs(fs, installData)) readArchivedSeats(fs, dir, seats, entityEvents);
+      for (const dir of vanillaBehaviorDirs(fs, installData)) readArchivedSeats(fs, dir, seats, entityEvents, entityPropertyDefs);
     } catch (e) {
       // Minecraft's own behavior files unreadable: pack mobs still have theirs
     }
-    for (const pack of bp) if (pack.dir) readPackEntityProperties(fs, pack, entityProperties, seats, entityEvents);
-    return { layers, rp, bp, entities, geometries, controllers, animations, animationControllers, names, attachables, itemNames, itemTextures, items, entityProperties, seats, places, entityEvents };
+    for (const pack of bp) if (pack.dir) readPackEntityProperties(fs, pack, entityProperties, seats, entityEvents, entityPropertyDefs);
+    return { layers, rp, bp, entities, geometries, controllers, animations, animationControllers, names, attachables, itemNames, itemTextures, items, entityProperties, seats, places, entityEvents, entityPropertyDefs };
   }
 
   // The seats a mob offers riders (minecraft:rideable, in its components or component groups).
@@ -8223,7 +8425,17 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     return [`${base}\\vanilla`, ...versioned.map((p) => `${base}\\${p.name}`)];
   }
 
-  function readArchivedSeats(fs, dir, out, events = null) {
+  // (a mob's properties as its behavior file has them: { name: { type, values, range, default } })
+  function propertyDefs(description) {
+    const defs = {};
+    for (const [prop, def] of Object.entries((description && description.properties) || {})) {
+      if (!def || typeof def !== 'object' || !def.type) continue;
+      defs[prop] = { type: String(def.type), values: Array.isArray(def.values) ? def.values.map(String) : null, range: Array.isArray(def.range) && def.range.length === 2 ? def.range.map(Number) : null, default: typeof def.default === 'object' ? undefined : def.default };
+    }
+    return defs;
+  }
+
+  function readArchivedSeats(fs, dir, out, events = null, defs = null) {
     const file = `${dir}\\__brarchive\\entities.brarchive`;
     if (!fs.existsSync(file)) return;
     for (const entry of readBrarchive(fs.readFileSync(file))) {
@@ -8234,6 +8446,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
           const seats = entitySeats(e);
           if (seats.length) out.set(e.description.identifier, seats);
           if (events && e.events) events.set(e.description.identifier, Object.keys(e.events));
+          if (defs && e.description.properties) defs.set(e.description.identifier, propertyDefs(e.description));
         }
       } catch (err) {
         // skip
@@ -8242,7 +8455,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   }
 
   // A behavior pack's entity properties that take named values (enums): id -> { name -> values }.
-  function readPackEntityProperties(fs, pack, out, seatsOut, eventsOut = null) {
+  function readPackEntityProperties(fs, pack, out, seatsOut, eventsOut = null, defsOut = null) {
     const walk = (dir, depth) => {
       let names = [];
       try {
@@ -8266,6 +8479,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
             if (seats.length) seatsOut.set(d.identifier, seats);
           }
           if (!d || !d.identifier || !d.properties) continue;
+          if (defsOut) defsOut.set(d.identifier, propertyDefs(d)); // (all of them: what its animations go by)
           const enums = {};
           for (const [prop, def] of Object.entries(d.properties)) if (def && def.type === 'enum' && Array.isArray(def.values)) enums[prop.toLowerCase()] = def.values.map(String);
           if (Object.keys(enums).length) out.set(d.identifier, enums);
@@ -13261,7 +13475,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     return { id: idItem.slice(2), name: scene.world || '', anchor: point('A|'), player: point('P|'), locations, removed: scene.removed || [], protocol: version ? Number(version.slice(2)) : 0 };
   }
 
-  const EXPECTED_PACK_PROTOCOL = 38; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
+  const EXPECTED_PACK_PROTOCOL = 39; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
   let warnedOldPack = false;
 
   // Scene files in the scenes folders that belong to a world (their pose_world says so), as
@@ -14096,6 +14310,15 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.88.0",
+      "date": "2026-10-08",
+      "changes": [
+        "Mob Actions is now one list of what the mob can do: click it, and it's on the timeline and shown in Minecraft.",
+        "Fixed: the real mob faced the wrong way, and most of a mob's states were not offered.",
+        "Update the Minecraft packs."
+      ]
+    },
     {
       "version": "0.87.1",
       "date": "2026-10-08",
@@ -15202,7 +15425,7 @@ ${PLUGIN_URL}`,
 
   // for the plugin's own tests only (they set this flag); nothing happens otherwise
   if (typeof globalThis !== 'undefined' && globalThis.__POSE_STUDIO_TEST) {
-    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS, sceneSpot, addLight, lightRoots, stopPath, cameraPathsOn, cameraPose, sampleCameraAnimation, playCameraAnimation, animateCamera, zoomedFov, setupClipChannel, removeClipChannel, clipKeys, clipPose, clipState, displayClips, addAnimationKey, placeClipKey, clipKeyAt, parseRecording, tidyRecording, recordingTicks, recordingAnimation, importRecording, placeRecording, keepRecording, setRecording, poseState, showRecordedWalk, displayClipBones, displayClipRoot, updateRecordingLines, entityAnimations, clipDelta, sampleAnimation, liveRotation, liveOrigin, poseMessage, entityMessage, setContentCache: (c) => (contentCache = c), liveWorldName, adoptCopies, adoptTextures, poseKind, copyName, deckConnect, autoStartDeck, swingStates, heldItemAnswers, sequenceRows, sequenceKeys, sequenceEnd, writeSequence, clipPass, worldPlaces, parseLocate, locatePlace, goToPlace, openPlaces, doLaundry, LOCATE_VERSIONS, sceneTakes, liveMobs, actKeys, writeActs, mobActionChoices, openMobActions, actNumber, cameraMarkMessage, hideCameraMarks, cameraMarksShown, setCameraMarks, sendTimelineForTake, placeRecording, sampleAnimation, sendAnimation, exportVideo, startRecorder, RECORDER_CS, RECORD_PS1, turnedEffect, turnVector, fxTurn, prepareTurned, turnedId, saddleParts, entityMessages, entityIds, flatParts, packFlat, partPlace, proxyModelFor, anyPartOn, prepareProxy, particleList, particleEntry, placeParticle, fxMessage, fxRoots };
+    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS, sceneSpot, addLight, lightRoots, stopPath, cameraPathsOn, cameraPose, sampleCameraAnimation, playCameraAnimation, animateCamera, zoomedFov, setupClipChannel, removeClipChannel, clipKeys, clipPose, clipState, displayClips, addAnimationKey, placeClipKey, clipKeyAt, parseRecording, tidyRecording, recordingTicks, recordingAnimation, importRecording, placeRecording, keepRecording, setRecording, poseState, showRecordedWalk, displayClipBones, displayClipRoot, updateRecordingLines, entityAnimations, clipDelta, sampleAnimation, liveRotation, liveOrigin, poseMessage, entityMessage, setContentCache: (c) => (contentCache = c), liveWorldName, adoptCopies, adoptTextures, poseKind, copyName, deckConnect, autoStartDeck, swingStates, heldItemAnswers, sequenceRows, sequenceKeys, sequenceEnd, writeSequence, clipPass, worldPlaces, parseLocate, locatePlace, goToPlace, openPlaces, doLaundry, LOCATE_VERSIONS, sceneTakes, liveMobs, actKeys, writeActs, mobActionChoices, openMobActions, actNumber, propertyStates, rootYaw, isLiveMob, tryAct, endTries, actTicks, cameraMarkMessage, hideCameraMarks, cameraMarksShown, setCameraMarks, sendTimelineForTake, placeRecording, sampleAnimation, sendAnimation, exportVideo, startRecorder, RECORDER_CS, RECORD_PS1, turnedEffect, turnVector, fxTurn, prepareTurned, turnedId, saddleParts, entityMessages, entityIds, flatParts, packFlat, partPlace, proxyModelFor, anyPartOn, prepareProxy, particleList, particleEntry, placeParticle, fxMessage, fxRoots };
   }
 
   Plugin.register('pose_studio', {
@@ -15467,7 +15690,7 @@ ${PLUGIN_URL}`,
         }),
         mobactions: new Action('pose_studio_mob_actions', {
           name: 'Mob Actions…', icon: 'bolt', click: () => openMobActions(),
-          description: "Makes the selected mob live (the real mob plays its part in Minecraft) and keyframes what's done to it: a phase of a boss (an event), an attack (an animation), a particle, a property, a hit, a command.",
+          description: "What the selected mob does when: click one of its states (a boss's attacks and phases), events, animations or particles, and it's on the timeline and shown in Minecraft.",
         }),
         smoothplay: new Toggle('pose_studio_smooth_playback', {
           name: 'Smooth Movement in Minecraft', icon: 'gesture', value: smoothPlayback(),

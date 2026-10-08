@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.88.0 (2026-10-08)
+
+- Mob Actions is now one list of what the mob can do: click it, and it's on the timeline and shown in Minecraft.
+- Fixed: the real mob faced the wrong way, and most of a mob's states were not offered.
+- Update the Minecraft packs.
+
 ## 0.87.1 (2026-10-08)
 
 - Fixed: after recording a second player with the whole scene, the first recording's world changes no longer played.

@@ -179,17 +179,19 @@ Things to know: playing a take changes the world (the mobs within its range are 
 
 Takes add up. A second actor recorded with the whole scene on (acting along with the first) keeps only what was new in that take: the blocks that player changed, the mobs that were not there before, and what that player did to the first take's mobs (a hit, a kill). When the animation plays, every take on the timeline plays together, each from its own keyframe, so the first take's world changes are still there.
 
-**Live mobs and their actions.** A mob copy is a posed stand-in: it cannot fight or change phase. Select it and open **Animate ▸ Mob Actions…**:
+**Mob actions.** Select a mob and open **Animate ▸ Mob Actions…**. On the left is everything that mob can do, read from its own pack; search it, set the time, and click:
 
-- **Live in Minecraft:** while the animation plays in Minecraft, the real mob stands in for the copy, with its own animations, attacks and behaviour. It is kept where the copy is on the timeline (move the copy with Position keyframes), or tick **Let it roam**.
-- **Actions:** pick a time and add what should be done to it then. They are keyframes on the mob's **Actions** track, so you can drag them:
-  - **Trigger event:** one of the mob's own events, read from its pack. This is how a boss changes phase.
-  - **Play animation:** one of its animations, an attack say.
-  - **Particle:** a particle at the mob (and how many blocks up).
-  - **Set property:** one of its properties and the value.
-  - **Hit it:** damage, dealt as if by you.
-  - **Run command:** any command, run as the mob (`@s` is the mob).
-- When the animation stops, the real mob is taken away and the copy is back. An action that Minecraft refuses is said once in chat.
+- **States:** what its own animations go by (for a DragonCraft boss: intro, sit stomp, take off, slam, vomit…; for other mobs: attacking, pouncing, dying). This is how a boss is put through its attacks and phases. One that ends by itself shows how long it takes, and the time moves on by that much, so clicking one after the other lays them out in a row. A switch (attacking: on) is kept for as long as its animation takes and then goes back; type a number under **for** to keep any state that long.
+- **Events:** its pack's events.
+- **Animations:** one of its animations, played once.
+- **Particles:** its own, and (when you search) the world's.
+- **Hit it**, and **Run a command…** (run as the mob).
+
+What you click is shown in Minecraft straight away (when connected), and listed on the right with its time; ▶ shows it again, ✕ takes it out. Each one is a keyframe on the mob's **Actions** track, so you can also drag them on the timeline.
+
+- States, events, animations and hits are things only the real mob has, so while the animation plays in Minecraft (Play Animation in Minecraft, Export Video, a recording acted along) the real mob stands in for the copy: where the copy is on the timeline, facing the way it faces, with its pack's own animations, sounds and particles. Its Animation Sequence is not used then. When the animation stops, the copy is back.
+- A mob with only particles and commands is still played by its copy; they happen where it stands.
+- **Let it walk and fight by itself:** the real mob starts where the copy is and does what the game has it do.
 
 **Export Video.** **Animate ▸ Export Video** (also on the panel) is Capture Screenshot for the whole animation: it plays the animation once in Minecraft and records the Minecraft window while it plays.
 
