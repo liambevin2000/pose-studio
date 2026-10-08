@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.86.3 (2026-10-08)
+
+- Find Biome or Structure: when Minecraft refuses a pack's biome or structure, it is asked again as a newer command.
+
 ## 0.86.2 (2026-10-08)
 
 - Fixed: Find Biome or Structure found no biomes (Minecraft wants the biome name with "minecraft:" in front).

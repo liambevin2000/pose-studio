@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.86.2'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.86.3'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -312,12 +312,14 @@
       }
     },
 
-    command(commandLine, timeout = COMMAND_TIMEOUT_MS) {
+    // version: the command version it's read as (Minecraft reads a command the way that version of
+    // its commands did: 1, the first, by default; null leaves it unsaid)
+    command(commandLine, timeout = COMMAND_TIMEOUT_MS, version = 1) {
       if (!this.socket) return Promise.reject(new Error('Minecraft is not connected'));
       const requestId = this.nodeCrypto.randomUUID();
       const message = JSON.stringify({
         header: { version: 1, requestId, messagePurpose: 'commandRequest', messageType: 'commandRequest' },
-        body: { version: 1, commandLine, origin: { type: 'player' } },
+        body: Object.assign(version === null ? {} : { version }, { commandLine, origin: { type: 'player' } }),
       });
       this.socket.write(encodeFrame(0x1, bufferClass().from(message, 'utf8')));
       return new Promise((resolve, reject) => {
@@ -11837,13 +11839,42 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   }
 
   const LOCATE_TIMEOUT_MS = 90000; // (the game can be a while about a rare one)
+  // Pose Studio's commands are read by Minecraft as commands of its first command version (which
+  // every Minecraft takes). As one of those, /locate doesn't know what a pack adds: a pack's
+  // structure is "Unexpected", a syntax error. So when Minecraft doesn't take a /locate, it's sent
+  // again as a newer command version, and the first one it took is the one used from then on.
+  // (A syntax error comes back at once and marks the word: … >>word<< …, in every language.)
+  const LOCATE_VERSIONS = [1, null, 100, 60, 50, 46, 45, 44, 43, 42, 41, 40, 39];
+  const notTaken = (text) => />>.*<</.test(String(text || ''));
+  let locateFrom = 0; // where in LOCATE_VERSIONS to start
   async function locatePlace(place) {
     // (a biome has to be asked for with its namespace: minecraft:plains, not plains; a structure of Minecraft's own without)
     const id = place.kind === 'biome' && !place.id.includes(':') ? `minecraft:${place.id}` : place.id;
-    const body = await link.command(`locate ${place.kind === 'biome' ? 'biome' : 'structure'} ${id}`, LOCATE_TIMEOUT_MS);
-    const found = parseLocate(body, place.id);
-    if (!found) throw new Error(`Minecraft answered, but not with a place: ${String((body && body.statusMessage) || JSON.stringify(body)).slice(0, 160)}`);
-    return found;
+    const line = `locate ${place.kind === 'biome' ? 'biome' : 'structure'} ${id}`;
+    let refused = null;
+    for (let i = 0; i < LOCATE_VERSIONS.length; i++) {
+      const n = (locateFrom + i) % LOCATE_VERSIONS.length;
+      let body = null;
+      try {
+        body = await link.command(line, LOCATE_TIMEOUT_MS, LOCATE_VERSIONS[n]);
+      } catch (e) {
+        if (notTaken(e && e.message) && link.connected) {
+          refused = refused || e;
+          continue; // not a command, read that way: the next way
+        }
+        if (i) locateFrom = n; // (taken, and it isn't there to be found)
+        throw e;
+      }
+      if (notTaken(body && body.statusMessage)) {
+        refused = refused || new Error(String(body.statusMessage));
+        continue;
+      }
+      locateFrom = n;
+      const found = parseLocate(body, place.id);
+      if (!found) throw new Error(`Minecraft answered, but not with a place: ${String((body && body.statusMessage) || JSON.stringify(body)).slice(0, 160)}`);
+      return found;
+    }
+    throw refused || new Error('Minecraft took no /locate');
   }
 
   // Takes you there: onto the ground at what was found (a cave biome: to the height /locate gave).
@@ -13753,6 +13784,13 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // <changelog>
   const CHANGELOG = [
     {
+      "version": "0.86.3",
+      "date": "2026-10-08",
+      "changes": [
+        "Find Biome or Structure: when Minecraft refuses a pack's biome or structure, it is asked again as a newer command."
+      ]
+    },
+    {
       "version": "0.86.2",
       "date": "2026-10-08",
       "changes": [
@@ -14833,7 +14871,7 @@ ${PLUGIN_URL}`,
 
   // for the plugin's own tests only (they set this flag); nothing happens otherwise
   if (typeof globalThis !== 'undefined' && globalThis.__POSE_STUDIO_TEST) {
-    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS, sceneSpot, addLight, lightRoots, stopPath, cameraPathsOn, cameraPose, sampleCameraAnimation, playCameraAnimation, animateCamera, zoomedFov, setupClipChannel, removeClipChannel, clipKeys, clipPose, clipState, displayClips, addAnimationKey, placeClipKey, clipKeyAt, parseRecording, tidyRecording, recordingTicks, recordingAnimation, importRecording, placeRecording, keepRecording, setRecording, poseState, showRecordedWalk, displayClipBones, displayClipRoot, updateRecordingLines, entityAnimations, clipDelta, sampleAnimation, liveRotation, liveOrigin, poseMessage, entityMessage, setContentCache: (c) => (contentCache = c), liveWorldName, adoptCopies, adoptTextures, poseKind, copyName, deckConnect, autoStartDeck, swingStates, heldItemAnswers, sequenceRows, sequenceKeys, sequenceEnd, writeSequence, clipPass, worldPlaces, parseLocate, locatePlace, goToPlace, openPlaces, doLaundry, cameraMarkMessage, hideCameraMarks, cameraMarksShown, setCameraMarks, sendTimelineForTake, placeRecording, sampleAnimation, sendAnimation, exportVideo, startRecorder, RECORDER_CS, RECORD_PS1, turnedEffect, turnVector, fxTurn, prepareTurned, turnedId, saddleParts, entityMessages, entityIds, flatParts, packFlat, partPlace, proxyModelFor, anyPartOn, prepareProxy, particleList, particleEntry, placeParticle, fxMessage, fxRoots };
+    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS, sceneSpot, addLight, lightRoots, stopPath, cameraPathsOn, cameraPose, sampleCameraAnimation, playCameraAnimation, animateCamera, zoomedFov, setupClipChannel, removeClipChannel, clipKeys, clipPose, clipState, displayClips, addAnimationKey, placeClipKey, clipKeyAt, parseRecording, tidyRecording, recordingTicks, recordingAnimation, importRecording, placeRecording, keepRecording, setRecording, poseState, showRecordedWalk, displayClipBones, displayClipRoot, updateRecordingLines, entityAnimations, clipDelta, sampleAnimation, liveRotation, liveOrigin, poseMessage, entityMessage, setContentCache: (c) => (contentCache = c), liveWorldName, adoptCopies, adoptTextures, poseKind, copyName, deckConnect, autoStartDeck, swingStates, heldItemAnswers, sequenceRows, sequenceKeys, sequenceEnd, writeSequence, clipPass, worldPlaces, parseLocate, locatePlace, goToPlace, openPlaces, doLaundry, LOCATE_VERSIONS, cameraMarkMessage, hideCameraMarks, cameraMarksShown, setCameraMarks, sendTimelineForTake, placeRecording, sampleAnimation, sendAnimation, exportVideo, startRecorder, RECORDER_CS, RECORD_PS1, turnedEffect, turnVector, fxTurn, prepareTurned, turnedId, saddleParts, entityMessages, entityIds, flatParts, packFlat, partPlace, proxyModelFor, anyPartOn, prepareProxy, particleList, particleEntry, placeParticle, fxMessage, fxRoots };
   }
 
   Plugin.register('pose_studio', {

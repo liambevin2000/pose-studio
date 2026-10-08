@@ -1,5 +1,12 @@
 [
   {
+    "version": "0.86.3",
+    "date": "2026-10-08",
+    "changes": [
+      "Find Biome or Structure: when Minecraft refuses a pack's biome or structure, it is asked again as a newer command."
+    ]
+  },
+  {
     "version": "0.86.2",
     "date": "2026-10-08",
     "changes": [
