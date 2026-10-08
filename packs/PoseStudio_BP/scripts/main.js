@@ -2,7 +2,7 @@
 // The Blockbench plugin runs commands through the /connect websocket as the player,
 // e.g. `/scriptevent pose:set {"id":"mq_1","p":[x,y,z],"b":[...21 angles]}`.
 // Positions arrive as block offsets from the anchor; angles are already in Bedrock convention.
-import { world, system, BlockVolume, StructureSaveMode, StructureRotation, MolangVariableMap } from "@minecraft/server";
+import { world, system, BlockVolume, BlockPermutation, StructureSaveMode, StructureRotation, MolangVariableMap } from "@minecraft/server";
 
 const TYPE = "pose:mannequin";
 const TAG_PREFIX = "pose_id.";
@@ -348,7 +348,8 @@ function setFx(player, data) {
 }
 
 // `pose:rec {"on":1,"count":3}` starts recording the player who ran it, after a countdown of that
-// many seconds. With "play":1 it's a take acted along with the animation that was just sent
+// many seconds. With "scene":1 everything around the player is recorded too (see startSceneRecording;
+// "r": how far around). With "play":1 it's a take acted along with the animation that was just sent
 // (pose:path, pose:track…: the players and mobs already on Blockbench's timeline): everyone in it
 // stands at its first frame through the countdown, and it starts playing on the very tick the
 // recording starts, so tick n of the recording is tick n of the animation; `pose:rec {"on":0,op}` stops and answers with the recording: `R|first tick|…` items
@@ -359,6 +360,500 @@ function setFx(player, data) {
 const MAX_RECORDING_TICKS = 6000; // 5 minutes
 let recording = null; // { player, anchor, ticks, swing, wait, run }
 
+// ---- The whole scene, recorded and played back ---------------------------------------------------
+// `pose:rec` with "scene":1 also records what goes on around the player while they play their
+// part: every mob within "r" blocks (where it is and where it looks, each tick; when it's hurt,
+// when it dies; the ones that turn up later), and every block a player places or breaks or an
+// explosion takes. That's a take. It stays in the world (it's far too much to send to
+// Blockbench), under an id that Blockbench keeps with the recording of the player.
+//
+// Played back (`pose:path` with "takes": [{ id, at: the tick of the animation it starts at, skip:
+// the tick of the take that plays then }]), a take is acted by real mobs. The blocks are put back
+// as they were when it began, the mobs that are there now go, and a copy of each recorded mob
+// (saved whole, as a structure, when it was first seen) is put, tick for tick, where the recorded
+// one was. So they walk as they walked (the game animates a mob by how it moves), flash red and
+// cry out when the recorded one was hurt, die when it died, and the blocks change when they
+// changed. While they act, the copies can't walk off by themselves or hurt anything; afterwards
+// they're left where the take ended, as ordinary mobs.
+const TAKES_PROPERTY = "pose:takes"; // { id: { c: chunks, n: ticks } }
+const TAKE_CHUNK = 30000; // characters a dynamic property (a take is kept in several)
+const TAKE_MAX_ACTORS = 80;
+const TAKE_ACTOR_TAG = "pose_actor";
+const takes = new Map(); // id -> take, read from the world when first asked for
+let sceneRec = null; // the take being recorded: { take, seen: Map(entity id -> { actor, entity, last }), palette: Map, tick, dim }
+let takePlays = []; // the takes being played: see startTakes
+let takeHurting = false; // a recorded hurt is being dealt (any other hurt of a copy is undone)
+let lootWas; // the doMobLoot rule, while copies act
+
+function takeIndex() {
+  try {
+    return JSON.parse(world.getDynamicProperty(TAKES_PROPERTY) || "{}") || {};
+  } catch {
+    return {};
+  }
+}
+
+function saveTake(take) {
+  const text = JSON.stringify(take);
+  const chunks = Math.ceil(text.length / TAKE_CHUNK);
+  for (let i = 0; i < chunks; i++) world.setDynamicProperty(`pose:take.${take.id}.${i}`, text.slice(i * TAKE_CHUNK, (i + 1) * TAKE_CHUNK));
+  const index = takeIndex();
+  index[take.id] = { c: chunks, n: take.n };
+  world.setDynamicProperty(TAKES_PROPERTY, JSON.stringify(index));
+  takes.set(take.id, take);
+}
+
+function loadTake(id) {
+  if (takes.has(id)) return takes.get(id);
+  const entry = takeIndex()[id];
+  if (!entry) return null;
+  let text = "";
+  for (let i = 0; i < entry.c; i++) text += world.getDynamicProperty(`pose:take.${id}.${i}`) || "";
+  try {
+    const take = JSON.parse(text);
+    takes.set(id, take);
+    return take;
+  } catch {
+    return null;
+  }
+}
+
+function deleteTake(id) {
+  const take = loadTake(id);
+  const index = takeIndex();
+  const entry = index[id];
+  if (entry) for (let i = 0; i < entry.c; i++) world.setDynamicProperty(`pose:take.${id}.${i}`, undefined);
+  delete index[id];
+  world.setDynamicProperty(TAKES_PROPERTY, Object.keys(index).length ? JSON.stringify(index) : undefined);
+  takes.delete(id);
+  for (const actor of (take && take.actors) || []) {
+    if (!actor.s) continue;
+    try {
+      world.structureManager.delete(actor.s);
+    } catch {
+      // gone already
+    }
+  }
+}
+
+// ---- recording ----
+function startSceneRecording(player, radius) {
+  const at = player.location;
+  const id = Date.now().toString(36) + Math.floor(Math.random() * 1296).toString(36).padStart(2, "0");
+  // actors: [{ t: type, s: the structure it's saved as ("" = none: a plain one of its type), f: the first tick it's there,
+  //   e: the tick it's gone from (-1: there to the end), d: the tick it dies at (-1: it doesn't), k: [[tick, x, y, z, yaw, pitch]] (hundredths of a block from `at`, degrees; only the ticks it changes) }]
+  // hurts: [[tick, actor, damage, cause]]; blocks: [[tick, x, y, z, from, to]] (from and to: places in `p`, the block states met)
+  sceneRec = {
+    take: { id, dim: player.dimension.id, at: [Math.round(at.x * 100) / 100, Math.round(at.y * 100) / 100, Math.round(at.z * 100) / 100], r: Math.max(8, Math.min(96, Number(radius) || 48)), n: 0, actors: [], hurts: [], blocks: [], p: [] },
+    seen: new Map(), palette: new Map(), tick: 0, dim: player.dimension, player,
+  };
+}
+
+function trackActor(entity) {
+  const s = sceneRec;
+  if (!s || s.seen.has(entity.id) || s.take.actors.length >= TAKE_MAX_ACTORS) return;
+  if (!isWildMob(entity)) return;
+  const n = s.take.actors.length;
+  const actor = { t: entity.typeId, s: "", f: s.tick, e: -1, d: -1, k: [] };
+  // the mob as it is (its look, what it wears, what the pack keeps on it), to make the copy from
+  try {
+    const l = entity.location;
+    const block = { x: Math.floor(l.x), y: Math.floor(l.y), z: Math.floor(l.z) };
+    const name = `pose:take_${s.take.id}_${n}`;
+    world.structureManager.createFromWorld(name, entity.dimension, block, block, { includeBlocks: false, includeEntities: true, saveMode: StructureSaveMode.World });
+    actor.s = name;
+  } catch {
+    // can't be saved here: its copy is a plain one of its type
+  }
+  s.take.actors.push(actor);
+  s.seen.set(entity.id, { actor, n, entity, last: "" });
+}
+
+// one tick of the scene: whoever is new, and where everybody is
+function recordSceneTick() {
+  const s = sceneRec;
+  if (!s) return;
+  const take = s.take;
+  if (s.tick % 10 === 0) {
+    try {
+      for (const e of s.dim.getEntities({ location: s.player.location, maxDistance: take.r })) trackActor(e);
+    } catch {
+      // not this tick
+    }
+  }
+  for (const seen of s.seen.values()) {
+    const actor = seen.actor;
+    if (actor.e >= 0) continue;
+    let l = null;
+    let r = null;
+    try {
+      if (seen.entity.isValid) {
+        l = seen.entity.location;
+        r = seen.entity.getRotation();
+      }
+    } catch {
+      l = null;
+    }
+    if (!l || !r) {
+      actor.e = s.tick; // gone (died: see the entityDie event; or went too far to be kept by the game)
+      continue;
+    }
+    const sample = [Math.round((l.x - take.at[0]) * 100), Math.round((l.y - take.at[1]) * 100), Math.round((l.z - take.at[2]) * 100), Math.round(r.y), Math.round(r.x)];
+    const key = sample.join(".");
+    if (key !== seen.last) {
+      actor.k.push([s.tick].concat(sample));
+      seen.last = key;
+    }
+  }
+  s.tick++;
+  take.n = s.tick;
+}
+
+function blockState(permutation) {
+  const s = sceneRec;
+  let key = "minecraft:air";
+  try {
+    const states = permutation.getAllStates ? permutation.getAllStates() : {};
+    key = permutation.type.id + (states && Object.keys(states).length ? "|" + JSON.stringify(states) : "");
+  } catch {
+    // air
+  }
+  if (!s.palette.has(key)) {
+    s.palette.set(key, s.take.p.length);
+    s.take.p.push(key);
+  }
+  return s.palette.get(key);
+}
+
+function noteBlock(block, from, to) {
+  const s = sceneRec;
+  if (!s || !block || block.dimension.id !== s.take.dim) return;
+  const l = block.location;
+  s.take.blocks.push([s.tick, l.x, l.y, l.z, from, to]);
+}
+
+function stopSceneRecording() {
+  const s = sceneRec;
+  sceneRec = null;
+  if (!s) return null;
+  const take = s.take;
+  saveTake(take);
+  return take;
+}
+
+try {
+  const after = world.afterEvents || {};
+  const before = world.beforeEvents || {};
+  if (after.entityHurt) {
+    after.entityHurt.subscribe((ev) => {
+      try {
+        const hurt = ev.hurtEntity;
+        // a copy acting a take: only what was recorded hurts it
+        if (!takeHurting && takePlays.length && hurt.hasTag(TAKE_ACTOR_TAG)) {
+          const health = hurt.getComponent("minecraft:health");
+          if (health && health.currentValue > 0) health.setCurrentValue(Math.min(health.effectiveMax, health.currentValue + ev.damage));
+          return;
+        }
+        const seen = sceneRec && sceneRec.seen.get(hurt.id);
+        if (seen) sceneRec.take.hurts.push([sceneRec.tick, seen.n, Math.round(ev.damage * 100) / 100, String((ev.damageSource && ev.damageSource.cause) || "entityAttack")]);
+      } catch {
+        // not one of ours
+      }
+    });
+  }
+  if (after.entityDie) {
+    after.entityDie.subscribe((ev) => {
+      const seen = sceneRec && sceneRec.seen.get(ev.deadEntity.id);
+      if (seen && seen.actor.d < 0) seen.actor.d = sceneRec.tick;
+    });
+  }
+  if (after.entitySpawn) {
+    after.entitySpawn.subscribe((ev) => {
+      if (!sceneRec) return;
+      // (looked at once it has settled in: see recordSceneTick)
+      const s = sceneRec;
+      system.runTimeout(() => {
+        try {
+          if (sceneRec !== s || !ev.entity.isValid) return;
+          const l = ev.entity.location;
+          const p = s.player.location;
+          if (Math.hypot(l.x - p.x, l.y - p.y, l.z - p.z) <= s.take.r) trackActor(ev.entity);
+        } catch {
+          // gone again
+        }
+      }, 1);
+    });
+  }
+  if (after.playerPlaceBlock) {
+    after.playerPlaceBlock.subscribe((ev) => {
+      if (sceneRec) noteBlock(ev.block, blockState(null), blockState(ev.block.permutation));
+    });
+  }
+  if (after.playerBreakBlock) {
+    after.playerBreakBlock.subscribe((ev) => {
+      if (sceneRec) noteBlock(ev.block, blockState(ev.brokenBlockPermutation), blockState(ev.block.permutation));
+    });
+  }
+  if (before.explosion) {
+    before.explosion.subscribe((ev) => {
+      if (!sceneRec) return;
+      try {
+        for (const block of ev.getImpactedBlocks()) noteBlock(block, blockState(block.permutation), blockState(null));
+      } catch {
+        // an explosion that takes no blocks
+      }
+    });
+  }
+} catch (e) {
+  console.warn(`[Pose Studio] the scene around a recording isn't recorded here: ${e}`);
+}
+
+// ---- playing ----
+const takePlace = (take, k) => ({ x: take.at[0] + k[1] / 100, y: take.at[1] + k[2] / 100, z: take.at[2] + k[3] / 100 });
+
+function setTakeBlock(dim, take, change, to) {
+  try {
+    const [id, states] = String(take.p[to] || "minecraft:air").split(/\|(.+)/);
+    dim.getBlock({ x: change[1], y: change[2], z: change[3] }).setPermutation(BlockPermutation.resolve(id, states ? JSON.parse(states) : undefined));
+  } catch {
+    // not loaded, or a block this game doesn't have
+  }
+}
+
+// A copy of a recorded mob, at one of its places.
+function spawnTakeActor(dim, take, actor, k) {
+  const at = takePlace(take, k);
+  let copy = null;
+  if (actor.s) {
+    try {
+      const there = new Set(dim.getEntities({ location: at, maxDistance: 5 }).map((e) => e.id));
+      world.structureManager.place(actor.s, dim, { x: Math.floor(at.x), y: Math.floor(at.y), z: Math.floor(at.z) }, { includeBlocks: false, includeEntities: true });
+      const made = dim.getEntities({ location: at, maxDistance: 5 }).filter((e) => !there.has(e.id) && e.typeId !== "minecraft:player");
+      copy = made.find((e) => e.typeId === actor.t) || null;
+      for (const e of made) if (e !== copy) e.remove(); // (whatever else stood in that block when it was saved)
+    } catch {
+      copy = null;
+    }
+  }
+  if (!copy) copy = dim.spawnEntity(actor.t, at);
+  copy.addTag(TAKE_ACTOR_TAG);
+  try {
+    // while it acts it goes only where it's put, and hurts nothing
+    copy.addEffect("slowness", 20000000, { amplifier: 255, showParticles: false });
+    copy.addEffect("weakness", 20000000, { amplifier: 255, showParticles: false });
+  } catch {
+    // it takes no effects
+  }
+  return copy;
+}
+
+// Sets a take up to be played from one of its ticks: the blocks as they were then, the mobs that
+// are there now gone, and a copy of everyone who was there at that tick in their place.
+function startTake(spec) {
+  const take = loadTake(String(spec.id));
+  if (!take) return null;
+  const dim = world.getDimension(take.dim);
+  const skip = Math.max(0, Math.min(take.n - 1, Math.round(Number(spec.skip) || 0)));
+  const play = { take, dim, at: Math.max(0, Math.round(Number(spec.at) || 0)), skip, done: skip - 1, actors: take.actors.map((actor) => ({ actor, copy: null, i: 0, over: false })), hurt: 0, block: 0 };
+  // the blocks: back to how they were before the take, then on to the tick it's played from
+  for (let i = take.blocks.length - 1; i >= 0; i--) setTakeBlock(dim, take, take.blocks[i], take.blocks[i][4]);
+  while (play.block < take.blocks.length && take.blocks[play.block][0] < skip) setTakeBlock(dim, take, take.blocks[play.block], take.blocks[play.block++][5]);
+  while (play.hurt < take.hurts.length && take.hurts[play.hurt][0] < skip) play.hurt++;
+  // the mobs that are there (the copies of the last time it was played among them)
+  const centre = { x: take.at[0], y: take.at[1], z: take.at[2] };
+  try {
+    for (const e of dim.getEntities({ location: centre, maxDistance: take.r + 8 })) if (isWildMob(e)) e.remove();
+    for (const e of dim.getEntities({ tags: [TAKE_ACTOR_TAG] })) e.remove();
+  } catch {
+    // not loaded
+  }
+  return play;
+}
+
+// One tick of a take: `tick` is the take's own (held at its first one before it starts, at its last one after it ends).
+function playTakeTick(play, tick) {
+  const take = play.take;
+  const now = Math.max(play.skip, Math.min(take.n - 1, tick));
+  const fresh = now > play.done; // (a tick is only acted once: its blocks, its hurts, its deaths)
+  if (fresh) while (play.block < take.blocks.length && take.blocks[play.block][0] <= now) setTakeBlock(play.dim, take, take.blocks[play.block], take.blocks[play.block++][5]);
+  for (const state of play.actors) {
+    const actor = state.actor;
+    if (state.over || actor.f > now || !actor.k.length) continue;
+    const dies = actor.d >= 0 && actor.d <= now;
+    const left = actor.e >= 0 && actor.e <= now && !dies;
+    try {
+      if (left || (dies && (!fresh || !state.copy))) {
+        // gone by this tick (one that died before the tick this is played from is never seen)
+        if (left && state.copy && state.copy.isValid) state.copy.remove();
+        state.over = true;
+        continue;
+      }
+      while (state.i + 1 < actor.k.length && actor.k[state.i + 1][0] <= now) state.i++;
+      const k = actor.k[state.i];
+      if (!state.copy || !state.copy.isValid) {
+        if (state.tries >= 3) {
+          state.over = true;
+          continue;
+        }
+        state.tries = (state.tries || 0) + 1;
+        state.copy = spawnTakeActor(play.dim, take, actor, k);
+      }
+      state.copy.teleport(takePlace(take, k), { rotation: { x: k[5], y: k[4] }, keepVelocity: false });
+      if (dies) {
+        state.copy.kill(); // (it falls as its kind falls, and the game takes it away)
+        state.over = true;
+      }
+    } catch {
+      // not there this tick (the place isn't loaded)
+    }
+  }
+  if (fresh) {
+    while (play.hurt < take.hurts.length && take.hurts[play.hurt][0] <= now) {
+      const [, n, damage, cause] = take.hurts[play.hurt++];
+      const state = play.actors[n];
+      if (!state || !state.copy || state.over) continue;
+      takeHurting = true;
+      try {
+        if (state.copy.isValid) state.copy.applyDamage(Math.max(0.01, damage), { cause });
+      } catch {
+        // gone
+      } finally {
+        takeHurting = false;
+      }
+    }
+    play.done = now;
+  }
+}
+
+function startTakes(specs) {
+  endTakes();
+  takePlays = (specs || []).map(startTake).filter(Boolean);
+  if (takePlays.length) {
+    try {
+      // (a copy that dies drops nothing: what dropped then isn't in the take)
+      lootWas = world.gameRules.doMobLoot;
+      world.gameRules.doMobLoot = false;
+    } catch {
+      lootWas = undefined;
+    }
+  }
+  playTakes(0);
+}
+
+// the takes at a tick of the animation that's playing
+function playTakes(tick) {
+  for (const play of takePlays) playTakeTick(play, tick - play.at + play.skip);
+}
+
+// The copies are let go, where they are: ordinary mobs again.
+function endTakes() {
+  for (const play of takePlays) {
+    for (const state of play.actors) {
+      try {
+        if (!state.copy || !state.copy.isValid) continue;
+        state.copy.removeEffect("slowness");
+        state.copy.removeEffect("weakness");
+      } catch {
+        // gone
+      }
+    }
+  }
+  if (takePlays.length && lootWas !== undefined) {
+    try {
+      world.gameRules.doMobLoot = lootWas;
+    } catch {
+      // older versions
+    }
+  }
+  lootWas = undefined;
+  takePlays = [];
+}
+
+// ---- Live mobs and their actions ------------------------------------------------------------------
+// `pose:live {"id","t","free"}`: in the animation that was just sent (pose:path), the mob copy with
+// that id is played by the real mob of type t: it's there with everything the pack gives it (its
+// own animations, its attacks, its phases), stood where the copy is on the timeline ("free":1 lets
+// it go where it wants from where it starts). `pose:act {"id","i":tick,"k","v","n"}` is something
+// done to it at a tick: k "event" (v: one of its events, a boss's phase say), "anim" (v: an
+// animation to play on it), "particle" (v: a particle, at it; n: blocks above its feet),
+// "property" (v: the property, n: its value), "hit" (n: the damage, dealt as by the player),
+// "command" (v: any command, run as the mob, where it is). Stopping takes the real mob away again.
+const LIVE_TAG = "pose_live";
+
+function setLive(data) {
+  if (!cameraPath || !data.id || !data.t) return;
+  cameraPath.live.set(String(data.id), { type: String(data.t), free: !!data.free, start: finite(data.p) ? { p: data.p, y: data.y } : null, entity: null, acts: new Map() });
+}
+
+function setLiveAct(data) {
+  const live = cameraPath && cameraPath.live.get(String(data.id));
+  if (!live || !data.k) return;
+  const tick = Math.max(0, Math.round(Number(data.i) || 0));
+  if (!live.acts.has(tick)) live.acts.set(tick, []);
+  live.acts.get(tick).push({ k: String(data.k), v: data.v, n: data.n });
+}
+
+function doLiveAct(player, entity, act) {
+  const value = String(act.v === undefined ? "" : act.v);
+  if (act.k === "event") entity.triggerEvent(value);
+  else if (act.k === "anim") entity.playAnimation(value, { blendOutTime: 0.2 });
+  else if (act.k === "particle") {
+    const l = entity.location;
+    entity.dimension.spawnParticle(value, { x: l.x, y: l.y + (Number(act.n) || 0), z: l.z });
+  } else if (act.k === "property") entity.setProperty(value, act.n);
+  else if (act.k === "hit") entity.applyDamage(Math.max(0, Number(act.n) || 1), { cause: "entityAttack", damagingEntity: player });
+  else if (act.k === "command") entity.runCommand(value.replace(/^\//, ""));
+}
+
+// One tick of a live mob: `update` is what the timeline has for the copy at this tick (where it
+// stands and the way it faces), if it changed. Unless it's free, it's kept where the timeline last
+// had it; it turns as it likes until the timeline turns it.
+function playLive(player, anchor, id, live, tick, update) {
+  if (update && finite(update.p)) live.at = update;
+  const at = live.at || live.start;
+  try {
+    if (!live.entity || !live.entity.isValid) {
+      if (live.entity || !at || !finite(at.p)) return; // (it died, or there's nowhere to put it yet)
+      const dim = world.getDimension(anchor.dim);
+      // the copy steps aside (all of it: what it holds, and the other parts of a big one)
+      for (const tag of [id, `${id}__main`, `${id}__off`].concat(Array.from({ length: 12 }, (unused, n) => `${id}__p${n + 1}`))) for (const e of findMannequins(dim, tag)) e.remove();
+      live.entity = dim.spawnEntity(live.type, toWorld(anchor, at.p));
+      live.entity.addTag(LIVE_TAG);
+      live.entity.teleport(toWorld(anchor, at.p), { rotation: { x: 0, y: Number(at.y) || 0 }, keepVelocity: false });
+    } else if (!live.free && at) {
+      live.entity.teleport(toWorld(anchor, at.p), update ? { rotation: { x: 0, y: Number(at.y) || 0 }, keepVelocity: false } : { keepVelocity: false });
+    }
+  } catch {
+    return; // not loaded
+  }
+  for (const act of live.acts.get(tick) || []) {
+    try {
+      doLiveAct(player, live.entity, act);
+    } catch (e) {
+      const said = `${id}: ${act.k} ${act.v === undefined ? "" : act.v} didn't work (${e})`;
+      if (!reportedErrors.has(said)) {
+        reportedErrors.add(said);
+        try {
+          player.sendMessage(`§c[Pose Studio] ${said}`);
+        } catch {
+          // nobody to tell
+        }
+      }
+    }
+  }
+}
+
+function endLive() {
+  for (const dimension of ["overworld", "nether", "the_end"]) {
+    try {
+      for (const e of world.getDimension(dimension).getEntities({ tags: [LIVE_TAG] })) e.remove();
+    } catch {
+      // not loaded
+    }
+  }
+  if (cameraPath && cameraPath.live) for (const live of cameraPath.live.values()) live.entity = live.at = null;
+}
+
 function endRecordingRun() {
   if (recording && recording.run !== undefined) system.clearRun(recording.run);
   if (recording) recording.run = undefined;
@@ -368,8 +863,9 @@ function startRecording(player, data) {
   if (!player) return;
   endRecordingRun();
   const anchor = requireAnchor(player);
-  recording = { player, anchor, ticks: [], swing: false, wait: Math.max(0, Math.min(10, Math.round(Number(data.count) || 0))) * 20, run: undefined, play: !!data.play && !!cameraPath };
+  recording = { player, anchor, ticks: [], swing: false, wait: Math.max(0, Math.min(10, Math.round(Number(data.count) || 0))) * 20, run: undefined, play: !!data.play && !!cameraPath, scene: !!data.scene, radius: data.r };
   const r = recording;
+  sceneRec = null; // (a take that was being recorded and never stopped is dropped)
   if (r.play) {
     try {
       showPathStart(player); // where everyone starts, to take your place by
@@ -403,11 +899,13 @@ function startRecording(player, data) {
           console.warn(`[Pose Studio] playing along: ${e}`);
         }
       }
+      if (r.scene && !r.ticks.length) startSceneRecording(p, r.radius);
       const l = p.location;
       const rot = p.getRotation();
       const flags = (p.isSneaking ? 1 : 0) | (p.isSprinting ? 2 : 0) | (p.isSwimming ? 4 : 0) | (p.isGliding ? 8 : 0) | (p.isOnGround ? 16 : 0) | (p.isInWater ? 32 : 0) | (p.isFlying ? 64 : 0) | (r.swing ? 128 : 0) | (p.isJumping ? 256 : 0) | (p.isClimbing ? 512 : 0);
       r.swing = false;
       r.ticks.push([Math.round((l.x - anchor.x) * 100), Math.round((l.y - anchor.y) * 100), Math.round((l.z - anchor.z) * 100), Math.round(rot.y * 10), Math.round(rot.x * 10), flags].map((v) => v.toString(36)).join("."));
+      if (r.scene) recordSceneTick();
       if (r.ticks.length % 10 === 0) say(`§c● REC§r ${(r.ticks.length / 20).toFixed(1)} s`);
       if (r.ticks.length >= MAX_RECORDING_TICKS) {
         endRecordingRun();
@@ -449,6 +947,9 @@ function stopRecording(player, data) {
   } catch {
     // without what's worn
   }
+  // the scene around them, kept here: S|take|ticks|mobs|block changes|hurts
+  const take = r.scene ? stopSceneRecording() : null;
+  if (take) items.push(`S|${take.id}|${take.n}|${take.actors.length}|${take.blocks.length}|${take.hurts.length}`);
   finishResult(items);
 }
 
@@ -839,9 +1340,15 @@ let cameraPath = null; // { keys, ramp, loop, hud }
 let pathRun; // the interval while a path plays
 let pathPlayer = null;
 
-function stopPath() {
+// keepScene: the takes' copies and the live mobs stay as they are (the animation has played out,
+// or is about to start from the frame it was shown at): they go when Blockbench says stop.
+function stopPath(keepScene = false) {
   if (pathRun !== undefined) system.clearRun(pathRun);
   pathRun = undefined;
+  if (!keepScene) {
+    endTakes();
+    endLive();
+  }
   if (cameraPath && cameraPath.smooth && cameraPath.tracks) {
     const anchor = getAnchor();
     for (const [id, track] of cameraPath.tracks) {
@@ -869,6 +1376,7 @@ function stopPath() {
 function showPathStart(player) {
   if (!player || !cameraPath) return;
   stopPath();
+  startTakes(cameraPath.takes); // (the scene as it was when a take begins)
   for (const track of cameraPath.tracks.values()) {
     const d = track.frames.get(0);
     if (!d) continue;
@@ -895,7 +1403,8 @@ function showPathStart(player) {
 
 function playPath(player, data) {
   if (!player) return;
-  stopPath();
+  stopPath(true);
+  endLive();
   if (!cameraPath || cameraPath.keys.length < 2) throw new Error("the animation didn't arrive: play it again from Blockbench");
   const flown = cameraPath.cam; // without a camera in it, only the players and mobs are played
   if (flown && cameraPath.keys.some((k) => !k)) throw new Error("the camera's animation didn't arrive whole: play it again from Blockbench");
@@ -906,7 +1415,8 @@ function playPath(player, data) {
   // the players and mobs: whatever update they have for this tick
   const pose = () => {
     const tick = Math.round(time / cameraPath.step);
-    for (const track of tracks.values()) {
+    for (const [id, track] of tracks) {
+      if (cameraPath.live.has(id.replace(/__p\d+$/, ""))) continue; // (played by the real mob: see playLive)
       const d = track.frames.get(tick);
       if (!d) continue;
       try {
@@ -919,7 +1429,13 @@ function playPath(player, data) {
         // not there right now (unloaded, or removed)
       }
     }
+    playTakes(tick);
+    for (const [id, live] of cameraPath.live) {
+      const track = tracks.get(id);
+      playLive(player, anchor, id, live, tick, (track && track.frames.get(tick)) || null);
+    }
   };
+  if (!takePlays.length) startTakes(cameraPath.takes);
   let time = Math.max(0, Number(data.t) || 0);
   let fov = null;
   pathPlayer = player;
@@ -948,7 +1464,7 @@ function playPath(player, data) {
         else {
           time = total;
           step(true);
-          stopPath();
+          stopPath(true); // (what's in the scene stays as the last frame has it, until Blockbench says stop)
           return;
         }
       }
@@ -963,7 +1479,7 @@ function playPath(player, data) {
 function setPath(data) {
   stopPath();
   const n = Math.max(0, Math.min(6000, Number(data.n) || 0)); // 5 minutes of samples at most
-  cameraPath = { keys: new Array(n).fill(null), ramp: Array.isArray(data.ramp) ? data.ramp.map(Number) : [0, 0, 1, 1], loop: !!data.loop, hud: !!data.hud, step: Math.max(0.01, Number(data.step) || 0.05), cam: data.cam === undefined || !!data.cam, smooth: !!data.smooth, tracks: new Map() };
+  cameraPath = { keys: new Array(n).fill(null), ramp: Array.isArray(data.ramp) ? data.ramp.map(Number) : [0, 0, 1, 1], loop: !!data.loop, hud: !!data.hud, step: Math.max(0.01, Number(data.step) || 0.05), cam: data.cam === undefined || !!data.cam, smooth: !!data.smooth, tracks: new Map(), takes: Array.isArray(data.takes) ? data.takes : [], live: new Map() };
 }
 
 // `pose:pathsamples {"i":index,"s":[x,y,z, dx,dy,dz, fov, …]}` — an animation sampled every `step`
@@ -1377,7 +1893,7 @@ function debug(player) {
 // Every name looks like `PSD[op|page|item]`; page 0 always carries
 // `M|ready|<pages>|<items>|<items per page>` or `M|busy|<percent>`.
 // What this script understands; Blockbench warns when the world runs an older one.
-const PACK_PROTOCOL = 36;
+const PACK_PROTOCOL = 37;
 const IO_OBJECTIVE = "pose_io";
 const ITEMS_PER_PAGE = 30;
 const MAX_PAGES_PER_BATCH = 16;
@@ -2241,8 +2757,18 @@ function handle(ev) {
       return setTrack(data);
     case "pose:pathplay":
       return playPath(player, data);
+    case "pose:pathshow":
+      return showPathStart(player);
     case "pose:pathstop":
       return stopPath();
+    case "pose:live":
+      return setLive(data);
+    case "pose:act":
+      return setLiveAct(data);
+    case "pose:take":
+      // {"del": id}: a take that isn't wanted any more
+      if (data.del) deleteTake(String(data.del));
+      return;
     case "pose:backdrop":
       return setBackdrop(player, data);
     case "pose:camclear":

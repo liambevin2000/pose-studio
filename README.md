@@ -164,6 +164,31 @@ What is recorded is where you are, where you look and what you are doing (on the
 
 **Arm swings.** Every swing of your arm is recorded: a punch (in the air too), a hit, mining, placing. It is played with the pack's own animation for what the player holds: in DragonCraft a punch with an empty hand, the pickaxe, axe, sword, hoe, shovel, mace and trident hits, and the first attack of its weapons (a second swing in time goes on to the next one). Without a pack that says, it is Minecraft's own swing. The animation follows what the Pose Studio player holds now, so change its main-hand item and the swings change with it. Needs Minecraft 26.0 or newer. Blocking, charging a bow and combo finishers are not recorded.
 
+**Recording the whole scene.** Tick **Animate ▸ Record the Whole Scene** before **Record Player** and Minecraft also records what goes on around you, within 48 blocks:
+
+- every mob: where it goes and where it looks, tick by tick, when it is hurt, when it dies, and the ones that turn up during the take;
+- every block a player places or breaks, and the blocks an explosion takes.
+
+The take stays in the Minecraft world (it is too much to send to Blockbench); the recording of you carries it. When that recording plays in Minecraft (Play Animation in Minecraft, Export Video, or acting along for another take), the scene plays with it, from the same tick:
+
+- The blocks are put back as they were when the take began, and change again when they changed.
+- The mobs that are there now are removed, and a copy of each recorded mob (the same mob: its look, what it wears) is put where the recorded one was, tick for tick. They walk as they walked, flash red and cry out when they were hurt, and die when they died.
+- While they act, the copies cannot walk off by themselves or hurt anything. When Blockbench stops the animation they are left where they are, as ordinary mobs.
+
+Things to know: playing a take changes the world (the mobs within its range are replaced, the blocks rewound). A mob's own attack and special animations are not recorded, only what the game shows from how it moves and from being hurt. Not recorded: arrows and other projectiles, dropped items, other players, doors and levers, water, fire and pistons. The scene plays where it was recorded: moving the player in Blockbench moves the player's walk, not the mobs or blocks. Blockbench's own viewport does not show the scene. Drag the recording's keyframe and its scene starts with it; if several recordings on the timeline have a scene, the newest one plays (it was recorded with the earlier ones playing).
+
+**Live mobs and their actions.** A mob copy is a posed stand-in: it cannot fight or change phase. Select it and open **Animate ▸ Mob Actions…**:
+
+- **Live in Minecraft:** while the animation plays in Minecraft, the real mob stands in for the copy, with its own animations, attacks and behaviour. It is kept where the copy is on the timeline (move the copy with Position keyframes), or tick **Let it roam**.
+- **Actions:** pick a time and add what should be done to it then. They are keyframes on the mob's **Actions** track, so you can drag them:
+  - **Trigger event:** one of the mob's own events, read from its pack. This is how a boss changes phase.
+  - **Play animation:** one of its animations, an attack say.
+  - **Particle:** a particle at the mob (and how many blocks up).
+  - **Set property:** one of its properties and the value.
+  - **Hit it:** damage, dealt as if by you.
+  - **Run command:** any command, run as the mob (`@s` is the mob).
+- When the animation stops, the real mob is taken away and the copy is back. An action that Minecraft refuses is said once in chat.
+
 **Export Video.** **Animate ▸ Export Video** (also on the panel) is Capture Screenshot for the whole animation: it plays the animation once in Minecraft and records the Minecraft window while it plays.
 
 - The video goes to `Videos\Pose Studio\pose_<date>_<time>.mp4` (H.264, no sound). It is the size of Minecraft's picture, so pick the aspect ratio first, as for a screenshot.

@@ -1,5 +1,14 @@
 [
   {
+    "version": "0.87.0",
+    "date": "2026-10-08",
+    "changes": [
+      "New: Record the Whole Scene. Mobs, hits, deaths and block changes around you are recorded and played back by real mobs.",
+      "New: Mob Actions. Make a mob live and keyframe its phases, attacks, particles and hits.",
+      "Update the Minecraft packs."
+    ]
+  },
+  {
     "version": "0.86.3",
     "date": "2026-10-08",
     "changes": [

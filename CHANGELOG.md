@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.87.0 (2026-10-08)
+
+- New: Record the Whole Scene. Mobs, hits, deaths and block changes around you are recorded and played back by real mobs.
+- New: Mob Actions. Make a mob live and keyframe its phases, attacks, particles and hits.
+- Update the Minecraft packs.
+
 ## 0.86.3 (2026-10-08)
 
 - Find Biome or Structure: when Minecraft refuses a pack's biome or structure, it is asked again as a newer command.

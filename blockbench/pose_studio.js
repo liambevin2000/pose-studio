@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.86.3'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.87.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -3367,12 +3367,34 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
       // Blockbench's own bookkeeping after adding it can fail; the channel is checked below
     }
     if (!BoneAnimator.prototype.channels || !BoneAnimator.prototype.channels[CLIP_CHANNEL]) return false;
+    // a mob's Actions track (see openMobActions)
+    try {
+      if (typeof KeyframeDataPoint !== 'undefined') {
+        const act = (point) => !!point && !!point.keyframe && point.keyframe.channel === ACT_CHANNEL;
+        clipProperties.push(
+          new Property(KeyframeDataPoint, 'string', 'pose_act', { label: 'Action', condition: act }),
+          new Property(KeyframeDataPoint, 'string', 'pose_act_value', { label: 'With', condition: act }),
+          new Property(KeyframeDataPoint, 'string', 'pose_act_number', { label: 'Value', condition: act })
+        );
+      }
+      BoneAnimator.addChannel(ACT_CHANNEL, {
+        name: 'Actions', mutable: true, transform: false, max_data_points: 1,
+        condition: (animator) => {
+          const g = animator && animator.getGroup ? animator.getGroup() : null;
+          return !!g && isActRoot(g);
+        },
+      });
+    } catch (e) {
+      // as above: checked where it's used
+    }
     // animations opened before the track existed
     eachAnimator((animator) => {
       if (!(animator instanceof BoneAnimator)) return;
       const set = (object, key, value) => (typeof Vue !== 'undefined' && Vue.set ? Vue.set(object, key, value) : (object[key] = value));
       if (!animator[CLIP_CHANNEL]) set(animator, CLIP_CHANNEL, []);
       if (animator.muted && animator.muted[CLIP_CHANNEL] === undefined) set(animator.muted, CLIP_CHANNEL, false);
+      if (!animator[ACT_CHANNEL]) set(animator, ACT_CHANNEL, []);
+      if (animator.muted && animator.muted[ACT_CHANNEL] === undefined) set(animator.muted, ACT_CHANNEL, false);
     });
     clipChannelOn = true;
     return true;
@@ -3381,7 +3403,10 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
   function removeClipChannel() {
     for (const p of clipProperties) if (p && p.delete) p.delete();
     clipProperties = [];
-    if (clipChannelOn && typeof BoneAnimator !== 'undefined' && BoneAnimator.prototype.channels) delete BoneAnimator.prototype.channels[CLIP_CHANNEL];
+    if (clipChannelOn && typeof BoneAnimator !== 'undefined' && BoneAnimator.prototype.channels) {
+      delete BoneAnimator.prototype.channels[CLIP_CHANNEL];
+      delete BoneAnimator.prototype.channels[ACT_CHANNEL];
+    }
     clipChannelOn = false;
     clipStates.clear();
     clipOffsets.clear();
@@ -3542,6 +3567,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     const animator = anim && anim.getBoneAnimator ? anim.getBoneAnimator(root) : null;
     if (!animator) return null;
     if (!animator[CLIP_CHANNEL]) animator[CLIP_CHANNEL] = [];
+    if (!animator[ACT_CHANNEL]) animator[ACT_CHANNEL] = [];
     const playhead = typeof Timeline !== 'undefined' ? Number(Timeline.time) || 0 : 0;
     const picked = typeof Timeline !== 'undefined' && Array.isArray(Timeline.selected) ? Timeline.selected.find((kf) => kf.channel === CLIP_CHANNEL && kf.animator === animator) : null;
     const existing = picked || animator[CLIP_CHANNEL].find((kf) => Math.abs(kf.time - playhead) < 0.026) || null;
@@ -3674,6 +3700,259 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     await openAnimationFrames();
   }
 
+  // ---- The whole scene of a recording, and live mobs ------------------------------------------------
+  // Two things in an animation are acted by the game's own mobs instead of Pose Studio's copies.
+  //
+  // A take of the whole scene (Animate ▸ Record the Whole Scene): while you're recorded, the game
+  // also records every mob around you, when they're hurt and when they die, and the blocks placed
+  // and broken. It stays in the world; Blockbench only keeps its id with the recording of the
+  // player (pose_recording.scene), so it plays whenever that recording does, from the same tick.
+  //
+  // A live mob (Animate ▸ Mob Actions…): a mob copy is a posed stand-in, it can't fight or change
+  // phase. Made live, the real mob stands in for it while the animation plays, with everything its
+  // pack gives it, where the copy is on the timeline (or free to roam). Its Actions track holds
+  // keyframes that do something to it when the playhead gets there: trigger one of its events (a
+  // boss's phase), play one of its animations (an attack), a particle at it, set one of its
+  // properties, hit it as the player would, or any command run as the mob.
+  const RECORD_SCENE_KEY = 'pose_studio_record_scene';
+  const SCENE_RADIUS = 48; // blocks around you
+  let recordScene = (() => {
+    try {
+      return localStorage.getItem(RECORD_SCENE_KEY) === '1';
+    } catch (e) {
+      return false;
+    }
+  })();
+
+  // The take of the whole scene an animation plays: the newest one of the recordings on its
+  // timeline (a later take was recorded with the earlier ones playing, so it has them in it).
+  // [{ id, at: the tick of the animation it starts at, skip: the tick of the take that plays then }]
+  function sceneTakes(anim) {
+    let best = null;
+    for (const root of mannequinRoots().filter(shownInGame)) {
+      const scene = root.pose_recording && root.pose_recording.scene;
+      const animator = anim && anim.animators && anim.animators[root.uuid];
+      if (!scene || !scene.id || !animator) continue;
+      const key = clipKeys(animator).find((k) => k.id === REC_ID);
+      if (!key) continue;
+      const take = { id: String(scene.id), at: Math.round(key.time * ANIM_FPS), skip: Math.max(0, (Number(scene.skip) || 0) + Math.round(key.start * ANIM_FPS)) };
+      if (!best || take.id > best.id) best = take;
+    }
+    return best ? [best] : [];
+  }
+
+  const ACT_CHANNEL = 'pose_act';
+  const ACT_KINDS = [['event', 'Trigger event'], ['anim', 'Play animation'], ['particle', 'Particle'], ['property', 'Set property'], ['hit', 'Hit it'], ['command', 'Run command']];
+  const isActRoot = (g) => g instanceof Group && g.parent === 'root' && ENTITY_PREFIX.test(g.name) && !!g.pose_entity;
+
+  // The number of an action as the game takes it: a property's value can be true or false, a number or a word.
+  function actNumber(kind, text) {
+    const s = String(text === undefined || text === null ? '' : text).trim();
+    if (kind === 'property') return s === 'true' ? true : s === 'false' ? false : s !== '' && Number.isFinite(Number(s)) ? Number(s) : s;
+    return s !== '' && Number.isFinite(Number(s)) ? Number(s) : kind === 'hit' ? 1 : 0;
+  }
+
+  // The keyframes of a mob's Actions track, in order: [{ time, k: what's done, v: with what, n: a number or value }].
+  function actKeys(animator) {
+    return ((animator && animator[ACT_CHANNEL]) || [])
+      .map((kf) => {
+        const d = (kf.data_points && kf.data_points[0]) || {};
+        return { time: Number(kf.time) || 0, k: String(d.pose_act || ''), v: String(d.pose_act_value || ''), n: d.pose_act_number === undefined || d.pose_act_number === null ? '' : String(d.pose_act_number) };
+      })
+      .filter((a) => ACT_KINDS.some(([k]) => k === a.k))
+      .sort((a, b) => a.time - b.time);
+  }
+
+  // Puts a list of actions on a mob's Actions track in place of what was there (one undo step).
+  function writeActs(root, acts, spot = clipKeyAt(root)) {
+    if (!spot) return null;
+    const { anim, animator } = spot;
+    const list = animator[ACT_CHANNEL] || (animator[ACT_CHANNEL] = []);
+    const old = list.slice();
+    try {
+      Undo.initEdit({ keyframes: old });
+    } catch (e) {
+      // not undoable in this Blockbench
+    }
+    for (const kf of old) {
+      if (typeof kf.remove === 'function') kf.remove();
+      if (list.includes(kf)) list.splice(list.indexOf(kf), 1);
+    }
+    const made = [];
+    for (const act of acts.slice().sort((a, b) => a.time - b.time)) {
+      const data = { pose_act: String(act.k), pose_act_value: String(act.v === undefined ? '' : act.v), pose_act_number: String(act.n === undefined || act.n === null ? '' : act.n) };
+      const kf = animator.createKeyframe(data, Math.max(0, round(Number(act.time) || 0, 3)), ACT_CHANNEL, false, false);
+      if (!kf) continue;
+      if (!kf.data_points || !kf.data_points[0]) kf.data_points = [{}];
+      Object.assign(kf.data_points[0], data);
+      made.push(kf);
+    }
+    try {
+      Undo.finishEdit('Mob actions', { keyframes: made });
+    } catch (e) {
+      // as above
+    }
+    const end = acts.reduce((t, a) => Math.max(t, Number(a.time) || 0), 0);
+    if (Number(anim.length) < end && anim.setLength) anim.setLength(Math.ceil(end * 20 - 1e-6) / 20);
+    return made;
+  }
+
+  // The live mobs of an animation, as the game is told: [{ id, t: the real mob's type, free, p, y
+  // (where the copy is at the start), acts: [[tick, k, v, n]] }]. `first`: the copies' updates at the first tick.
+  function liveMobs(anim, first) {
+    const out = [];
+    for (const root of entityRoots().filter(shownInGame)) {
+      if (!root.pose_live || !root.pose_live.on || !root.pose_entity || !root.pose_entity.entity) continue;
+      const id = mannequinId(root.name);
+      const start = first.get(id) || {};
+      const animator = anim && anim.animators && anim.animators[root.uuid];
+      out.push({ id, t: root.pose_entity.entity, free: root.pose_live.free ? 1 : 0, p: start.p, y: start.y, acts: actKeys(animator).map((a) => [Math.round(a.time * ANIM_FPS), a.k, a.v, actNumber(a.k, a.n)]) });
+    }
+    return out;
+  }
+
+  // What a mob's actions can be picked from: its own events and animations, the world's particles, its properties.
+  function mobActionChoices(content, root) {
+    const type = root.pose_entity.entity;
+    const client = content && content.entities && content.entities.get(type);
+    const anims = client ? Object.entries(client.description.animations || {}).filter(([, id]) => typeof id === 'string' && !/^controller\./.test(id)) : [];
+    const properties = (content && content.entityProperties && content.entityProperties.get(type)) || {};
+    return {
+      event: ((content && content.entityEvents && content.entityEvents.get(type)) || []).slice().sort(),
+      anim: anims.map(([name, id]) => ({ value: id, label: name })),
+      particle: content ? particleList(content).map((p) => p.id) : [],
+      property: Object.keys(properties),
+      values: properties,
+    };
+  }
+
+  // Animate ▸ Mob Actions…: whether the selected mob is live, and its Actions track as a list.
+  async function openMobActions() {
+    const root = selectedPoseRoot();
+    const Anim = blockbenchAnimation();
+    if (!root || !isActRoot(root)) {
+      Blockbench.showQuickMessage('Select a mob (ent_) first', 2500);
+      return;
+    }
+    if (!Anim || typeof Modes === 'undefined' || !Modes.options || !Modes.options.animate || !setupClipChannel()) {
+      Blockbench.showMessageBox({ title: 'Pose Studio: mob actions', message: "This Blockbench doesn't offer the Animate tab for this project, or can't add an Actions track to it." });
+      return;
+    }
+    const playhead = typeof Timeline !== 'undefined' ? Number(Timeline.time) || 0 : 0;
+    shotAnimation(Anim);
+    try {
+      if (root.select) root.select();
+    } catch (e) {
+      // select it in the outliner
+    }
+    let content = null;
+    try {
+      content = await previewContent();
+    } catch (e) {
+      console.warn('[Pose Studio] mob actions', e);
+    }
+    const spot = clipKeyAt(root);
+    if (!spot) return;
+    const choices = mobActionChoices(content, root);
+    let uid = 0;
+    let vm = null;
+    const dialog = new Dialog({
+      id: 'pose_studio_mob_actions',
+      title: `Actions: ${root.name}`,
+      width: 800,
+      buttons: ['Apply', 'Cancel'],
+      cancelIndex: 1,
+      component: {
+        data: () => ({
+          type: root.pose_entity.entity,
+          live: !!(root.pose_live && root.pose_live.on),
+          free: !!(root.pose_live && root.pose_live.free),
+          rows: actKeys(spot.animator).map((a) => Object.assign(a, { uid: ++uid })),
+          kinds: ACT_KINDS,
+          choices,
+          playhead: round(playhead, 2),
+        }),
+        mounted() {
+          vm = this;
+        },
+        methods: {
+          // a new one, at the playhead
+          add(kind) {
+            const first = (list) => (list && list.length ? (typeof list[0] === 'string' ? list[0] : list[0].value) : '');
+            this.rows.push({ uid: ++uid, time: this.playhead, k: kind, v: kind === 'hit' || kind === 'command' ? '' : first(this.choices[kind]), n: kind === 'hit' ? '1' : kind === 'particle' ? '1' : '' });
+            this.rows.sort((a, b) => a.time - b.time);
+            this.live = true; // (something is only done to the real mob)
+          },
+          remove(row) {
+            this.rows.splice(this.rows.indexOf(row), 1);
+          },
+          sorted() {
+            this.rows.sort((a, b) => a.time - b.time);
+          },
+          kindChanged(row) {
+            row.v = '';
+            row.n = row.k === 'hit' || row.k === 'particle' ? '1' : '';
+          },
+          needsValue(row) {
+            return row.k !== 'hit';
+          },
+          numberLabel(row) {
+            return row.k === 'particle' ? 'blocks up' : row.k === 'property' ? 'value' : row.k === 'hit' ? 'damage' : '';
+          },
+          valueHint(row) {
+            return row.k === 'event' ? "one of the mob's events" : row.k === 'anim' ? 'an animation (animation.…)' : row.k === 'particle' ? 'a particle' : row.k === 'property' ? 'a property' : row.k === 'command' ? 'a command, run as the mob (@s is the mob)' : '';
+          },
+        },
+        template: `
+          <div style="display: flex; flex-direction: column; gap: 8px;">
+            <div style="border: 1px solid var(--color-accent); border-radius: 4px; padding: 6px 8px; display: flex; flex-direction: column; gap: 4px;">
+              <label style="display: flex; gap: 6px; align-items: center;" title="While the animation plays in Minecraft, the real mob stands in for this copy, with its own animations, attacks and phases.">
+                <input type="checkbox" v-model="live"> <b>Live in Minecraft</b> <span style="opacity: 0.7;">the real {{ type }} plays this one's part while the animation plays</span>
+              </label>
+              <label v-if="live" style="display: flex; gap: 6px; align-items: center;" title="Off: it's kept where this copy is on the timeline (it still turns, attacks and animates). On: it starts there and goes where it wants.">
+                <input type="checkbox" v-model="free"> Let it roam <span style="opacity: 0.7;">(off: it stays where the timeline has it)</span>
+              </label>
+            </div>
+            <div style="display: flex; flex-wrap: wrap; gap: 6px; align-items: center;">
+              <b>At <input type="number" class="dark_bordered" v-model.number="playhead" min="0" step="0.05" style="width: 64px;"> s add:</b>
+              <button v-for="k in kinds" :key="k[0]" @click="add(k[0])" style="min-width: 0; padding: 0 10px;">{{ k[1] }}</button>
+            </div>
+            <div style="height: 300px; overflow-y: auto; border: 1px solid var(--color-border); border-radius: 4px; padding: 4px; display: flex; flex-direction: column; gap: 4px;">
+              <div v-for="r in rows" :key="r.uid" style="display: flex; flex-wrap: wrap; gap: 6px; align-items: center;">
+                <input type="number" class="dark_bordered" v-model.number="r.time" min="0" step="0.05" @change="sorted()" style="width: 64px;" title="When, in seconds on the timeline"> s
+                <select v-model="r.k" @change="kindChanged(r)" class="dark_bordered" style="width: 130px;">
+                  <option v-for="k in kinds" :key="k[0]" :value="k[0]">{{ k[1] }}</option>
+                </select>
+                <input v-if="needsValue(r)" type="text" class="dark_bordered" v-model="r.v" :list="'ps-act-' + r.k" :placeholder="valueHint(r)" style="flex: 1; min-width: 180px;">
+                <span v-else style="flex: 1; opacity: 0.7;">as if the player hit it</span>
+                <label v-if="numberLabel(r)">{{ numberLabel(r) }} <input type="text" class="dark_bordered" v-model="r.n" :list="r.k === 'property' ? 'ps-act-value-' + r.v : null" style="width: 70px;"></label>
+                <button @click="remove(r)" title="Take it out" style="min-width: 0; width: 28px; padding: 0;">✕</button>
+              </div>
+              <p v-if="!rows.length" style="opacity: 0.7; margin: 4px;">Nothing is done to it yet. Pick a time and add what should happen then: a phase of a boss (an event), an attack (an animation), a particle, a hit.</p>
+            </div>
+            <datalist id="ps-act-event"><option v-for="e in choices.event" :key="e" :value="e"></option></datalist>
+            <datalist id="ps-act-anim"><option v-for="a in choices.anim" :key="a.value + a.label" :value="a.value">{{ a.label }}</option></datalist>
+            <datalist id="ps-act-particle"><option v-for="p in choices.particle" :key="p" :value="p"></option></datalist>
+            <datalist id="ps-act-property"><option v-for="p in choices.property" :key="p" :value="p"></option></datalist>
+            <datalist v-for="p in choices.property" :key="'v' + p" :id="'ps-act-value-' + p"><option v-for="v in choices.values[p]" :key="v" :value="v"></option></datalist>
+            <p style="opacity: 0.7; margin: 0; font-size: 0.85em;">These are keyframes on the mob's Actions track: drag them on the timeline to change when. They are done to the real mob in Play Animation in Minecraft, Export Video and a recording acted along; Blockbench itself shows the copy as posed.</p>
+          </div>`,
+      },
+      onButton(index) {
+        if (index !== 0 || !vm) return;
+        const next = vm.live ? { on: true, free: !!vm.free } : null;
+        if (JSON.stringify(next) !== JSON.stringify(root.pose_live || null)) {
+          Undo.initEdit({ groups: [root] });
+          root.pose_live = next;
+          Undo.finishEdit('Live mob');
+        }
+        writeActs(root, vm.rows.map((r) => ({ time: r.time, k: r.k, v: r.v, n: r.n })), spot);
+        Blockbench.showQuickMessage(next ? `${root.name}: the real mob plays it in Minecraft${vm.rows.length ? `, with ${vm.rows.length} action${vm.rows.length === 1 ? '' : 's'}` : ''}` : `${root.name}: played by its copy`, 3500);
+      },
+    });
+    dialog.show();
+  }
+
   // ---- Recording a player ----------------------------------------------------------------------------
   // Record Player: Minecraft notes where you are, where you look and what you're doing (on the
   // ground, sneaking, sprinting, swimming…), every game tick, while you play your part. Stopping
@@ -3705,11 +3984,17 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
   // What the game sent -> { n, t: [x, y, z (hundredths of a block from the anchor), yaw, pitch (tenths of a degree), flags, …], eq }
   function parseRecording(items) {
     const eq = {};
+    let scene = null;
     const runs = []; // [first tick, [ticks]]: Minecraft hands the items back in no particular order
     for (const item of items) {
       if (item.startsWith('E|')) {
         const [, slot, id] = item.split('|');
         if (slot && id) eq[slot] = id;
+      }
+      // the scene around the player, kept in the world: S|take|ticks|mobs|block changes|hurts
+      if (item.startsWith('S|')) {
+        const [, id, ticks, mobs, blocks, hurts] = item.split('|');
+        if (id) scene = { id, n: Number(ticks) || 0, actors: Number(mobs) || 0, blocks: Number(blocks) || 0, hurts: Number(hurts) || 0 };
       }
       if (!item.startsWith('R|')) continue;
       const parts = item.split('|');
@@ -3724,7 +4009,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
         if (v.length === REC.SIZE && v.every(Number.isFinite)) t.push(...v);
       }
     }
-    return { v: 1, n: t.length / REC.SIZE, t, eq };
+    return { v: 1, n: t.length / REC.SIZE, t, eq, scene };
   }
 
   // A recording as it's kept: the standing-about at both ends gone (getting to the game and back),
@@ -3736,7 +4021,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     const S = REC.SIZE;
     const at = (i, k) => raw.t[i * S + k];
     const n = raw.n;
-    if (!n) return { v: 2, n: 0, t: [], eq: raw.eq || {}, skip: 0 };
+    if (!n) return { v: 2, n: 0, t: [], eq: raw.eq || {}, skip: 0, scene: raw.scene || null };
     const differs = (i, j) =>
       [REC.X, REC.Y, REC.Z].some((k) => Math.abs(at(i, k) - at(j, k)) > 3) ||
       Math.abs(wrap((at(i, REC.YAW) - at(j, REC.YAW)) / 10)) > 3 || Math.abs(at(i, REC.PITCH) - at(j, REC.PITCH)) > 30 ||
@@ -3775,7 +4060,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     for (let i = 0; i < count; i++) {
       t.push(round(channel[0][i], 2), round(channel[1][i], 2), round(channel[2][i], 2), round(look[i], 2), round(pitch[i], 2), at(start + i, REC.FLAGS));
     }
-    return { v: 2, n: count, t, eq: raw.eq || {}, skip: start }; // (skip: the ticks cut off the start)
+    return { v: 2, n: count, t, eq: raw.eq || {}, skip: start, scene: raw.scene || null }; // (skip: the ticks cut off the start)
   }
 
   // ---- The arm swing ----
@@ -4280,7 +4565,10 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     // facing the way it looked at the start (a Blockbench turn is a Minecraft yaw the other way)
     rec.rot = round(-rec.t[REC.YAW] / 10, 2);
     root.rotation = [0, rec.rot, 0];
-    root.pose_recording = { v: rec.v, n: rec.n, t: rec.t, rot: rec.rot };
+    // (a take of the scene that was with the recording it had isn't played by anything any more)
+    const had = root.pose_recording && root.pose_recording.scene;
+    if (had && had.id && (!rec.scene || rec.scene.id !== had.id) && link.connected) send(`scriptevent pose:take ${JSON.stringify({ del: had.id })}`);
+    root.pose_recording = Object.assign({ v: rec.v, n: rec.n, t: rec.t, rot: rec.rot }, rec.scene ? { scene: Object.assign({}, rec.scene, { skip: rec.skip || 0 }) } : {});
     // a new player wears and holds what you did
     if (fresh && rec.eq && Object.keys(rec.eq).length) root.pose_equipment = Object.assign({}, rec.eq);
     Undo.finishEdit('Player recording', { outliner: true, groups, elements: cubes });
@@ -4329,7 +4617,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     const placed = placeRecording(root, at);
     Blockbench.showQuickMessage(
       placed
-        ? `${root.name}: ${(rec.n / ANIM_FPS).toFixed(1)} s recorded. Play in Game shows it in Minecraft. To move it all, move or turn ${root.name} in the Edit tab`
+        ? `${root.name}: ${(rec.n / ANIM_FPS).toFixed(1)} s recorded${rec.scene ? `, with the scene around you (${rec.scene.actors} mob${rec.scene.actors === 1 ? '' : 's'}, ${rec.scene.blocks} block change${rec.scene.blocks === 1 ? '' : 's'})` : ''}. Play in Game shows it in Minecraft. To move it all, move or turn ${root.name} in the Edit tab`
         : `${root.name}: ${(rec.n / ANIM_FPS).toFixed(1)} s recorded. Open Animation… in the Animate tab to put it on the timeline`,
       8000
     );
@@ -4375,7 +4663,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
         }
         return;
       }
-      send(`scriptevent pose:rec ${JSON.stringify(Object.assign({ on: 1, count: RECORD_COUNTDOWN }, along ? { play: 1 } : {}))}`);
+      send(`scriptevent pose:rec ${JSON.stringify(Object.assign({ on: 1, count: RECORD_COUNTDOWN }, along ? { play: 1 } : {}, recordScene ? { scene: 1, r: SCENE_RADIUS } : {}))}`);
       try {
         // over to the game: that's where the part is played
         if (!(globalThis.__POSE_STUDIO_TEST && globalThis.__POSE_STUDIO_TEST.noFocus)) focusWindow('minecraft');
@@ -4385,7 +4673,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
       Blockbench.showQuickMessage(
         along
           ? `Recording starts in Minecraft in ${RECORD_COUNTDOWN} seconds, and everyone on the timeline starts with it (they stand at their first frame until then). Play your part, then come back and click Stop Recording`
-          : `Recording starts in Minecraft in ${RECORD_COUNTDOWN} seconds. Play your part, then come back and click Stop Recording`,
+          : `Recording starts in Minecraft in ${RECORD_COUNTDOWN} seconds${recordScene ? `, with the whole scene (the mobs and blocks within ${SCENE_RADIUS} blocks of you)` : ''}. Play your part, then come back and click Stop Recording`,
         along ? 9000 : 6000
       );
       return;
@@ -4419,7 +4707,8 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     const buttons = onto ? ['New player', `Onto ${onto.name}`, 'Discard'] : ['Keep', 'Discard'];
     // a take acted along with the timeline starts on it where the recording did
     const at = along ? rec.skip / ANIM_FPS : 0;
-    const timed = along ? ' It stays in time with the others on the timeline.' : '';
+    const timed = (along ? ' It stays in time with the others on the timeline.' : '') + (rec.scene ? `\n\nThe scene around you was recorded with it: ${rec.scene.actors} mob${rec.scene.actors === 1 ? '' : 's'}, ${rec.scene.blocks} block change${rec.scene.blocks === 1 ? '' : 's'}. It plays in Minecraft whenever this recording does.` : '');
+    const dropScene = () => rec.scene && rec.scene.id && link.connected && send(`scriptevent pose:take ${JSON.stringify({ del: rec.scene.id })}`);
     Blockbench.showMessageBox(
       {
         title: 'Pose Studio: recording',
@@ -4429,7 +4718,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
         buttons, confirm: 0, cancel: buttons.length - 1,
       },
       (button) => {
-        if (button === buttons.length - 1 || button === undefined || button < 0) return;
+        if (button === buttons.length - 1 || button === undefined || button < 0) return dropScene(); // (not kept: its scene goes too)
         try {
           keepRecording(rec, onto && button === 1 ? onto : null, at);
         } catch (e) {
@@ -4456,6 +4745,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     const was = Timeline.time;
     const camera = cam ? [] : null;
     const tracks = new Map();
+    const first = new Map(); // a mob copy's id -> its update at the first tick (where a live mob starts)
     const roots = mannequinRoots().filter(shownInGame).map((r) => ['s', r]).concat(entityRoots().filter(shownInGame).map((r) => ['e', r]));
     try {
       for (let i = 0; i < count; i++) {
@@ -4476,6 +4766,13 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
         }
         for (const [k, id, msg] of updates) {
           if (!msg) continue;
+          if (i === 0 && k === 'e' && !first.has(id)) {
+            try {
+              first.set(id, JSON.parse(msg));
+            } catch (e) {
+              // not one to go by
+            }
+          }
           let track = tracks.get(id);
           if (!track) tracks.set(id, (track = { k, frames: [], last: null }));
           if (track.last !== msg) {
@@ -4489,14 +4786,15 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
       Animator.preview();
     }
     for (const [id, track] of tracks) if (track.frames.length < 2) tracks.delete(id); // it doesn't move
-    return { count, camera, tracks };
+    // (what the game's own mobs act: the whole scene of a recording, and the live mobs)
+    return { count, camera, tracks, takes: sceneTakes(anim), live: liveMobs(anim, first) };
   }
   const sampleCameraAnimation = (cam, anim) => sampleAnimation(anim, cam).camera;
 
   // Sends a sampled animation (see sampleAnimation) to the game whole, for it to play a frame
   // every tick: `pose:path`, then the camera's samples and everyone's updates. Returns how many
   // updates were too long to send.
-  async function sendAnimation({ count, camera, tracks }, { loop, hud }) {
+  async function sendAnimation({ count, camera, tracks, takes = [], live = [] }, { loop, hud }) {
     const lines = [];
     let skipped = 0;
     const PER = 4; // camera samples a message (a message stays well under Minecraft's command length)
@@ -4512,8 +4810,17 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
         else lines.push(line);
       }
     }
+    // the live mobs, and what's done to them when
+    for (const mob of live) {
+      lines.push(`scriptevent pose:live ${JSON.stringify({ id: mob.id, t: mob.t, free: mob.free, p: mob.p, y: mob.y })}`);
+      for (const [i, k, v, n] of mob.acts) {
+        const line = `scriptevent pose:act ${JSON.stringify({ id: mob.id, i, k, v, n })}`;
+        if (line.length > MAX_COMMAND) skipped++;
+        else lines.push(line);
+      }
+    }
     Blockbench.showQuickMessage(`Sending the animation to Minecraft (${lines.length} updates)…`, 2500);
-    await link.command(`scriptevent pose:path ${JSON.stringify({ n: count, step: 0.05, ramp: [0, 0, 1, 1], loop: loop ? 1 : 0, hud: hud ? 1 : 0, cam: camera ? 1 : 0, smooth: smoothPlayback() ? 1 : 0 })}`);
+    await link.command(`scriptevent pose:path ${JSON.stringify(Object.assign({ n: count, step: 0.05, ramp: [0, 0, 1, 1], loop: loop ? 1 : 0, hud: hud ? 1 : 0, cam: camera ? 1 : 0, smooth: smoothPlayback() ? 1 : 0 }, takes.length ? { takes } : {}))}`);
     const TOGETHER = 6;
     for (let i = 0; i < lines.length; i += TOGETHER) await Promise.all(lines.slice(i, i + TOGETHER).map((line) => link.command(line)));
     return skipped;
@@ -4542,7 +4849,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     }
     const active = activeCamera();
     const sampled = sampleAnimation(anim, active && cameraSync && !playerView ? active : null);
-    if (sampled.count < 2 || !sampled.tracks.size) return false; // nobody moves in it yet: a take on its own
+    if (sampled.count < 2 || (!sampled.tracks.size && !sampled.takes.length && !sampled.live.length)) return false; // nobody moves in it yet: a take on its own
     endPathPlay();
     pathPlaying = true; // (nothing else is sent to the players and mobs meanwhile)
     takeAlong = true;
@@ -4573,8 +4880,9 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     // the game camera flies the active camera when it's synced or animated; else your own view stays
     const active = activeCamera();
     const cam = active && (cameraSync || hasOwnKeys(anim, active)) ? active : null;
-    const { count, camera, tracks } = sampleAnimation(anim, cam);
-    if (count < 2 || (!camera && !tracks.size)) {
+    const sampled = sampleAnimation(anim, cam);
+    const { count, camera, tracks } = sampled;
+    if (count < 2 || (!camera && !tracks.size && !sampled.takes.length && !sampled.live.length)) {
       Blockbench.showQuickMessage('Nothing moves in this animation yet', 3000);
       return false;
     }
@@ -4583,7 +4891,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     let skipped = 0;
     try {
       await hideCameraMarks(); // (the cameras shown in the world aren't in what's played)
-      skipped = await sendAnimation({ count, camera, tracks }, { loop: anim.loop === 'loop', hud: true });
+      skipped = await sendAnimation(sampled, { loop: anim.loop === 'loop', hud: true });
       await link.command('scriptevent pose:pathplay {"t":0}');
     } catch (e) {
       endPathPlay();
@@ -5084,7 +5392,7 @@ try {
     const active = activeCamera();
     const sampled = sampleAnimation(anim, active && (cameraSync || hasOwnKeys(anim, active)) ? active : null);
     const { count, camera, tracks } = sampled;
-    if (count < 2 || (!camera && !tracks.size)) {
+    if (count < 2 || (!camera && !tracks.size && !sampled.takes.length && !sampled.live.length)) {
       Blockbench.showQuickMessage('Nothing moves in this animation yet', 3000);
       return false;
     }
@@ -5105,6 +5413,8 @@ try {
         const c = camera[0];
         await link.command(`scriptevent pose:cam ${JSON.stringify({ p: c.p, t: c.p.map((v, i) => round(v + c.dir[i] * 16, 3)), f: c.f })}`).catch(logFailure);
       }
+      // (a take of the whole scene: its mobs and blocks as it begins)
+      if (sampled.takes.length) await link.command('scriptevent pose:pathshow').catch(logFailure);
       await link.command('hud @s hide all').catch(logFailure);
       Blockbench.showQuickMessage(`Exporting ${length.toFixed(1)} s of video… keep Minecraft in view`, 4000);
       recorder = startRecorder(length + (VIDEO_LEAD + VIDEO_TAIL) / 1000 + 5, fps);
@@ -5780,7 +6090,7 @@ try {
           '_',
           locations,
           { name: 'Camera Settings', id: 'pose_studio_camera_menu', icon: 'photo_camera_front', children: [aspect, a.timeweather, a.follow] },
-          ...(cameraPathsOn() ? [{ name: 'Animate (experimental)', id: 'pose_studio_animate_menu', icon: 'movie_filter', children: [a.record, '_', a.camanimate, a.animkey, '_', a.camanimplay, a.camanimstop, a.smoothplay, '_', a.exportvideo, a.video60] }] : []),
+          ...(cameraPathsOn() ? [{ name: 'Animate (experimental)', id: 'pose_studio_animate_menu', icon: 'movie_filter', children: [a.record, a.recordscene, '_', a.camanimate, a.animkey, a.mobactions, '_', a.camanimplay, a.camanimstop, a.smoothplay, '_', a.exportvideo, a.video60] }] : []),
           { name: 'Stream Deck', id: 'pose_studio_deck_menu', icon: 'grid_view', children: [a.deck, a.deckplugin] },
           '_',
           a.comparegame,
@@ -5812,7 +6122,7 @@ try {
           { name: 'Lights', id: 'pose_studio_light_menu', icon: 'lightbulb', children: [a.addlight, a.lightlevel] },
           { name: 'Particles', id: 'pose_studio_fx_menu', icon: 'auto_awesome', children: [a.addfx, a.editfx] },
           { name: 'Camera', id: 'pose_studio_camera_menu', icon: 'photo_camera_front', children: [a.pov, a.camera, a.playerview, a.cameramarks, '_', a.fov, aspect, a.timeweather, '_', a.lookcam, a.follow] },
-          ...(cameraPathsOn() ? [{ name: 'Animate (experimental)', id: 'pose_studio_animate_menu', icon: 'movie_filter', children: [a.record, '_', a.camanimate, a.animkey, '_', a.camanimplay, a.camanimstop, a.smoothplay, '_', a.exportvideo, a.video60] }] : []),
+          ...(cameraPathsOn() ? [{ name: 'Animate (experimental)', id: 'pose_studio_animate_menu', icon: 'movie_filter', children: [a.record, a.recordscene, '_', a.camanimate, a.animkey, a.mobactions, '_', a.camanimplay, a.camanimstop, a.smoothplay, '_', a.exportvideo, a.video60] }] : []),
           '_',
           a.scan,
           a.scanmore,
@@ -7878,13 +8188,14 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     for (const pack of bp) if (pack.dir) readPackPlaces(fs, pack, places);
     const entityProperties = new Map(); // entity id -> { property -> enum values }
     const seats = new Map(); // entity id -> [{ group, family, seats: [{ position }] }]
+    const entityEvents = new Map(); // entity id -> the names of its events
     try {
-      for (const dir of vanillaBehaviorDirs(fs, installData)) readArchivedSeats(fs, dir, seats);
+      for (const dir of vanillaBehaviorDirs(fs, installData)) readArchivedSeats(fs, dir, seats, entityEvents);
     } catch (e) {
       // Minecraft's own behavior files unreadable: pack mobs still have theirs
     }
-    for (const pack of bp) if (pack.dir) readPackEntityProperties(fs, pack, entityProperties, seats);
-    return { layers, rp, bp, entities, geometries, controllers, animations, animationControllers, names, attachables, itemNames, itemTextures, items, entityProperties, seats, places };
+    for (const pack of bp) if (pack.dir) readPackEntityProperties(fs, pack, entityProperties, seats, entityEvents);
+    return { layers, rp, bp, entities, geometries, controllers, animations, animationControllers, names, attachables, itemNames, itemTextures, items, entityProperties, seats, places, entityEvents };
   }
 
   // The seats a mob offers riders (minecraft:rideable, in its components or component groups).
@@ -7912,7 +8223,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     return [`${base}\\vanilla`, ...versioned.map((p) => `${base}\\${p.name}`)];
   }
 
-  function readArchivedSeats(fs, dir, out) {
+  function readArchivedSeats(fs, dir, out, events = null) {
     const file = `${dir}\\__brarchive\\entities.brarchive`;
     if (!fs.existsSync(file)) return;
     for (const entry of readBrarchive(fs.readFileSync(file))) {
@@ -7922,6 +8233,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
         if (e && e.description && e.description.identifier) {
           const seats = entitySeats(e);
           if (seats.length) out.set(e.description.identifier, seats);
+          if (events && e.events) events.set(e.description.identifier, Object.keys(e.events));
         }
       } catch (err) {
         // skip
@@ -7930,7 +8242,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   }
 
   // A behavior pack's entity properties that take named values (enums): id -> { name -> values }.
-  function readPackEntityProperties(fs, pack, out, seatsOut) {
+  function readPackEntityProperties(fs, pack, out, seatsOut, eventsOut = null) {
     const walk = (dir, depth) => {
       let names = [];
       try {
@@ -7948,6 +8260,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
             continue;
           }
           const d = entity.description;
+          if (d && d.identifier && eventsOut && entity.events) eventsOut.set(d.identifier, Object.keys(entity.events)); // (a mob's events: a boss's phases…)
           if (d && d.identifier && seatsOut) {
             const seats = entitySeats(entity);
             if (seats.length) seatsOut.set(d.identifier, seats);
@@ -12948,7 +13261,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     return { id: idItem.slice(2), name: scene.world || '', anchor: point('A|'), player: point('P|'), locations, removed: scene.removed || [], protocol: version ? Number(version.slice(2)) : 0 };
   }
 
-  const EXPECTED_PACK_PROTOCOL = 36; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
+  const EXPECTED_PACK_PROTOCOL = 37; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
   let warnedOldPack = false;
 
   // Scene files in the scenes folders that belong to a world (their pose_world says so), as
@@ -13783,6 +14096,15 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.87.0",
+      "date": "2026-10-08",
+      "changes": [
+        "New: Record the Whole Scene. Mobs, hits, deaths and block changes around you are recorded and played back by real mobs.",
+        "New: Mob Actions. Make a mob live and keyframe its phases, attacks, particles and hits.",
+        "Update the Minecraft packs."
+      ]
+    },
     {
       "version": "0.86.3",
       "date": "2026-10-08",
@@ -14871,7 +15193,7 @@ ${PLUGIN_URL}`,
 
   // for the plugin's own tests only (they set this flag); nothing happens otherwise
   if (typeof globalThis !== 'undefined' && globalThis.__POSE_STUDIO_TEST) {
-    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS, sceneSpot, addLight, lightRoots, stopPath, cameraPathsOn, cameraPose, sampleCameraAnimation, playCameraAnimation, animateCamera, zoomedFov, setupClipChannel, removeClipChannel, clipKeys, clipPose, clipState, displayClips, addAnimationKey, placeClipKey, clipKeyAt, parseRecording, tidyRecording, recordingTicks, recordingAnimation, importRecording, placeRecording, keepRecording, setRecording, poseState, showRecordedWalk, displayClipBones, displayClipRoot, updateRecordingLines, entityAnimations, clipDelta, sampleAnimation, liveRotation, liveOrigin, poseMessage, entityMessage, setContentCache: (c) => (contentCache = c), liveWorldName, adoptCopies, adoptTextures, poseKind, copyName, deckConnect, autoStartDeck, swingStates, heldItemAnswers, sequenceRows, sequenceKeys, sequenceEnd, writeSequence, clipPass, worldPlaces, parseLocate, locatePlace, goToPlace, openPlaces, doLaundry, LOCATE_VERSIONS, cameraMarkMessage, hideCameraMarks, cameraMarksShown, setCameraMarks, sendTimelineForTake, placeRecording, sampleAnimation, sendAnimation, exportVideo, startRecorder, RECORDER_CS, RECORD_PS1, turnedEffect, turnVector, fxTurn, prepareTurned, turnedId, saddleParts, entityMessages, entityIds, flatParts, packFlat, partPlace, proxyModelFor, anyPartOn, prepareProxy, particleList, particleEntry, placeParticle, fxMessage, fxRoots };
+    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS, sceneSpot, addLight, lightRoots, stopPath, cameraPathsOn, cameraPose, sampleCameraAnimation, playCameraAnimation, animateCamera, zoomedFov, setupClipChannel, removeClipChannel, clipKeys, clipPose, clipState, displayClips, addAnimationKey, placeClipKey, clipKeyAt, parseRecording, tidyRecording, recordingTicks, recordingAnimation, importRecording, placeRecording, keepRecording, setRecording, poseState, showRecordedWalk, displayClipBones, displayClipRoot, updateRecordingLines, entityAnimations, clipDelta, sampleAnimation, liveRotation, liveOrigin, poseMessage, entityMessage, setContentCache: (c) => (contentCache = c), liveWorldName, adoptCopies, adoptTextures, poseKind, copyName, deckConnect, autoStartDeck, swingStates, heldItemAnswers, sequenceRows, sequenceKeys, sequenceEnd, writeSequence, clipPass, worldPlaces, parseLocate, locatePlace, goToPlace, openPlaces, doLaundry, LOCATE_VERSIONS, sceneTakes, liveMobs, actKeys, writeActs, mobActionChoices, openMobActions, actNumber, cameraMarkMessage, hideCameraMarks, cameraMarksShown, setCameraMarks, sendTimelineForTake, placeRecording, sampleAnimation, sendAnimation, exportVideo, startRecorder, RECORDER_CS, RECORD_PS1, turnedEffect, turnVector, fxTurn, prepareTurned, turnedId, saddleParts, entityMessages, entityIds, flatParts, packFlat, partPlace, proxyModelFor, anyPartOn, prepareProxy, particleList, particleEntry, placeParticle, fxMessage, fxRoots };
   }
 
   Plugin.register('pose_studio', {
@@ -14897,6 +15219,7 @@ ${PLUGIN_URL}`,
         new Property(Group, 'number', 'pose_light'),
         new Property(Group, 'object', 'pose_fx'),
         new Property(Group, 'object', 'pose_recording'),
+        new Property(Group, 'object', 'pose_live'),
         new Property(Group, 'object', 'pose_mount'),
         new Property(Group, 'object', 'pose_driver'),
         new Property(Group, 'number', 'pose_skin_slot', { default: 0 }),
@@ -15121,6 +15444,22 @@ ${PLUGIN_URL}`,
           name: 'Record Player (in Minecraft)', icon: 'fiber_manual_record', value: false, onChange: (value) => setRecording(value),
           description: "On: after a 3 second countdown, Minecraft records what you do. Off: you choose to keep the take (on a new Pose Studio player, or the selected one) or discard it. It goes on the player's Animation track; move or turn that player in the Edit tab to move the whole recording.",
         })),
+        recordscene: new Toggle('pose_studio_record_scene', {
+          name: 'Record the Whole Scene', icon: 'theaters', value: recordScene,
+          description: 'Record Player also records what goes on around you: every mob within 48 blocks (where it goes, when it is hurt, when it dies) and the blocks placed and broken. Played in Minecraft, real mobs act it out again and the blocks change as they did.',
+          onChange: (value) => {
+            recordScene = !!value;
+            try {
+              localStorage.setItem(RECORD_SCENE_KEY, value ? '1' : '0');
+            } catch (e) {
+              // used until Blockbench restarts
+            }
+          },
+        }),
+        mobactions: new Action('pose_studio_mob_actions', {
+          name: 'Mob Actions…', icon: 'bolt', click: () => openMobActions(),
+          description: "Makes the selected mob live (the real mob plays its part in Minecraft) and keyframes what's done to it: a phase of a boss (an event), an attack (an animation), a particle, a property, a hit, a command.",
+        }),
         smoothplay: new Toggle('pose_studio_smooth_playback', {
           name: 'Smooth Movement in Minecraft', icon: 'gesture', value: smoothPlayback(),
           description: 'In Play Animation in Minecraft, players are pushed along instead of being placed 20 times a second, so they glide evenly. If a player drifts or turns oddly, untick it.',
