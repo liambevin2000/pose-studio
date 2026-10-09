@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.89.1 (2026-10-09)
+
+- Fixed: Drop to Ground did nothing in the Animate tab. It now drops from where the timeline has the player or mob.
+- Fixed: after an animation played out in Minecraft, a mob with actions could be there twice.
+
 ## 0.89.0 (2026-10-08)
 
 - Mob Actions is visual: cards to click, and a timeline of blocks to drag.

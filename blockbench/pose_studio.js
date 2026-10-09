@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.89.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.89.1'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -2067,12 +2067,20 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
 
   // Pose Studio ▸ Drop to Ground: the selected players and mobs stand on the imported terrain under
   // them (the highest ground under their feet), or on the anchor's floor with no terrain imported.
+  // They're dropped from where they're shown: in the Animate tab that's where the timeline has
+  // them at the playhead (moved by keyframes, walking a recording), not where they were posed.
   function modelSpacePoints(root) {
-    // every corner of the model's own cubes (not equipment), posed, in Blockbench model space
+    // every corner of the model's own cubes (not equipment), as it's shown, in Blockbench model space
     const points = [];
     const turn = (v, origin, rotation) => {
       if (!rotation || !rotation.some((r) => r)) return v;
       return v.clone().sub(new THREE.Vector3(...origin)).applyQuaternion(eulerQuaternion(rotation)).add(new THREE.Vector3(...origin));
+    };
+    // a bone as the timeline has it: turned about its pivot, then moved by as much as it's moved
+    const placed = (v, g) => {
+      const at = liveOrigin(g);
+      v = turn(v, g.origin, liveRotation(g));
+      return at === g.origin ? v : v.clone().add(new THREE.Vector3(at[0] - g.origin[0], at[1] - g.origin[1], at[2] - g.origin[2]));
     };
     root.forEachChild((c) => {
       if (!(c instanceof Cube) || /^eq_/.test(c.name) || !c.from || !c.to) return;
@@ -2085,7 +2093,7 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
         );
         v = turn(v, c.origin || [0, 0, 0], c.rotation);
         for (let g = c.parent; g instanceof Group; g = g.parent) {
-          v = turn(v, g.origin, g.rotation);
+          v = placed(v, g);
           if (g === root) break;
         }
         points.push(v);
@@ -2112,6 +2120,35 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
     return floors;
   }
 
+  // In the Animate tab, the keyframe that has a player or mob where it is at the playhead, when its
+  // place is keyframed in the animation that's open: { animator, kf (null: one is to be made there) }.
+  // With a single keyframe it's that one, wherever the playhead is (it stays put the whole time).
+  function placeKey(root) {
+    if (!animating() || typeof Timeline === 'undefined') return null;
+    const Anim = blockbenchAnimation();
+    const anim = Anim && Anim.selected;
+    const animator = anim && anim.animators && anim.animators[root.uuid];
+    const keys = animator && animator.position;
+    if (!keys || !keys.length || (animator.muted && animator.muted.position)) return null;
+    const time = Number(Timeline.time) || 0;
+    return { animator, kf: keys.length === 1 ? keys[0] : keys.find((k) => Math.abs(k.time - time) < 1e-3) || null, time };
+  }
+  // …moved up or down by dy (as Blockbench moves a keyframe when the bone is dragged)
+  function moveKey(spot, dy) {
+    let kf = spot.kf;
+    if (!kf) {
+      const now = (spot.animator.interpolate && spot.animator.interpolate('position')) || [0, 0, 0];
+      kf = spot.animator.createKeyframe({ x: Number(now[0]) || 0, y: Number(now[1]) || 0, z: Number(now[2]) || 0 }, spot.time, 'position', false, false);
+      if (!kf) return null;
+    }
+    if (typeof kf.offset === 'function') kf.offset('y', dy);
+    else {
+      const point = kf.data_points[0];
+      point.y = round((Number(point.y) || 0) + dy, 4);
+    }
+    return kf;
+  }
+
   function dropToGround() {
     const posable = (g) => MANNEQUIN_PREFIX.test(g.name) || ENTITY_PREFIX.test(g.name);
     const roots = (selectedPoseRoots().filter(posable).length ? selectedPoseRoots().filter(posable) : [selectedPoseRoot()].filter((g) => g && posable(g))).filter((g) => !g.pose_mount);
@@ -2122,7 +2159,10 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
     const floors = scanFloors();
     const cubes = [];
     for (const root of roots) root.forEachChild((c) => c instanceof Cube && cubes.push(c));
-    Undo.initEdit({ outliner: true, elements: cubes, groups: roots });
+    const keyed = new Map(roots.map((root) => [root, placeKey(root)]).filter(([, spot]) => spot));
+    const keysBefore = [...keyed.values()].map((spot) => spot.kf).filter(Boolean);
+    const keysAfter = [];
+    Undo.initEdit({ outliner: true, elements: cubes, groups: roots, keyframes: keysBefore });
     let moved = 0;
     let onAnchor = 0;
     for (const root of roots) {
@@ -2145,12 +2185,16 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
       }
       const dy = round(ground - box.min.y, 4);
       if (Math.abs(dy) < 1e-3) continue;
-      translateTree(root, [0, dy, 0]);
+      // its place is keyframed: the keyframe is moved; else it's moved itself (and all it does with it)
+      const kf = keyed.has(root) ? moveKey(keyed.get(root), dy) : null;
+      if (kf) keysAfter.push(kf);
+      else translateTree(root, [0, dy, 0]);
       moved++;
     }
-    Undo.finishEdit('Drop to ground', { outliner: true, elements: cubes, groups: roots });
+    Undo.finishEdit('Drop to ground', { outliner: true, elements: cubes, groups: roots, keyframes: keysBefore.concat(keysAfter.filter((kf) => !keysBefore.includes(kf))) });
     Canvas.updateAll();
-    Blockbench.showQuickMessage(moved ? `Dropped ${moved} to the ground${onAnchor ? ` (${onAnchor} with no terrain under them: onto the anchor's floor)` : ''}` : 'Already on the ground', 2500);
+    if (animating() && typeof Animator !== 'undefined' && Animator.preview) Animator.preview(); // (shown as the timeline has it again)
+    Blockbench.showQuickMessage(moved ? `Dropped ${moved} to the ground${keysAfter.length ? ` (${keysAfter.length === moved ? 'by its' : `${keysAfter.length} by their`} Position keyframe${keysAfter.length === 1 ? '' : 's'})` : ''}${onAnchor ? ` (${onAnchor} with no terrain under them: onto the anchor's floor)` : ''}` : 'Already on the ground', 2500);
   }
 
   // The anchor (the world block Blockbench's origin sits on) is set automatically: whenever the
@@ -5354,7 +5398,9 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
       return false;
     }
     if (skipped) Blockbench.showQuickMessage(`${skipped} update${skipped === 1 ? ' was' : 's were'} too long to send and left out`, 3000);
-    if (anim.loop !== 'loop') pathPlayTimer = setTimeout(endPathPlay, ((count - 1) * 0.05 + 1.5) * 1000);
+    // (played out: the game is told it's over, so the real mobs that played a part go and a take's mobs are let go,
+    // before everyone is sent where Blockbench has them again)
+    if (anim.loop !== 'loop') pathPlayTimer = setTimeout(stopPath, ((count - 1) * 0.05 + 1.5) * 1000);
     return true;
   }
 
@@ -14565,6 +14611,14 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // <changelog>
   const CHANGELOG = [
     {
+      "version": "0.89.1",
+      "date": "2026-10-09",
+      "changes": [
+        "Fixed: Drop to Ground did nothing in the Animate tab. It now drops from where the timeline has the player or mob.",
+        "Fixed: after an animation played out in Minecraft, a mob with actions could be there twice."
+      ]
+    },
+    {
       "version": "0.89.0",
       "date": "2026-10-08",
       "changes": [
@@ -15687,7 +15741,7 @@ ${PLUGIN_URL}`,
 
   // for the plugin's own tests only (they set this flag); nothing happens otherwise
   if (typeof globalThis !== 'undefined' && globalThis.__POSE_STUDIO_TEST) {
-    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS, sceneSpot, addLight, lightRoots, stopPath, cameraPathsOn, cameraPose, sampleCameraAnimation, playCameraAnimation, animateCamera, zoomedFov, setupClipChannel, removeClipChannel, clipKeys, clipPose, clipState, displayClips, addAnimationKey, placeClipKey, clipKeyAt, parseRecording, tidyRecording, recordingTicks, recordingAnimation, importRecording, placeRecording, keepRecording, setRecording, poseState, showRecordedWalk, displayClipBones, displayClipRoot, updateRecordingLines, entityAnimations, clipDelta, sampleAnimation, liveRotation, liveOrigin, poseMessage, entityMessage, setContentCache: (c) => (contentCache = c), liveWorldName, adoptCopies, adoptTextures, poseKind, copyName, deckConnect, autoStartDeck, swingStates, heldItemAnswers, sequenceRows, sequenceKeys, sequenceEnd, writeSequence, clipPass, worldPlaces, parseLocate, locatePlace, goToPlace, openPlaces, doLaundry, LOCATE_VERSIONS, sceneTakes, liveMobs, actKeys, writeActs, mobActionChoices, openMobActions, actNumber, propertyStates, rootYaw, isLiveMob, tryAct, endTries, actTicks, mobActionsComponent, actLook, ACTS_CSS, cameraMarkMessage, hideCameraMarks, cameraMarksShown, setCameraMarks, sendTimelineForTake, placeRecording, sampleAnimation, sendAnimation, exportVideo, startRecorder, RECORDER_CS, RECORD_PS1, turnedEffect, turnVector, fxTurn, prepareTurned, turnedId, saddleParts, entityMessages, entityIds, flatParts, packFlat, partPlace, proxyModelFor, anyPartOn, prepareProxy, particleList, particleEntry, placeParticle, fxMessage, fxRoots };
+    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS, sceneSpot, addLight, lightRoots, stopPath, cameraPathsOn, cameraPose, sampleCameraAnimation, playCameraAnimation, animateCamera, zoomedFov, setupClipChannel, removeClipChannel, clipKeys, clipPose, clipState, displayClips, addAnimationKey, placeClipKey, clipKeyAt, parseRecording, tidyRecording, recordingTicks, recordingAnimation, importRecording, placeRecording, keepRecording, setRecording, poseState, showRecordedWalk, displayClipBones, displayClipRoot, updateRecordingLines, entityAnimations, clipDelta, sampleAnimation, liveRotation, liveOrigin, poseMessage, entityMessage, setContentCache: (c) => (contentCache = c), liveWorldName, adoptCopies, adoptTextures, poseKind, copyName, deckConnect, autoStartDeck, swingStates, heldItemAnswers, sequenceRows, sequenceKeys, sequenceEnd, writeSequence, clipPass, worldPlaces, parseLocate, locatePlace, goToPlace, openPlaces, doLaundry, LOCATE_VERSIONS, sceneTakes, liveMobs, actKeys, writeActs, mobActionChoices, openMobActions, actNumber, propertyStates, rootYaw, isLiveMob, tryAct, endTries, actTicks, mobActionsComponent, actLook, ACTS_CSS, placeKey, moveKey, modelSpacePoints, cameraMarkMessage, hideCameraMarks, cameraMarksShown, setCameraMarks, sendTimelineForTake, placeRecording, sampleAnimation, sendAnimation, exportVideo, startRecorder, RECORDER_CS, RECORD_PS1, turnedEffect, turnVector, fxTurn, prepareTurned, turnedId, saddleParts, entityMessages, entityIds, flatParts, packFlat, partPlace, proxyModelFor, anyPartOn, prepareProxy, particleList, particleEntry, placeParticle, fxMessage, fxRoots };
   }
 
   Plugin.register('pose_studio', {
