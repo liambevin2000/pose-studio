@@ -101,6 +101,211 @@ function clampAngle(v) {
 function findMannequins(dim, id) {
   return dim.getEntities({ tags: [TAG_PREFIX + id] });
 }
+// …the one that stands for an id (a second one, back from a part of the world that was away, goes)
+function findMannequin(dim, id) {
+  const found = findMannequins(dim, id);
+  for (const extra of found.slice(1)) {
+    try {
+      extra.remove();
+    } catch {
+      // gone
+    }
+  }
+  return found[0];
+}
+
+// ---- Players and mobs too far away to be drawn ----------------------------------------------------
+// Minecraft only shows a player the entities that are near them. A Pose Studio player or mob (and
+// what it holds) further from the player than `farBeyond` blocks is therefore kept near the player
+// instead, a whole number of 16-block steps from where it belongs on each axis, and told how many
+// (pose:far): its animation moves the whole model that many steps, so it's drawn where it belongs.
+// Where each one really is, is kept here (homes). `pose:far {"d":blocks}` says how far is too far
+// (0: nothing is carried). Entities whose pack files are from before this (no pose:far property)
+// are left where they are.
+//
+// pose:far: 0 in its own place, else (x steps + 64) + 128 * (y steps + 64) + 16384 * (z steps + 64),
+// the steps from the entity to its place (-63 to 63: up to 1008 blocks).
+const FAR_PROPERTY = "pose:farbeyond";
+const FAR_STEP = 16;
+const FAR_STEPS = 63;
+const CARRY_UP = 16; // a carried one is kept about this far above the player (out of the way of what they click on)
+const CARRY_REACH = 28; // …and fetched again when the player is this far from where it's kept
+const FAR_BACK = 6; // it's only put back in its place when the player is this much nearer than too far
+let farBeyond = 0;
+let farViewer = null; // the player they're shown to (the one Blockbench talks through)
+const homes = new Map(); // entity id -> { entity, at: where it belongs, steps: [x, y, z] or null, code, plain: can't be carried }
+
+const farCode = (steps) => steps[0] + 64 + 128 * (steps[1] + 64) + 16384 * (steps[2] + 64);
+const farSteps = (code) => [(code % 128) - 64, (Math.floor(code / 128) % 128) - 64, Math.floor(code / 16384) - 64];
+const carriedAt = (at, steps) => ({ x: at.x - steps[0] * FAR_STEP, y: at.y - steps[1] * FAR_STEP, z: at.z - steps[2] * FAR_STEP });
+
+function setFar(player, data) {
+  farBeyond = Math.max(0, Math.min(1000, Number(data.d) || 0));
+  if (player) farViewer = player;
+  world.setDynamicProperty(FAR_PROPERTY, farBeyond || undefined);
+  settleAll();
+}
+
+function viewer() {
+  try {
+    if (farViewer && farViewer.isValid) return farViewer;
+  } catch {
+    // gone
+  }
+  farViewer = world.getAllPlayers()[0] || null;
+  return farViewer;
+}
+
+// Whether a place is too far from the player for an entity there to be drawn. `carried`: it's
+// being carried already (it stays so until the player is well inside).
+function tooFar(at, dimension, carried = false) {
+  if (!(farBeyond > 0)) return false;
+  const player = viewer();
+  if (!player) return carried; // (nobody to show it to: it stays as it is)
+  try {
+    if (player.dimension.id !== dimension.id) return carried; // (…or the player is in another dimension)
+    const v = player.location;
+    return Math.hypot(v.x - at.x, v.y - at.y, v.z - at.z) > farBeyond - (carried ? FAR_BACK : 0);
+  } catch {
+    return carried;
+  }
+}
+
+// whether a place is in a part of the world that's loaded
+function isLoaded(dimension, at) {
+  try {
+    return !!dimension.getBlock({ x: Math.floor(at.x), y: Math.max(dimension.heightRange.min, Math.min(dimension.heightRange.max - 1, Math.floor(at.y))), z: Math.floor(at.z) });
+  } catch {
+    return false;
+  }
+}
+
+// How many steps from the player's surroundings a place is: the entity is kept that many steps
+// back, above the player's head if that's in the open (else a step higher, else level with them).
+function stepsFor(at, player) {
+  const v = player.location;
+  const clamp = (n) => Math.max(-FAR_STEPS, Math.min(FAR_STEPS, n));
+  const x = clamp(Math.round((at.x - v.x) / FAR_STEP));
+  const z = clamp(Math.round((at.z - v.z) / FAR_STEP));
+  const up = Math.round((at.y - (v.y + CARRY_UP)) / FAR_STEP);
+  for (const y of [up, up - 1, up + 1]) {
+    const steps = [x, clamp(y), z];
+    try {
+      const spot = carriedAt(at, steps);
+      const block = player.dimension.getBlock({ x: Math.floor(spot.x), y: Math.floor(spot.y), z: Math.floor(spot.z) });
+      if (!block || block.isAir) return steps;
+    } catch {
+      return steps; // (above or below the world: nothing in the way there)
+    }
+  }
+  return [x, clamp(up), z];
+}
+
+// Carried or in its place, as it should be now: answers where the entity itself is to be.
+function settle(home) {
+  const entity = home.entity;
+  if (!home.plain && tooFar(home.at, entity.dimension, !!home.steps)) {
+    const v = farViewer.location;
+    let steps = home.steps;
+    if (steps) {
+      const spot = carriedAt(home.at, steps);
+      if (Math.hypot(spot.x - v.x, spot.y - (v.y + CARRY_UP), spot.z - v.z) > CARRY_REACH) steps = null;
+    }
+    if (!steps) steps = stepsFor(home.at, farViewer);
+    const code = farCode(steps);
+    if (code !== home.code) {
+      try {
+        entity.setProperty("pose:far", code);
+      } catch {
+        home.plain = true; // (its pack files are older than this: it stays where it is)
+        home.steps = null;
+        home.code = 0;
+        return home.at;
+      }
+    }
+    home.steps = steps;
+    home.code = code;
+    return carriedAt(home.at, steps);
+  }
+  if (home.steps) {
+    home.steps = null;
+    home.code = 0;
+    entity.setProperty("pose:far", 0);
+  }
+  return home.at;
+}
+
+// A Pose Studio entity that belongs at a place in the world: answers where the entity itself is
+// to be put (there; or, too far off to be drawn there, near the player: see above).
+function placeEntity(entity, at, player = null) {
+  if (player) farViewer = player;
+  let home = homes.get(entity.id);
+  if (!home) homes.set(entity.id, (home = { entity, at, steps: null, code: 0, plain: false }));
+  home.entity = entity;
+  home.at = { x: at.x, y: at.y, z: at.z };
+  return settle(home);
+}
+
+// where an entity belongs (not where it's kept while it's carried)
+function placeOf(entity) {
+  const home = homes.get(entity.id);
+  return home && home.steps ? home.at : entity.location;
+}
+
+// Where a new entity for a place is made: there, or beside the player when that's too far off (it's put right at once).
+function spawnPlace(at, dimension) {
+  return tooFar(at, dimension) ? Object.assign({}, viewer().location) : at;
+}
+
+// everyone carried or in their place as they should be, as the player moves about
+function settleAll() {
+  for (const [id, home] of homes) {
+    try {
+      if (!home.entity.isValid) {
+        homes.delete(id);
+        continue;
+      }
+      const was = home.code;
+      const to = settle(home);
+      if (home.code === was) continue;
+      if (!home.code && !isLoaded(home.entity.dimension, to)) {
+        // (not carried any more, and its own place isn't loaded: an entity sent there couldn't be
+        // found again until someone goes there. It's made again when Blockbench next sends it)
+        home.entity.remove();
+        homes.delete(id);
+        continue;
+      }
+      home.entity.teleport(to, { rotation: { x: 0, y: 0 }, keepVelocity: false });
+    } catch {
+      homes.delete(id); // gone, or not loaded right now
+    }
+  }
+}
+system.runInterval(() => {
+  if (homes.size && (farBeyond > 0 || [...homes.values()].some((home) => home.steps))) settleAll();
+}, 5);
+
+// (after the script starts again: how far is too far, and the ones that were being carried)
+system.runTimeout(() => {
+  try {
+    farBeyond = Number(world.getDynamicProperty(FAR_PROPERTY)) || 0;
+    for (const dimension of ["overworld", "nether", "the_end"]) {
+      for (const entity of world.getDimension(dimension).getEntities({ families: ["pose_studio"] })) {
+        try {
+          const code = Number(entity.getProperty("pose:far")) || 0;
+          if (!code || homes.has(entity.id)) continue;
+          const steps = farSteps(code);
+          const l = entity.location;
+          homes.set(entity.id, { entity, at: { x: l.x + steps[0] * FAR_STEP, y: l.y + steps[1] * FAR_STEP, z: l.z + steps[2] * FAR_STEP }, steps, code, plain: false });
+        } catch {
+          // not one that can be carried
+        }
+      }
+    }
+  } catch {
+    // nothing kept
+  }
+}, 40);
 
 function setPose(player, data, glide = null) {
   if (!finite(data.p)) throw new Error("invalid position");
@@ -108,19 +313,21 @@ function setPose(player, data, glide = null) {
   const dim = world.getDimension(anchor.dim);
   const loc = toWorld(anchor, data.p);
 
-  let entity = findMannequins(dim, data.id)[0];
+  let entity = findMannequin(dim, data.id);
   if (!entity) {
-    entity = dim.spawnEntity(TYPE, loc);
+    entity = dim.spawnEntity(TYPE, spawnPlace(loc, dim));
     entity.addTag(TAG_PREFIX + data.id);
   }
+  // where the entity itself goes: its place, or (too far off to be drawn there) near the player
+  const spot = placeEntity(entity, loc, player);
   // (an animation being played can push it along instead: see glideTo)
-  if (!glide || !glideTo(glide, entity, loc, anchor)) entity.teleport(loc, { rotation: { x: 0, y: 0 } });
+  if (!glide || !glideTo(glide, entity, spot, anchor, { x: spot.x - loc.x, y: spot.y - loc.y, z: spot.z - loc.z })) entity.teleport(spot, { rotation: { x: 0, y: 0 } });
 
   setPoseCode(entity, data.q);
   // skin slot (0 = default Steve, 1-16 = textures/entity/pose_studio/skin_N.png) and arm type
+  // (64 and up: not drawn, see applyHolder)
   entity.setProperty("pose:skin", Math.max(0, Math.min(16, Math.round(Number(data.s) || 0))));
   entity.setProperty("pose:slim", !!data.sl);
-  entity.setProperty("pose:hidden", false);
   if (data.e) wantedEquipment.set(data.id, data.e);
   const equipment = wantedEquipment.get(data.id);
   if (equipment) applyEquipment(entity, equipment);
@@ -133,7 +340,8 @@ function setPose(player, data, glide = null) {
 // ticks }. Answers false when the mannequin has to be put in place after all: the first tick, a
 // jump too far to be a step, or when it isn't where the last push should have brought it. A
 // mannequin that pushes don't move (five misses) is placed the plain way from then on.
-function glideTo(glide, entity, loc, anchor) {
+// shift: how far from its place the entity itself is kept (carried: see placeEntity).
+function glideTo(glide, entity, loc, anchor, shift = null) {
   const s = glide.state;
   if (s.off) return false;
   let placed = false;
@@ -148,7 +356,8 @@ function glideTo(glide, entity, loc, anchor) {
     }
     s.started = true;
     const from = placed ? loc : at;
-    const to = glide.next ? toWorld(anchor, glide.next) : loc;
+    const next = glide.next ? toWorld(anchor, glide.next) : null;
+    const to = next ? { x: next.x + (shift ? shift.x : 0), y: next.y + (shift ? shift.y : 0), z: next.z + (shift ? shift.z : 0) } : loc;
     const push = { x: to.x - from.x, y: to.y - from.y, z: to.z - from.z };
     s.step = Math.hypot(push.x, push.y, push.z);
     entity.clearVelocity();
@@ -179,14 +388,14 @@ function setEntity(player, data) {
   const dim = world.getDimension(anchor.dim);
   const loc = toWorld(anchor, data.p);
 
-  let entity = findMannequins(dim, data.id)[0];
+  let entity = findMannequin(dim, data.id);
   if (entity && entity.typeId !== data.t) {
     entity.remove();
     entity = undefined;
   }
   if (!entity) {
     try {
-      entity = dim.spawnEntity(data.t, loc);
+      entity = dim.spawnEntity(data.t, spawnPlace(loc, dim));
     } catch (e) {
       if (isUnloaded(e)) throw e; // the area isn't loaded: the update waits for it
       throw new Error("Pose Studio's entities aren't loaded yet. Reload Minecraft's packs (Pose Studio ▸ More ▸ Reload Minecraft Packs).");
@@ -194,7 +403,7 @@ function setEntity(player, data) {
     entity.addTag(TAG_PREFIX + data.id);
   }
   const yaw = Number(data.y) || 0;
-  entity.teleport(loc, { rotation: { x: 0, y: yaw } });
+  entity.teleport(placeEntity(entity, loc, player), { rotation: { x: 0, y: yaw } });
   entity.setRotation({ x: 0, y: yaw });
   if (data.m !== undefined) {
     try {
@@ -254,13 +463,13 @@ function applyHolder(player, data) {
   }
   const loc = toWorld(anchor, data.p.map(Number));
   if (!holder) {
-    holder = dim.spawnEntity(TYPE, loc);
+    holder = dim.spawnEntity(TYPE, spawnPlace(loc, dim));
     holder.addTag(tag);
-    holder.setProperty("pose:hidden", !data.v);
+    holder.setProperty("pose:skin", data.v ? 0 : 64);
   }
-  holder.teleport(loc, { rotation: { x: 0, y: 0 } });
+  holder.teleport(placeEntity(holder, loc, player), { rotation: { x: 0, y: 0 } });
   setPoseProperties(holder, data.r.map(Number), []);
-  holder.setProperty("pose:hidden", !data.v); // "v":1 = visible, for testing
+  holder.setProperty("pose:skin", data.v ? 0 : 64); // "v":1 = visible, for testing
   // always the main hand: the off hand refuses most items (swords, tools...)
   applyEquipment(holder, { mainhand: data.i });
 }
@@ -897,7 +1106,7 @@ function setLiveAct(data) {
 function doLiveAct(player, entity, act, real = true) {
   const value = String(act.v === undefined ? "" : act.v);
   if (act.k === "particle") {
-    const l = entity.location;
+    const l = placeOf(entity);
     entity.dimension.spawnParticle(value, { x: l.x, y: l.y + (Number(act.n) || 0), z: l.z });
   } else if (act.k === "command") entity.runCommand(value.replace(/^\//, ""));
   else if (!real) return;
@@ -1992,7 +2201,7 @@ const shotHidden = new Map(); // entity id -> { entity, at }
 function setShotHidden(data) {
   for (const [, away] of shotHidden) {
     try {
-      away.entity.teleport(away.at, { keepVelocity: false });
+      away.entity.teleport(placeEntity(away.entity, away.at), { keepVelocity: false });
     } catch {
       // gone since
     }
@@ -2006,8 +2215,8 @@ function setShotHidden(data) {
   for (const id of ids) {
     for (const tag of [id, `${id}__main`, `${id}__off`]) {
       for (const e of findMannequins(dim, tag)) {
-        const at = Object.assign({}, e.location);
-        e.teleport({ x: at.x, y: bottom, z: at.z }, { keepVelocity: false });
+        const at = Object.assign({}, placeOf(e));
+        e.teleport(placeEntity(e, { x: at.x, y: bottom, z: at.z }), { keepVelocity: false });
         shotHidden.set(e.id, { entity: e, at });
       }
     }
@@ -2073,7 +2282,7 @@ function debug(player) {
 // Every name looks like `PSD[op|page|item]`; page 0 always carries
 // `M|ready|<pages>|<items>|<items per page>` or `M|busy|<percent>`.
 // What this script understands; Blockbench warns when the world runs an older one.
-const PACK_PROTOCOL = 40;
+const PACK_PROTOCOL = 41;
 const IO_OBJECTIVE = "pose_io";
 const ITEMS_PER_PAGE = 30;
 const MAX_PAGES_PER_BATCH = 16;
@@ -3042,6 +3251,8 @@ function handle(ev) {
       return setLiveAct(data);
     case "pose:livetry":
       return tryLive(player, data);
+    case "pose:far":
+      return setFar(player, data);
     case "pose:take":
       // {"del": id}: a take that isn't wanted any more
       if (data.del) deleteTake(String(data.del));

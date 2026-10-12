@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.89.2'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.90.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -1815,6 +1815,7 @@ Write-Output "$($cr.R - $cr.L) $($cr.B - $cr.T)"
     }
     link.onConnect = () => {
       resync();
+      sendFar();
       if (playerHidden) setPlayerHidden(true);
       // match the open scene with the world first; an empty scene is only centred on the player
       // when the world has no scene of its own
@@ -11619,6 +11620,32 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // (gated on pose:model) maps that model's bones to the 30 packed-angle properties. It's rebuilt
   // only when the world's entity catalogue changes; then Minecraft needs one reload.
   const PROXY_TYPE = 'pose:proxy';
+
+  // ---- Drawn far away from close by ----
+  // Minecraft only shows a player the entities near them, so a Pose Studio player or mob that's
+  // too far off is kept near the player (see the behavior pack's script), a whole number of
+  // 16-block steps from where it belongs on each axis, with pose:far saying how many: 0 in its
+  // place, else (x steps + 64) + 128 * (y steps + 64) + 16384 * (z steps + 64). The root of its
+  // model is moved that many steps, so it's drawn where it belongs. (The same lines as the Pose
+  // Studio player's own: see make-mannequin-pose.js. It's the one property a copy has to spare:
+  // an entity can have 32.)
+  const FAR_PROPERTY = { type: 'int', range: [0, 2097151], default: 0, client_sync: true };
+  // (16 blocks are 256 of a bone's units; a bone's x and y go the world's way, its z the other way)
+  const FAR_POSITION = [
+    "q.property('pose:far') > 0 ? (math.mod(q.property('pose:far'), 128) - 64) * 256 : 0",
+    "q.property('pose:far') > 0 ? (math.mod(math.floor(q.property('pose:far') / 128), 128) - 64) * 256 : 0",
+    "q.property('pose:far') > 0 ? (64 - math.floor(q.property('pose:far') / 16384)) * 256 : 0",
+  ];
+  const FAR_BOUNDS = 2048; // the model is drawn up to 1008 blocks from the entity: this much to its side and height
+
+  // Settings ▸ Pose Studio: Draw Far Players and Mobs (on), and how far from you is too far for
+  // Minecraft to draw them where they are (56 blocks: within the 4 chunks it always shows).
+  let farOn = true;
+  let farBlocks = 56;
+  function sendFar() {
+    if (link.connected) send(`scriptevent pose:far ${JSON.stringify({ d: farOn ? Math.max(16, Math.min(512, Math.round(Number(farBlocks) || 56))) : 0 })}`);
+  }
+
   const PROXY_REGISTRY = () => `${devPackDir('resource')}\\pose_studio_proxies.json`;
 
   const entryKey = (entry) => `${entry.id}|${entry.geometryId}|${entry.texturePath}${entry.flags && entry.flags.is_baby ? '|baby' : ''}${entry.flags && entry.flags.is_saddled ? '|saddled' : ''}`;
@@ -11771,7 +11798,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
       // (every part of a model shown by several copies can be posed)
       return { key: entryKey(entry), entry, geometry, parts, bones: parts ? geometry.bones.map((b) => b.name) : model ? posableBones(model, boneUsage(content, entry.id)) : [] };
     });
-    const hash = hashString('v14|' + JSON.stringify(models.map((m) => [m.key, m.entry.material, m.bones, m.geometry && m.geometry.bones.length].concat(m.parts ? [m.parts] : []))));
+    const hash = hashString('v15|' + JSON.stringify(models.map((m) => [m.key, m.entry.material, m.bones, m.geometry && m.geometry.bones.length].concat(m.parts ? [m.parts] : []))));
     const registry = proxyRegistry();
     if (registry.hash === hash) return 0;
 
@@ -11791,6 +11818,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     for (let i = 0; i < PACKED_PROPS; i++) {
       properties[`pose:p${i}`] = { type: 'int', range: [0, 16777215], default: NEUTRAL_PACKED, client_sync: true };
     }
+    properties['pose:far'] = FAR_PROPERTY;
     const behavior = {
       format_version: '1.20.80',
       'minecraft:entity': {
@@ -11843,12 +11871,12 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
         return bone;
       });
       geometries.push({
-        description: { identifier: geometryId, texture_width: m.geometry.texture_width, texture_height: m.geometry.texture_height, visible_bounds_width: 8, visible_bounds_height: 8, visible_bounds_offset: [0, 2, 0] },
+        description: { identifier: geometryId, texture_width: m.geometry.texture_width, texture_height: m.geometry.texture_height, visible_bounds_width: FAR_BOUNDS, visible_bounds_height: FAR_BOUNDS, visible_bounds_offset: [0, 2, 0] },
         bones: [{ name: PROXY_ROOT_BONE, pivot: [0, 0, 0] }, ...flat],
       });
       description.geometry[`g${g}`] = geometryId;
       description.animations[`a${g}`] = `animation.pose_studio.proxy.${g}`;
-      const bones = {};
+      const bones = { [PROXY_ROOT_BONE]: { position: FAR_POSITION } };
       names.forEach((name, k) => {
         const a = k * 7;
         bones[name] = { rotation: [angleExpr(a), angleExpr(a + 1), angleExpr(a + 2)], position: [flatMoveExpr(a + 3, 0), flatMoveExpr(a + 3, 1), flatMoveExpr(a + 3, 2)] };
@@ -11870,7 +11898,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
         const g = geometries.length;
         const geometryId = `geometry.pose_studio.proxy.${g}`;
         geometries.push({
-          description: { identifier: geometryId, texture_width: m.geometry.texture_width, texture_height: m.geometry.texture_height, visible_bounds_width: 8, visible_bounds_height: 8, visible_bounds_offset: [0, 2, 0] },
+          description: { identifier: geometryId, texture_width: m.geometry.texture_width, texture_height: m.geometry.texture_height, visible_bounds_width: FAR_BOUNDS, visible_bounds_height: FAR_BOUNDS, visible_bounds_offset: [0, 2, 0] },
           bones: [
             { name: PROXY_ROOT_BONE, pivot: [0, 0, 0] },
             // legacy "neverRender" bones keep their place in the hierarchy but lose their cubes
@@ -11880,7 +11908,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
         description.geometry[`g${g}`] = geometryId;
         description.animations[`a${g}`] = `animation.pose_studio.proxy.${g}`;
         // angles 0-2: the whole model (pose_root); then 3 per posable bone
-        const bones = { [PROXY_ROOT_BONE]: { rotation: [angleExpr(0), angleExpr(1), angleExpr(2)] } };
+        const bones = { [PROXY_ROOT_BONE]: { rotation: [angleExpr(0), angleExpr(1), angleExpr(2)], position: FAR_POSITION } };
         m.bones.forEach((bone, k) => {
           const a = (k + 1) * 3;
           bones[bone] = { rotation: [angleExpr(a), angleExpr(a + 1), angleExpr(a + 2)] };
@@ -13867,7 +13895,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     return { id: idItem.slice(2), name: scene.world || '', anchor: point('A|'), player: point('P|'), locations, removed: scene.removed || [], protocol: version ? Number(version.slice(2)) : 0 };
   }
 
-  const EXPECTED_PACK_PROTOCOL = 40; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
+  const EXPECTED_PACK_PROTOCOL = 41; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
   let warnedOldPack = false;
 
   // Scene files in the scenes folders that belong to a world (their pose_world says so), as
@@ -14702,6 +14730,15 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.90.0",
+      "date": "2026-10-12",
+      "changes": [
+        "New: players and mobs far away are still drawn in Minecraft (up to 1000 blocks), instead of vanishing past about 60.",
+        "On by default: Settings ▸ Pose Studio: Draw Far Players and Mobs.",
+        "Update the Minecraft packs."
+      ]
+    },
     {
       "version": "0.89.2",
       "date": "2026-10-12",
@@ -15842,7 +15879,7 @@ ${PLUGIN_URL}`,
 
   // for the plugin's own tests only (they set this flag); nothing happens otherwise
   if (typeof globalThis !== 'undefined' && globalThis.__POSE_STUDIO_TEST) {
-    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS, sceneSpot, addLight, lightRoots, stopPath, cameraPathsOn, cameraPose, sampleCameraAnimation, playCameraAnimation, animateCamera, zoomedFov, setupClipChannel, removeClipChannel, clipKeys, clipPose, clipState, displayClips, addAnimationKey, placeClipKey, clipKeyAt, parseRecording, tidyRecording, recordingTicks, recordingAnimation, importRecording, placeRecording, keepRecording, setRecording, poseState, showRecordedWalk, displayClipBones, displayClipRoot, updateRecordingLines, entityAnimations, clipDelta, sampleAnimation, liveRotation, liveOrigin, poseMessage, entityMessage, setContentCache: (c) => (contentCache = c), liveWorldName, adoptCopies, adoptTextures, poseKind, copyName, deckConnect, autoStartDeck, swingStates, heldItemAnswers, sequenceRows, sequenceKeys, sequenceEnd, writeSequence, clipPass, worldPlaces, parseLocate, locatePlace, goToPlace, openPlaces, doLaundry, LOCATE_VERSIONS, sceneTakes, liveMobs, actKeys, writeActs, mobActionChoices, openMobActions, actNumber, propertyStates, rootYaw, isLiveMob, tryAct, endTries, actTicks, mobActionsComponent, actLook, ACTS_CSS, placeKey, moveKey, modelSpacePoints, structureShift, structureMesh, selectionNow, sendStructureTarget, cameraMarkMessage, hideCameraMarks, cameraMarksShown, setCameraMarks, sendTimelineForTake, placeRecording, sampleAnimation, sendAnimation, exportVideo, startRecorder, RECORDER_CS, RECORD_PS1, turnedEffect, turnVector, fxTurn, prepareTurned, turnedId, saddleParts, entityMessages, entityIds, flatParts, packFlat, partPlace, proxyModelFor, anyPartOn, prepareProxy, particleList, particleEntry, placeParticle, fxMessage, fxRoots };
+    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS, sceneSpot, addLight, lightRoots, stopPath, cameraPathsOn, cameraPose, sampleCameraAnimation, playCameraAnimation, animateCamera, zoomedFov, setupClipChannel, removeClipChannel, clipKeys, clipPose, clipState, displayClips, addAnimationKey, placeClipKey, clipKeyAt, parseRecording, tidyRecording, recordingTicks, recordingAnimation, importRecording, placeRecording, keepRecording, setRecording, poseState, showRecordedWalk, displayClipBones, displayClipRoot, updateRecordingLines, entityAnimations, clipDelta, sampleAnimation, liveRotation, liveOrigin, poseMessage, entityMessage, setContentCache: (c) => (contentCache = c), liveWorldName, adoptCopies, adoptTextures, poseKind, copyName, deckConnect, autoStartDeck, swingStates, heldItemAnswers, sequenceRows, sequenceKeys, sequenceEnd, writeSequence, clipPass, worldPlaces, parseLocate, locatePlace, goToPlace, openPlaces, doLaundry, LOCATE_VERSIONS, sceneTakes, liveMobs, actKeys, writeActs, mobActionChoices, openMobActions, actNumber, propertyStates, rootYaw, isLiveMob, tryAct, endTries, actTicks, mobActionsComponent, actLook, ACTS_CSS, placeKey, moveKey, modelSpacePoints, structureShift, structureMesh, selectionNow, sendStructureTarget, sendFar, FAR_POSITION, FAR_PROPERTY, cameraMarkMessage, hideCameraMarks, cameraMarksShown, setCameraMarks, sendTimelineForTake, placeRecording, sampleAnimation, sendAnimation, exportVideo, startRecorder, RECORDER_CS, RECORD_PS1, turnedEffect, turnVector, fxTurn, prepareTurned, turnedId, saddleParts, entityMessages, entityIds, flatParts, packFlat, partPlace, proxyModelFor, anyPartOn, prepareProxy, particleList, particleEntry, placeParticle, fxMessage, fxRoots };
   }
 
   Plugin.register('pose_studio', {
@@ -16199,6 +16236,24 @@ ${PLUGIN_URL}`,
             entityHeldItems = value;
           },
         }),
+        setting('pose_studio_far', {
+          name: 'Pose Studio: Draw Far Players and Mobs', type: 'toggle', value: true,
+          description: "Minecraft only draws entities that are near you. With this on, a Pose Studio player or mob further away than the distance below is still drawn where it belongs (it's kept near you and its model is shifted out to its place, up to 1000 blocks). It's lit as the spot above you where it's kept.",
+          onChange: (value) => {
+            farOn = value !== false;
+            sendFar();
+            resync(); // (everyone is sent again: the game makes anew the ones it had to take away)
+          },
+        }),
+        setting('pose_studio_far_distance', {
+          name: 'Pose Studio: Far Beyond (blocks)', type: 'number', value: 56, min: 16, max: 512, step: 8,
+          description: 'How far from you a Pose Studio player or mob has to be before it is drawn that way. 56 suits the usual simulation distance of 4 chunks; raise it if yours is higher.',
+          onChange: (value) => {
+            farBlocks = Number(value) || 56;
+            sendFar();
+            resync();
+          },
+        }),
         setting('pose_studio_freeze_clock', {
           name: 'Pose Studio: Freeze Time and Weather', type: 'toggle', value: true,
           description: 'Turns off the day/night and weather cycles (doDaylightCycle, doWeatherCycle) while Blockbench is connected, and turns them back on when it disconnects.',
@@ -16274,6 +16329,8 @@ ${PLUGIN_URL}`,
       entityHeldItems = !!settingValue('pose_studio_entity_held_items');
       freezeEnabled = settingValue('pose_studio_freeze_clock') !== false;
       followLocations = settingValue('pose_studio_follow_locations') !== false;
+      farOn = settingValue('pose_studio_far') !== false;
+      farBlocks = Number(settingValue('pose_studio_far_distance')) || 56;
       // The plugin page's Changelog tab shows this; Blockbench otherwise looks for it in its plugin store.
       const self = typeof Plugins !== 'undefined' && Plugins.registered && Plugins.registered.pose_studio;
       if (self) {

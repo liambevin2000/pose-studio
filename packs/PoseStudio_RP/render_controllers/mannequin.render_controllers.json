@@ -32,7 +32,7 @@
         }
       ],
       "textures": [
-        "q.property('pose:hidden') ? Texture.clear : Array.skins[q.property('pose:skin')]"
+        "q.property('pose:skin') >= 64 ? Texture.clear : Array.skins[math.mod(q.property('pose:skin'), 32)]"
       ],
       "part_visibility": [
         {

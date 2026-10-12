@@ -271,7 +271,7 @@
           "type": "int",
           "range": [
             0,
-            16
+            127
           ],
           "default": 0,
           "client_sync": true
@@ -281,9 +281,13 @@
           "default": false,
           "client_sync": true
         },
-        "pose:hidden": {
-          "type": "bool",
-          "default": false,
+        "pose:far": {
+          "type": "int",
+          "range": [
+            0,
+            2097151
+          ],
+          "default": 0,
           "client_sync": true
         }
       }

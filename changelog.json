@@ -1,5 +1,14 @@
 [
   {
+    "version": "0.90.0",
+    "date": "2026-10-12",
+    "changes": [
+      "New: players and mobs far away are still drawn in Minecraft (up to 1000 blocks), instead of vanishing past about 60.",
+      "On by default: Settings ▸ Pose Studio: Draw Far Players and Mobs.",
+      "Update the Minecraft packs."
+    ]
+  },
+  {
     "version": "0.89.2",
     "date": "2026-10-12",
     "changes": [

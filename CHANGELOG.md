@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.90.0 (2026-10-12)
+
+- New: players and mobs far away are still drawn in Minecraft (up to 1000 blocks), instead of vanishing past about 60.
+- On by default: Settings ▸ Pose Studio: Draw Far Players and Mobs.
+- Update the Minecraft packs.
+
 ## 0.89.2 (2026-10-12)
 
 - Fixed: Structure ▸ Apply Move not always working. A move now happens fully or not at all, and says why.

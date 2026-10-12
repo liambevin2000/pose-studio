@@ -1,6 +1,6 @@
 {
-  "version": "0.89.2",
-  "revision": "03dd0646d593",
+  "version": "0.90.0",
+  "revision": "8a27ed1f4704",
   "files": [
     {
       "path": "PoseStudio_BP/entities/backdrop.json",
@@ -14,8 +14,8 @@
     },
     {
       "path": "PoseStudio_BP/entities/mannequin.json",
-      "size": 6951,
-      "sha1": "b3a739694a4b225a8d876a3553f9d2d9ddefbf84"
+      "size": 7013,
+      "sha1": "b53ba8f59e72f7c216f21f76e4620ca46a9617fd"
     },
     {
       "path": "PoseStudio_BP/manifest.json",
@@ -24,8 +24,8 @@
     },
     {
       "path": "PoseStudio_BP/scripts/main.js",
-      "size": 134734,
-      "sha1": "e91caef12a1dffb1c89ae6c37c577bbacad7b0fa"
+      "size": 143683,
+      "sha1": "85f5985583dffcc5d89c9fcfa75126a965549222"
     },
     {
       "path": "PoseStudio_RP/animations/backdrop.animation.json",
@@ -39,8 +39,8 @@
     },
     {
       "path": "PoseStudio_RP/animations/mannequin.animation.json",
-      "size": 2378,
-      "sha1": "c89dd335a138f3ef83b41634c1a41e0e6e6a163e"
+      "size": 2762,
+      "sha1": "2183a9779b285ecc1fed6770ae180f52a1b4701e"
     },
     {
       "path": "PoseStudio_RP/entity/backdrop.entity.json",
@@ -74,8 +74,8 @@
     },
     {
       "path": "PoseStudio_RP/models/entity/mannequin.geo.json",
-      "size": 8176,
-      "sha1": "23556beedfa799dacadcea84b55c8aabb43a0f23"
+      "size": 8182,
+      "sha1": "bf76b70268e5447b61241d7bba775bd50a3614bb"
     },
     {
       "path": "PoseStudio_RP/render_controllers/backdrop.render_controllers.json",
@@ -89,8 +89,8 @@
     },
     {
       "path": "PoseStudio_RP/render_controllers/mannequin.render_controllers.json",
-      "size": 1332,
-      "sha1": "b172b8272fb8d9b592613d9d87ae52432db7a9be"
+      "size": 1350,
+      "sha1": "3c7a4599a433ef004d6be3a97338c57f47107fcd"
     },
     {
       "path": "PoseStudio_RP/texts/en_US.lang",

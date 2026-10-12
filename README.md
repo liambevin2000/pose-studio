@@ -231,6 +231,18 @@ Every camera of the scene stands in the Minecraft world as a little camera: wher
 - They go a few seconds after Blockbench disconnects.
 - **Camera ▸ Show Cameras in Minecraft** (also on the panel) turns them off. A screenshot you take yourself (F2, a recorder) while they show will have them in it.
 
+## Players and mobs far away
+
+Minecraft only draws entities that are near you (about four chunks), so a mob standing on a far hill is not there in the shot. Pose Studio draws its own players and mob copies anyway:
+
+- One that is more than 56 blocks from you is kept near you instead (16 blocks or so above your head, where it is not in the way), and its model is shifted out to where it belongs, up to 1000 blocks away. It is the trick of an entity whose model is modelled far from its origin, done for you and kept up to date as you and it move.
+- Nothing changes in Blockbench: you place and pose it where it belongs. Come within 50 blocks and it is an ordinary entity in its own place again.
+- What a mob copy holds comes along. It works while an animation plays, and in Entity Shots.
+
+Things to know: a far one is lit as the spot above you where it is kept, not as where it is drawn (stand in the open for a sunlit valley). It is about where *you* are, not where the game camera is, so stay near the camera. The real mobs of a whole-scene recording and of Mob Actions are Minecraft's own entities and are not drawn far away.
+
+**Settings ▸ Pose Studio: Draw Far Players and Mobs** turns it off; **Far Beyond (blocks)** sets the distance (raise it if your simulation distance is more than 4 chunks).
+
 ## Player View (first-person shots)
 
 **Camera ▸ Player View (First Person)** (also on the panel) changes what Sync Game Camera does: instead of flying a free camera to the active camera, Minecraft stands you there, eyes where the camera is, looking the way it looks. The game then shows its own first-person view, with your hand and what you hold.
