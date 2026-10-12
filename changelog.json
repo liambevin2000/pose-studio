@@ -1,5 +1,14 @@
 [
   {
+    "version": "0.89.2",
+    "date": "2026-10-12",
+    "changes": [
+      "Fixed: Structure ▸ Apply Move not always working. A move now happens fully or not at all, and says why.",
+      "The structure is remembered after switching tabs or reopening Blockbench.",
+      "Update the Minecraft packs."
+    ]
+  },
+  {
     "version": "0.89.1",
     "date": "2026-10-09",
     "changes": [

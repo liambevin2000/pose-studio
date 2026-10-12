@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.89.1'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.89.2'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -3029,19 +3029,57 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
   // with the move tool and turn it in quarter turns around the vertical axis, and Apply Move makes
   // Minecraft move the blocks. Minecraft outlines the selection in green and, while you move it,
   // where it would land in blue. Undo Move (or Ctrl+Z) puts both places back as they were, up to 10 moves back.
+  // A move is all or nothing: Minecraft waits for both places to be loaded, changes nothing if it
+  // can't do all of it, and only moves the selection Blockbench is showing.
   const STRUCTURE_NAME = 'structure';
   const STRUCTURE_TEXTURE = 'pose_structure';
-  let structure = null; // { uuid, min: [x, y, z], size: [x, y, z] } in blocks from the anchor's block
+  let structure = null; // the piece in the project that's open: { uuid, min: [x, y, z], size: [x, y, z] } in blocks from the anchor's block
   let lastTarget = '';
 
+  // The piece in the project that's open. What it is (where the selection was, how big it is) is
+  // kept on the mesh itself (pose_structure), so it's still known after another project's tab was
+  // looked at, after an undo, and when the project is saved and opened again.
   function structureMesh() {
-    if (!structure || typeof Project === 'undefined' || !Project) return null;
-    return (Project.elements || []).find((el) => el.uuid === structure.uuid) || null;
+    if (typeof Project === 'undefined' || !Project) return null;
+    const elements = Project.elements || [];
+    let mesh = (structure && elements.find((el) => el.uuid === structure.uuid)) || null;
+    if (!mesh) {
+      mesh = elements.find((el) => el.name === STRUCTURE_NAME && el instanceof Mesh && el.pose_structure && Array.isArray(el.pose_structure.min) && Array.isArray(el.pose_structure.size)) || null;
+      if (mesh) structure = { uuid: mesh.uuid, min: mesh.pose_structure.min.slice(), size: mesh.pose_structure.size.slice() };
+    }
+    return mesh;
+  }
+
+  // How far the piece's own corners were moved since it was fetched (in the mesh editor: all of
+  // its faces or corners selected, and dragged): that counts as moving the piece. Throws when only
+  // some of it was moved (its shape was changed: blocks can't follow that). `thorough`: every
+  // corner is looked at, not just a few (Apply Move; the outline in Minecraft goes by a few).
+  const RESHAPED = "Only part of the structure was moved (some of its faces or corners), which changes its shape: blocks can't follow that.\n\nUndo it (Ctrl+Z), then move the whole piece: click it in the outliner, or set the selection mode above the viewport to Object.";
+  function structureShift(mesh, thorough = false) {
+    const info = mesh.pose_structure;
+    if (!info || !Array.isArray(info.probe) || !info.probe.length) return [0, 0, 0];
+    let shift = null;
+    for (const [key, x, y, z] of info.probe) {
+      const v = mesh.vertices[key];
+      if (!v) throw new Error(RESHAPED);
+      const d = [v[0] - x, v[1] - y, v[2] - z];
+      if (!shift) shift = d;
+      else if (d.some((n, i) => Math.abs(n - shift[i]) > 0.01)) throw new Error(RESHAPED);
+    }
+    if (thorough && Array.isArray(info.sum) && info.n) {
+      const keys = Object.keys(mesh.vertices);
+      if (keys.length !== info.n) throw new Error(RESHAPED);
+      const sum = [0, 0, 0];
+      for (const key of keys) for (let i = 0; i < 3; i++) sum[i] += mesh.vertices[key][i];
+      // (all of them added up: what they'd add up to had every one of them moved by that much)
+      if (sum.some((v, i) => Math.abs(v - info.sum[i] - info.n * shift[i]) > 0.5)) throw new Error(RESHAPED);
+    }
+    return shift;
   }
 
   // Where the piece is now: { to: lowest corner (blocks from the anchor's block), size, rot
   // (Minecraft's: clockwise seen from above) }. Throws when it's turned some other way.
-  function structureTarget() {
+  function structureTarget(thorough = false) {
     const mesh = structureMesh();
     if (!mesh) throw new Error('Get the selection first (Pose Studio ▸ Structure ▸ Get Selection).');
     const r = (mesh.rotation || [0, 0, 0]).map((v) => ((v % 360) + 360) % 360);
@@ -3053,7 +3091,10 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     const turn = quarter % 360;
     const [sx, sy, sz] = structure.size;
     const size = turn === 90 || turn === 270 ? [sz, sy, sx] : [sx, sy, sz];
-    const o = mesh.origin;
+    // moved as a piece (its origin), or by all of its corners at once (turned as the piece is): both count
+    const shift = structureShift(mesh, thorough);
+    const a = turn * DEG;
+    const o = [mesh.origin[0] + shift[0] * Math.cos(a) + shift[2] * Math.sin(a), mesh.origin[1] + shift[1], mesh.origin[2] - shift[0] * Math.sin(a) + shift[2] * Math.cos(a)];
     // the piece's origin is the middle of its bottom; see buildStructure for the mapping
     const to = [Math.round(0.5 - o[0] / 16 - size[0] / 2), Math.round(o[1] / 16), Math.round(0.5 - o[2] / 16 - size[2] / 2)];
     // Blockbench turns anticlockwise seen from above for a positive Y; Minecraft counts clockwise
@@ -3124,6 +3165,17 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
       keys.forEach((k, i) => (uv[k] = cellUV[i]));
       mesh.addFaces(new MeshFace(mesh, { vertices: keys, uv, texture: texture.uuid }));
     }
+    // what it is, kept with it: the selection, and where its corners are (a few of them, and all of
+    // them added up), to tell later whether they were moved
+    const keys = Object.keys(mesh.vertices);
+    const probe = [];
+    for (let i = 0; i < Math.min(8, keys.length); i++) {
+      const key = keys[Math.floor((i * keys.length) / Math.min(8, keys.length))];
+      probe.push([key, ...mesh.vertices[key]]);
+    }
+    const sum = [0, 0, 0];
+    for (const key of keys) for (let i = 0; i < 3; i++) sum[i] += mesh.vertices[key][i];
+    mesh.pose_structure = { min: min.slice(), size: size.slice(), probe, sum, n: keys.length };
     mesh.init();
     structure = { uuid: mesh.uuid, min: min.slice(), size: size.slice() };
     lastTarget = '';
@@ -3137,19 +3189,20 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     return mesh;
   }
 
-  async function getStructureSelection(quiet) {
-    if (!requireConnection()) return null;
+  // silent: nothing is said when it can't be read (the caller says what went wrong)
+  async function getStructureSelection(quiet, silent = false) {
+    if (!silent && !requireConnection()) return null;
     if (typeof Project === 'undefined' || !Project) newProject(Formats.free);
     let items;
     try {
-      items = await runGameQuery('pose:selinfo', {}, 'Reading the selection');
+      items = await runGameQuery('pose:selinfo', {}, 'Reading the selection', MOVE_PATIENCE);
     } catch (e) {
-      Blockbench.showMessageBox({ title: 'Pose Studio: structure', message: String(e.message || e) });
+      if (!silent) Blockbench.showMessageBox({ title: 'Pose Studio: structure', message: String(e.message || e) });
       return null;
     }
     const head = (items.find((i) => i.startsWith('S|')) || '').split('|');
     if (head.length < 9) {
-      Blockbench.showMessageBox({ title: 'Pose Studio: structure', message: "Minecraft didn't send a selection. Update the Minecraft packs (Check for Updates, then reopen the world)." });
+      if (!silent) Blockbench.showMessageBox({ title: 'Pose Studio: structure', message: "Minecraft didn't send a selection. Update the Minecraft packs (Check for Updates, then reopen the world)." });
       return null;
     }
     const min = head.slice(2, 5).map(Number);
@@ -3165,12 +3218,23 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     return mesh;
   }
 
+  // Where Minecraft has the selection now: { min, size } in blocks from the anchor's block (null: it didn't say).
+  async function selectionNow() {
+    try {
+      const items = await runGameQuery('pose:selinfo', { head: 1 }, 'Checking the selection', MOVE_PATIENCE);
+      const head = (items.find((i) => i.startsWith('S|')) || '').split('|');
+      return head.length >= 8 ? { min: head.slice(2, 5).map(Number), size: head.slice(5, 8).map(Number) } : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
   // While it's being moved: Minecraft outlines where it would land.
   function sendStructureTarget() {
-    if (!structure || !link.connected) return;
+    if (!link.connected) return;
     if (!structureMesh()) {
-      structure = null;
-      if (lastTarget) send('scriptevent pose:target {}');
+      // none in the project that's open (another tab is, or it was deleted): no outline. It's known again when it's back
+      if (lastTarget && lastTarget !== '{}') send('scriptevent pose:target {}');
       lastTarget = '';
       return;
     }
@@ -3180,7 +3244,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
       const moved = t.rot !== 0 || t.to.some((v, i) => v !== structure.min[i]);
       if (moved) message = JSON.stringify({ min: t.to, size: t.size });
     } catch (e) {
-      message = '{}'; // turned some other way: no outline until it's a quarter turn
+      message = '{}'; // turned some other way (or reshaped): no outline until it's a quarter turn
     }
     if (message === lastTarget || link.inFlight >= MAX_IN_FLIGHT) return;
     send(`scriptevent pose:target ${message}`);
@@ -3198,41 +3262,66 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     }
   }
 
+  // Minecraft is given this long to answer while it moves blocks (a big move keeps it busy)
+  const MOVE_PATIENCE = 30000;
+  const STRUCTURE_UNDO = 'Pose Studio: move structure in Minecraft';
+  let structureBusy = false; // a move (or its undo or redo) is being made: one at a time
+
   async function applyStructureMove() {
     if (!requireConnection()) return;
+    if (structureBusy) {
+      Blockbench.showQuickMessage('Minecraft is still moving the blocks…', 2000);
+      return;
+    }
     let target;
     try {
-      target = structureTarget();
+      target = structureTarget(true);
     } catch (e) {
       Blockbench.showMessageBox({ title: 'Pose Studio: structure', message: e.message });
       return;
     }
-    if (target.rot === 0 && target.to.every((v, i) => v === structure.min[i])) {
-      Blockbench.showQuickMessage('The structure is where it was: move it first', 2500);
+    const from = { min: structure.min.slice(), size: structure.size.slice() };
+    if (target.rot === 0 && target.to.every((v, i) => v === from.min[i])) {
+      Blockbench.showQuickMessage("The structure is where it was: move it first (by whole blocks: 16 on Blockbench's grid is one block)", 3500);
       return;
     }
+    structureBusy = true;
     try {
-      await runGameQuery('pose:move', { to: target.to, rot: target.rot, skip: ignoreAir() ? 1 : 0 }, 'Moving the blocks');
-    } catch (e) {
-      Blockbench.showMessageBox({ title: 'Pose Studio: structure', message: `Minecraft couldn't move it: ${e.message || e}\n\nNothing was changed.` });
-      return;
+      let failed = null;
+      try {
+        // (from and size: the selection Blockbench is showing. Minecraft refuses when it has another one by now)
+        await runGameQuery('pose:move', { to: target.to, rot: target.rot, skip: ignoreAir() ? 1 : 0, from: from.min, size: from.size }, 'Moving the blocks', MOVE_PATIENCE);
+      } catch (e) {
+        failed = e;
+      }
+      if (failed && !failed.game) {
+        // No answer isn't a no (Minecraft was too busy to say, or the connection hiccuped): where
+        // the selection is now tells whether the blocks moved.
+        await sleep(1000);
+        const now = await selectionNow();
+        if (now && target.to.every((v, i) => v === now.min[i])) failed = null;
+      }
+      if (failed) {
+        Blockbench.showMessageBox({ title: 'Pose Studio: structure', message: `Minecraft couldn't move it: ${failed.message || failed}\n\n${failed.game ? 'Nothing was changed.' : 'If the blocks did move, use Structure ▸ Get Selection.'}` });
+        return;
+      }
+      // the selection is now where the blocks are: fetched again, as Minecraft has it
+      await getStructureSelection(true);
+      // a step in Blockbench's own history, so Ctrl+Z / Ctrl+Y undo and redo the move in Minecraft
+      try {
+        Undo.initEdit({});
+        Undo.finishEdit(STRUCTURE_UNDO);
+      } catch (e) {
+        // the Structure menu's Undo Move still works
+      }
+      Blockbench.showQuickMessage('Moved. Ctrl+Z (or Structure ▸ Undo Move) puts it back', 4000);
+    } finally {
+      structureBusy = false;
     }
-    // the selection is now where the blocks are: fetched again, as Minecraft has it
-    await getStructureSelection(true);
-    // a step in Blockbench's own history, so Ctrl+Z / Ctrl+Y undo and redo the move in Minecraft
-    try {
-      Undo.initEdit({});
-      Undo.finishEdit(STRUCTURE_UNDO);
-    } catch (e) {
-      // the Structure menu's Undo Move still works
-    }
-    Blockbench.showQuickMessage('Moved. Ctrl+Z (or Structure ▸ Undo Move) puts it back', 4000);
   }
 
   // Undo / redo of structure moves: the last 10 moves, one at a time. `quiet`: asked by Ctrl+Z /
   // Ctrl+Y, where "nothing to undo" isn't worth a dialog.
-  const STRUCTURE_UNDO = 'Pose Studio: move structure in Minecraft';
-  let structureBusy = false;
   async function stepStructureMove(event, label, done, quiet) {
     if (structureBusy) return;
     if (!link.connected) {
@@ -3241,7 +3330,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     }
     structureBusy = true;
     try {
-      const items = await runGameQuery(event, {}, label);
+      const items = await runGameQuery(event, {}, label, MOVE_PATIENCE);
       const counts = (items.find((i) => i.startsWith('ok|')) || 'ok|0|0').split('|');
       await getStructureSelection(true);
       Blockbench.showQuickMessage(`${done} (${counts[1]} more to undo, ${counts[2]} to redo)`, 3000);
@@ -6763,7 +6852,7 @@ try {
       })(),
       selected: light ? light.name : cam ? cam.name : root ? root.name : '',
       kind: light ? 'light' : cam ? 'camera' : root ? (ENTITY_PREFIX.test(root.name) ? 'mob' : 'player') : '',
-      structure: !!structure,
+      structure: !!structureMesh(),
       shooting: !!shooting,
     };
   }
@@ -7281,23 +7370,25 @@ try {
     return pages;
   }
 
-  async function readPages(op, page, count = 1, attempts = 8) {
+  async function readPages(op, page, count = 1, attempts = 8, patience = COMMAND_TIMEOUT_MS) {
     for (let attempt = 0; attempt < attempts; attempt++) {
-      await link.command(`scriptevent pose:page ${JSON.stringify({ n: page, k: count })}`);
+      await link.command(`scriptevent pose:page ${JSON.stringify({ n: page, k: count })}`, patience);
       await sleep(50 + attempt * 100); // give the script a tick to write the pages
-      const body = await link.command('scoreboard players list').catch((e) => ({ statusMessage: String(e.message || e) }));
+      const body = await link.command('scoreboard players list', patience).catch((e) => ({ statusMessage: String(e.message || e) }));
       const pages = parseItems(JSON.stringify(body), op);
       const first = pages.get(page) || [];
       if (page === 0 ? first.some((i) => i.startsWith('M|')) : first.length) return pages;
     }
     throw new Error(`Minecraft didn't return page ${page}. Is the Pose Studio behavior pack active in this world?`);
   }
-  async function readPage(op, page) {
-    return (await readPages(op, page, 1)).get(page) || [];
+  async function readPage(op, page, patience = COMMAND_TIMEOUT_MS) {
+    return (await readPages(op, page, 1, 8, patience)).get(page) || [];
   }
 
-  // Runs `/scriptevent <eventId>` and returns every item the script publishes for it.
-  async function runGameQuery(eventId, payload, label) {
+  // Runs `/scriptevent <eventId>` and returns every item the script publishes for it. A failure
+  // the script itself reports is thrown with `game` set (so it's known that Minecraft said no,
+  // rather than not answering). patience: how long Minecraft is given to answer each command.
+  async function runGameQuery(eventId, payload, label, patience = COMMAND_TIMEOUT_MS) {
     // one transfer at a time: wait for the one in progress (e.g. the scene check after connecting)
     for (let waited = 0; transferRunning; waited += 100) {
       if (waited > 60000) throw new Error('Another Pose Studio transfer is still running.');
@@ -7306,18 +7397,19 @@ try {
     transferRunning = true;
     const op = Math.random().toString(36).slice(2, 8);
     try {
-      await link.command(`scriptevent ${eventId} ${JSON.stringify(Object.assign({}, payload, { op }))}`);
+      await link.command(`scriptevent ${eventId} ${JSON.stringify(Object.assign({}, payload, { op }))}`, patience);
       const started = Date.now();
       let first;
       let meta;
+      let asked = 0;
       for (;;) {
-        first = await readPage(op, 0);
+        first = await readPage(op, 0, patience);
         meta = first.find((i) => i.startsWith('M|')).split('|');
         if (meta[1] === 'ready') break;
-        if (meta[1] === 'error') throw new Error(meta.slice(2).join('|'));
+        if (meta[1] === 'error') throw Object.assign(new Error(meta.slice(2).join('|').replace(/^Error: /, '')), { game: true });
         Blockbench.showQuickMessage(`${label}… ${meta[2] || 0}%`, 700);
         if (Date.now() - started > 600000) throw new Error(`${label} timed out.`);
-        await sleep(500);
+        await sleep(++asked <= 4 ? 150 : 500); // (most things are done within a moment: asked again soon at first)
       }
       const pages = Number(meta[2]) || 1;
       const total = Number(meta[3]);
@@ -7332,7 +7424,7 @@ try {
         let got;
         try {
           // a big batch gets two tries; if Minecraft won't send that much, smaller batches follow
-          got = checked ? await readPages(op, n, count, count > 1 ? 2 : 8) : new Map([[n, await readPage(op, n)]]);
+          got = checked ? await readPages(op, n, count, count > 1 ? 2 : 8, patience) : new Map([[n, await readPage(op, n, patience)]]);
         } catch (e) {
           if (count <= 1) throw e;
           batch = Math.max(1, Math.floor(count / 2));
@@ -13775,7 +13867,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     return { id: idItem.slice(2), name: scene.world || '', anchor: point('A|'), player: point('P|'), locations, removed: scene.removed || [], protocol: version ? Number(version.slice(2)) : 0 };
   }
 
-  const EXPECTED_PACK_PROTOCOL = 39; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
+  const EXPECTED_PACK_PROTOCOL = 40; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
   let warnedOldPack = false;
 
   // Scene files in the scenes folders that belong to a world (their pose_world says so), as
@@ -14610,6 +14702,15 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.89.2",
+      "date": "2026-10-12",
+      "changes": [
+        "Fixed: Structure ▸ Apply Move not always working. A move now happens fully or not at all, and says why.",
+        "The structure is remembered after switching tabs or reopening Blockbench.",
+        "Update the Minecraft packs."
+      ]
+    },
     {
       "version": "0.89.1",
       "date": "2026-10-09",
@@ -15741,7 +15842,7 @@ ${PLUGIN_URL}`,
 
   // for the plugin's own tests only (they set this flag); nothing happens otherwise
   if (typeof globalThis !== 'undefined' && globalThis.__POSE_STUDIO_TEST) {
-    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS, sceneSpot, addLight, lightRoots, stopPath, cameraPathsOn, cameraPose, sampleCameraAnimation, playCameraAnimation, animateCamera, zoomedFov, setupClipChannel, removeClipChannel, clipKeys, clipPose, clipState, displayClips, addAnimationKey, placeClipKey, clipKeyAt, parseRecording, tidyRecording, recordingTicks, recordingAnimation, importRecording, placeRecording, keepRecording, setRecording, poseState, showRecordedWalk, displayClipBones, displayClipRoot, updateRecordingLines, entityAnimations, clipDelta, sampleAnimation, liveRotation, liveOrigin, poseMessage, entityMessage, setContentCache: (c) => (contentCache = c), liveWorldName, adoptCopies, adoptTextures, poseKind, copyName, deckConnect, autoStartDeck, swingStates, heldItemAnswers, sequenceRows, sequenceKeys, sequenceEnd, writeSequence, clipPass, worldPlaces, parseLocate, locatePlace, goToPlace, openPlaces, doLaundry, LOCATE_VERSIONS, sceneTakes, liveMobs, actKeys, writeActs, mobActionChoices, openMobActions, actNumber, propertyStates, rootYaw, isLiveMob, tryAct, endTries, actTicks, mobActionsComponent, actLook, ACTS_CSS, placeKey, moveKey, modelSpacePoints, cameraMarkMessage, hideCameraMarks, cameraMarksShown, setCameraMarks, sendTimelineForTake, placeRecording, sampleAnimation, sendAnimation, exportVideo, startRecorder, RECORDER_CS, RECORD_PS1, turnedEffect, turnVector, fxTurn, prepareTurned, turnedId, saddleParts, entityMessages, entityIds, flatParts, packFlat, partPlace, proxyModelFor, anyPartOn, prepareProxy, particleList, particleEntry, placeParticle, fxMessage, fxRoots };
+    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS, sceneSpot, addLight, lightRoots, stopPath, cameraPathsOn, cameraPose, sampleCameraAnimation, playCameraAnimation, animateCamera, zoomedFov, setupClipChannel, removeClipChannel, clipKeys, clipPose, clipState, displayClips, addAnimationKey, placeClipKey, clipKeyAt, parseRecording, tidyRecording, recordingTicks, recordingAnimation, importRecording, placeRecording, keepRecording, setRecording, poseState, showRecordedWalk, displayClipBones, displayClipRoot, updateRecordingLines, entityAnimations, clipDelta, sampleAnimation, liveRotation, liveOrigin, poseMessage, entityMessage, setContentCache: (c) => (contentCache = c), liveWorldName, adoptCopies, adoptTextures, poseKind, copyName, deckConnect, autoStartDeck, swingStates, heldItemAnswers, sequenceRows, sequenceKeys, sequenceEnd, writeSequence, clipPass, worldPlaces, parseLocate, locatePlace, goToPlace, openPlaces, doLaundry, LOCATE_VERSIONS, sceneTakes, liveMobs, actKeys, writeActs, mobActionChoices, openMobActions, actNumber, propertyStates, rootYaw, isLiveMob, tryAct, endTries, actTicks, mobActionsComponent, actLook, ACTS_CSS, placeKey, moveKey, modelSpacePoints, structureShift, structureMesh, selectionNow, sendStructureTarget, cameraMarkMessage, hideCameraMarks, cameraMarksShown, setCameraMarks, sendTimelineForTake, placeRecording, sampleAnimation, sendAnimation, exportVideo, startRecorder, RECORDER_CS, RECORD_PS1, turnedEffect, turnVector, fxTurn, prepareTurned, turnedId, saddleParts, entityMessages, entityIds, flatParts, packFlat, partPlace, proxyModelFor, anyPartOn, prepareProxy, particleList, particleEntry, placeParticle, fxMessage, fxRoots };
   }
 
   Plugin.register('pose_studio', {
@@ -15768,6 +15869,7 @@ ${PLUGIN_URL}`,
         new Property(Group, 'object', 'pose_fx'),
         new Property(Group, 'object', 'pose_recording'),
         new Property(Group, 'object', 'pose_live'),
+        ...(typeof Mesh !== 'undefined' ? [new Property(Mesh, 'object', 'pose_structure')] : []),
         new Property(Group, 'object', 'pose_mount'),
         new Property(Group, 'object', 'pose_driver'),
         new Property(Group, 'number', 'pose_skin_slot', { default: 0 }),

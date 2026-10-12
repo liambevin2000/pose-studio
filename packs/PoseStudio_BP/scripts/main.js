@@ -2073,7 +2073,7 @@ function debug(player) {
 // Every name looks like `PSD[op|page|item]`; page 0 always carries
 // `M|ready|<pages>|<items>|<items per page>` or `M|busy|<percent>`.
 // What this script understands; Blockbench warns when the world runs an older one.
-const PACK_PROTOCOL = 39;
+const PACK_PROTOCOL = 40;
 const IO_OBJECTIVE = "pose_io";
 const ITEMS_PER_PAGE = 30;
 const MAX_PAGES_PER_BATCH = 16;
@@ -2437,9 +2437,10 @@ function* scanJob(dimension, eye, anchor, { radius, rays, dist }) {
 //   /scriptevent pose:corner look1    corner 1 is the block you're looking at    (look2)
 //   /scriptevent pose:corner clear    no selection
 // `pose:selinfo {op}` reports the selection to Blockbench (its box, and the blocks on its outside,
-// for the preview); `pose:target {"min":[..],"size":[..]}` outlines where it would land;
-// `pose:move {"to":[x,y,z],"rot":0|90|180|270,op}` moves it (to: the new lowest corner, in blocks
-// from the anchor's block; rot: clockwise seen from above); `pose:moveundo {op}` puts the last move
+// for the preview; with "head":1 only its box); `pose:target {"min":[..],"size":[..]}` outlines where it would land;
+// `pose:move {"to":[x,y,z],"rot":0|90|180|270,"from":[x,y,z],"size":[x,y,z],op}` moves it (to: the new
+// lowest corner, in blocks from the anchor's block; rot: clockwise seen from above; from and size:
+// the selection as Blockbench has it, refused when that isn't the selection any more); `pose:moveundo {op}` puts the last move
 // back (the last 10 can be, one by one) and `pose:moveredo {op}` does an undone one again. A move saves both what it lifts and what it lands on (in the world, so undo still works
 // after reopening it), clears the old place and puts the blocks down in the new one, contents
 // (chests, signs) included. Mobs aren't moved.
@@ -2558,6 +2559,12 @@ function reportSelection(player, data) {
   const anchor = requireAnchor(player);
   const s = requireSelection();
   if (s.dim !== anchor.dim) throw new Error("The selection is in another dimension than the scene");
+  if (data.head) {
+    // (only where it is: Blockbench checking whether a move went through)
+    const base = { x: Math.floor(anchor.x), y: Math.floor(anchor.y), z: Math.floor(anchor.z) };
+    finishResult([`S|${s.dim}|${s.min.x - base.x}|${s.min.y - base.y}|${s.min.z - base.z}|${s.size.x}|${s.size.y}|${s.size.z}|-2`]);
+    return;
+  }
   system.runJob(selectionJob(world.getDimension(s.dim), anchor, s));
 }
 
@@ -2591,13 +2598,16 @@ function boxPieces(min, size, span, tall) {
 
 const cornerOf = (p) => ({ x: p.at.x + p.size.x - 1, y: p.at.y + p.size.y - 1, z: p.at.z + p.size.z - 1 });
 
-function saveBox(dim, min, size, prefix) {
+// Saves a box as structures, a piece at a time (a job: see moveJob). Returns [{ id, off, size }].
+function* saveBoxJob(dim, min, size, prefix, step) {
   const saved = [];
   try {
     for (const piece of boxPieces(min, size, STRUCTURE_XZ, 384)) {
       const id = `${prefix}_${saved.length}`;
       world.structureManager.createFromWorld(id, dim, piece.at, cornerOf(piece), { includeBlocks: true, includeEntities: false, saveMode: StructureSaveMode.World });
       saved.push({ id, off: piece.off, size: piece.size });
+      step();
+      yield;
     }
   } catch (e) {
     forgetStructures(saved);
@@ -2616,8 +2626,13 @@ function forgetStructures(list) {
   }
 }
 
-function clearArea(dim, min, size) {
-  for (const piece of boxPieces(min, size, 32, 32)) dim.fillBlocks(new BlockVolume(piece.at, cornerOf(piece)), "minecraft:air");
+// Fills a box (with `filter`: only that kind of block in it), in pieces a fill can take.
+function* fillJob(dim, min, size, type, filter, step) {
+  for (const piece of boxPieces(min, size, 32, 32)) {
+    dim.fillBlocks(new BlockVolume(piece.at, cornerOf(piece)), type, filter ? { blockFilter: { includeTypes: [filter] } } : undefined);
+    step();
+    yield;
+  }
 }
 
 // Where a piece of a box (whole size `size`) lands when the box is turned clockwise, seen from
@@ -2657,39 +2672,90 @@ function unloadAreas(dim) {
   }
 }
 
-// Runs `work` now, and again every quarter second for up to 15 seconds while chunks aren't loaded.
-function whenLoaded(dim, boxes, work, unloadedMessage) {
+// Throws (as an unloaded chunk does) unless every chunk a box is in is loaded.
+function requireLoaded(dim, min, size) {
+  const last = { x: min.x + size.x - 1, z: min.z + size.z - 1 };
+  for (let cx = Math.floor(min.x / 16); cx <= Math.floor(last.x / 16); cx++) {
+    for (let cz = Math.floor(min.z / 16); cz <= Math.floor(last.z / 16); cz++) {
+      const block = dim.getBlock({ x: Math.max(min.x, Math.min(last.x, cx * 16)), y: min.y, z: Math.max(min.z, Math.min(last.z, cz * 16)) });
+      if (!block) throw new Error("UnloadedChunk: part of the box isn't loaded");
+    }
+  }
+}
+
+// Block drops are off while a move is made (a torch losing its wall drops nothing), over as many
+// ticks as it takes. It's noted in the world, so a world closed half-way has them back on when
+// it's opened again (see the start of the script).
+const DROPS_PROPERTY = "pose:dropsoff";
+function dropsOff() {
+  try {
+    if (world.gameRules.doTileDrops === false) return false; // (they're off anyway: left as they are)
+    world.gameRules.doTileDrops = false;
+    world.setDynamicProperty(DROPS_PROPERTY, true);
+    return true;
+  } catch {
+    return false; // older versions
+  }
+}
+function dropsOn(were) {
+  if (!were) return;
+  try {
+    world.gameRules.doTileDrops = true;
+    world.setDynamicProperty(DROPS_PROPERTY, undefined);
+  } catch {
+    // as above
+  }
+}
+system.runTimeout(() => {
+  try {
+    if (world.getDynamicProperty(DROPS_PROPERTY)) dropsOn(true);
+  } catch {
+    // nothing was left off
+  }
+}, 20);
+
+// Runs a job over boxes of the world once they're loaded: checked now, and again every quarter
+// second for up to 15 seconds while chunks aren't. `job(count)`: a generator that changes the
+// world (count: called for every step done, for the progress Blockbench is shown) and returns
+// the result's items. If it throws, the result is the failure.
+function whenLoaded(dim, boxes, steps, job, unloadedMessage) {
   loadAreas(dim, boxes);
   let tries = 0;
-  const attempt = () => {
+  const run = function* () {
+    let done = 0;
     try {
-      finishResult(work());
+      const items = yield* job(() => {
+        result.progress = Math.min(0.99, ++done / Math.max(1, steps));
+      });
+      finishResult(items);
     } catch (e) {
-      if (isUnloaded(e) && ++tries < 60) return false;
       failResult(isUnloaded(e) ? unloadedMessage : e);
     }
     unloadAreas(dim);
+  };
+  const attempt = () => {
+    try {
+      for (const box of boxes) requireLoaded(dim, box.min, box.size);
+    } catch (e) {
+      if (isUnloaded(e) && ++tries < 60) return false;
+      failResult(isUnloaded(e) ? unloadedMessage : e);
+      unloadAreas(dim);
+      return true;
+    }
+    // (a small one is done at once, in this tick; a big one carries on over the next ticks)
+    const going = run();
+    const started = Date.now();
+    for (;;) {
+      if (going.next().done) return true;
+      if (Date.now() - started > 25) break;
+    }
+    system.runJob(going);
     return true;
   };
   if (attempt()) return;
-  const run = system.runInterval(() => {
-    if (attempt()) system.clearRun(run);
+  const timer = system.runInterval(() => {
+    if (attempt()) system.clearRun(timer);
   }, 5);
-}
-
-function withoutDrops(work) {
-  let drops;
-  try {
-    drops = world.gameRules.doTileDrops;
-    world.gameRules.doTileDrops = false; // a torch losing its wall drops nothing
-  } catch {
-    // older versions
-  }
-  try {
-    return work();
-  } finally {
-    if (drops !== undefined) world.gameRules.doTileDrops = drops;
-  }
 }
 
 // The moves that can be undone (the newest last) and the undone ones that can be redone. Each move
@@ -2718,29 +2784,62 @@ function selectBox(dim, min, size) {
   targetBox = null;
 }
 
-// Moves the box at `from` (min, size) so its lowest corner is at `to`, turned `rot`. Runs inside
-// whenLoaded: throws if a chunk isn't loaded, before anything is changed.
-// Fills one kind of block in a box with another (in pieces a fill can take).
-function swapBlocks(dim, min, size, from, to) {
-  for (const piece of boxPieces(min, size, 32, 32)) dim.fillBlocks(new BlockVolume(piece.at, cornerOf(piece)), to, { blockFilter: { includeTypes: [from] } });
-}
+const pieceCount = (size, span, tall) => Math.ceil(size.x / span) * Math.ceil(size.z / span) * Math.ceil(size.y / tall);
+// how many steps a move of a box takes (for its progress): see moveJob
+const moveSteps = (size, skipAir) => pieceCount(size, STRUCTURE_XZ, 384) * (skipAir ? 4 : 3) + pieceCount(size, 32, 32) * (skipAir ? 2 : 1);
 
+// Moves the box at `from` (min, size) so its lowest corner is at `to`, turned `rot`: a job, a piece
+// at a time, so a big one is spread over ticks (the game doesn't stand still, and Blockbench is told
+// how far it is). Both places are saved before anything is changed; if a step fails after that,
+// what was changed is put back from them and nothing is kept, so a move that fails changes nothing.
 // skipAir: the air in the selection isn't moved, so where the selection is empty, what's at the
 // landing place stays (the air is saved as structure voids, which a structure leaves alone).
-function doMove(dimId, from, to, rot, skipAir = false) {
+function* moveJob(dimId, from, to, rot, skipAir, step) {
   const dim = world.getDimension(dimId);
   const size = from.size;
   const turned = rot === 90 || rot === 270 ? { x: size.z, y: size.y, z: size.x } : size;
   const stamp = Date.now().toString(36);
-  // saved first, both of them; nothing is changed if either can't be
-  const lifted = saveBox(dim, from.min, size, `pose:move_${stamp}_a`);
-  let covered;
+  const put = (pieces, at) => {
+    for (const piece of pieces) world.structureManager.place(piece.id, dim, { x: at.x + piece.off.x, y: at.y + piece.off.y, z: at.z + piece.off.z }, { includeEntities: false });
+  };
+  let lifted = null;
+  let covered = null;
+  let carried = null;
+  let touched = 0; // 1: the old place has been changed, 2: the new one too
+  const drops = dropsOff();
   try {
-    covered = saveBox(dim, to, turned, `pose:move_${stamp}_b`);
+    lifted = yield* saveBoxJob(dim, from.min, size, `pose:move_${stamp}_a`, step);
+    covered = yield* saveBoxJob(dim, to, turned, `pose:move_${stamp}_b`, step);
+    // what is put down: the blocks as lifted, or a copy of them with voids for the air
+    if (skipAir) {
+      touched = 1;
+      yield* fillJob(dim, from.min, size, "minecraft:structure_void", "minecraft:air", step);
+      carried = yield* saveBoxJob(dim, from.min, size, `pose:move_${stamp}_c`, step);
+    }
+    touched = 1;
+    yield* fillJob(dim, from.min, size, "minecraft:air", null, step);
+    touched = 2;
+    for (const piece of carried || lifted) {
+      const off = turnedOffset(piece.off, piece.size, size, rot);
+      world.structureManager.place(piece.id, dim, { x: to.x + off.x, y: to.y + off.y, z: to.z + off.z }, { includeEntities: false, rotation: ROTATIONS[rot] });
+      step();
+      yield;
+    }
   } catch (e) {
-    forgetStructures(lifted);
+    // as it was: what it landed on first, then the blocks back where they were
+    try {
+      if (touched >= 2) put(covered, to);
+      if (touched >= 1) put(lifted, from.min);
+    } catch (again) {
+      console.warn(`[Pose Studio] a move that failed couldn't be put back: ${again}`);
+    }
+    forgetStructures([].concat(lifted || [], covered || [], carried || []));
     throw e;
+  } finally {
+    dropsOn(drops);
   }
+  forgetStructures(carried);
+  // kept, so it can be undone
   const history = readList(LAST_MOVE_PROPERTY);
   history.push({ dim: dimId, rot, air: skipAir ? 0 : 1, from: { min: from.min, size, saved: lifted }, to: { min: to, size: turned, saved: covered } });
   while (history.length > MAX_UNDO) {
@@ -2748,25 +2847,6 @@ function doMove(dimId, from, to, rot, skipAir = false) {
     forgetStructures([].concat(old.from.saved, old.to.saved));
   }
   writeList(LAST_MOVE_PROPERTY, history);
-  withoutDrops(() => {
-    // what is put down: the blocks as lifted, or a copy of them with voids for the air
-    let carried = lifted;
-    if (skipAir) {
-      swapBlocks(dim, from.min, size, "minecraft:air", "minecraft:structure_void");
-      try {
-        carried = saveBox(dim, from.min, size, `pose:move_${stamp}_c`);
-      } catch (e) {
-        swapBlocks(dim, from.min, size, "minecraft:structure_void", "minecraft:air");
-        throw e;
-      }
-    }
-    clearArea(dim, from.min, size);
-    for (const piece of carried) {
-      const off = turnedOffset(piece.off, piece.size, size, rot);
-      world.structureManager.place(piece.id, dim, { x: to.x + off.x, y: to.y + off.y, z: to.z + off.z }, { includeEntities: false, rotation: ROTATIONS[rot] });
-    }
-    if (skipAir) forgetStructures(carried);
-  });
   // the selection is where the blocks are now
   selectBox(dimId, to, turned);
 }
@@ -2780,13 +2860,19 @@ function moveSelection(player, data) {
   const dim = world.getDimension(s.dim);
   const size = s.size;
   const turned = rot === 90 || rot === 270 ? { x: size.z, y: size.y, z: size.x } : size;
-  const to = { x: Math.floor(anchor.x) + Math.round(Number(data.to[0])), y: Math.floor(anchor.y) + Math.round(Number(data.to[1])), z: Math.floor(anchor.z) + Math.round(Number(data.to[2])) };
+  const base = { x: Math.floor(anchor.x), y: Math.floor(anchor.y), z: Math.floor(anchor.z) };
+  // (Blockbench says which selection it's showing: another one isn't moved by mistake)
+  if (finite(data.from) && finite(data.size)) {
+    const same = base.x + Number(data.from[0]) === s.min.x && base.y + Number(data.from[1]) === s.min.y && base.z + Number(data.from[2]) === s.min.z && Number(data.size[0]) === size.x && Number(data.size[1]) === size.y && Number(data.size[2]) === size.z;
+    if (!same) throw new Error("The selection in Minecraft isn't the one Blockbench is showing. Use Get Selection again");
+  }
+  const to = { x: base.x + Math.round(Number(data.to[0])), y: base.y + Math.round(Number(data.to[1])), z: base.z + Math.round(Number(data.to[2])) };
   const range = dim.heightRange;
   if (range && (to.y < range.min || to.y + size.y > range.max)) throw new Error("That's above or below the world");
   if (rot === 0 && to.x === s.min.x && to.y === s.min.y && to.z === s.min.z) throw new Error("It's already there: move it in Blockbench first");
-
-  whenLoaded(dim, [{ min: s.min, size }, { min: to, size: turned }], () => {
-    doMove(s.dim, { min: s.min, size }, to, rot, !!data.skip);
+  const skipAir = !!data.skip;
+  whenLoaded(dim, [{ min: s.min, size }, { min: to, size: turned }], moveSteps(size, skipAir), function* (step) {
+    yield* moveJob(s.dim, { min: s.min, size }, to, rot, skipAir, step);
     writeList(REDO_PROPERTY, []); // a new move: nothing to redo any more
     return [`ok|${readList(LAST_MOVE_PROPERTY).length}|0`];
   }, "The place it's moving from or to wouldn't load. Stand closer and try again.");
@@ -2798,12 +2884,20 @@ function undoMove(player, data) {
   const last = history[history.length - 1];
   if (!last) return failResult("There's no move to undo");
   const dim = world.getDimension(last.dim);
-  whenLoaded(dim, [{ min: last.from.min, size: last.from.size }, { min: last.to.min, size: last.to.size }], () => {
-    withoutDrops(() => {
+  whenLoaded(dim, [{ min: last.from.min, size: last.from.size }, { min: last.to.min, size: last.to.size }], last.to.saved.length + last.from.saved.length, function* (step) {
+    const drops = dropsOff();
+    try {
       // what it landed on comes back, then the blocks go back where they were
-      for (const piece of last.to.saved) world.structureManager.place(piece.id, dim, { x: last.to.min.x + piece.off.x, y: last.to.min.y + piece.off.y, z: last.to.min.z + piece.off.z }, { includeEntities: false });
-      for (const piece of last.from.saved) world.structureManager.place(piece.id, dim, { x: last.from.min.x + piece.off.x, y: last.from.min.y + piece.off.y, z: last.from.min.z + piece.off.z }, { includeEntities: false });
-    });
+      for (const [saved, at] of [[last.to.saved, last.to.min], [last.from.saved, last.from.min]]) {
+        for (const piece of saved) {
+          world.structureManager.place(piece.id, dim, { x: at.x + piece.off.x, y: at.y + piece.off.y, z: at.z + piece.off.z }, { includeEntities: false });
+          step();
+          yield;
+        }
+      }
+    } finally {
+      dropsOn(drops);
+    }
     selectBox(last.dim, last.from.min, last.from.size);
     history.pop();
     writeList(LAST_MOVE_PROPERTY, history);
@@ -2823,8 +2917,9 @@ function redoMove(player, data) {
   if (!next) return failResult("There's no move to redo");
   const dim = world.getDimension(next.dim);
   const turned = next.rot === 90 || next.rot === 270 ? { x: next.from.size.z, y: next.from.size.y, z: next.from.size.x } : next.from.size;
-  whenLoaded(dim, [{ min: next.from.min, size: next.from.size }, { min: next.to, size: turned }], () => {
-    doMove(next.dim, next.from, next.to, next.rot, next.air === 0);
+  const skipAir = next.air === 0;
+  whenLoaded(dim, [{ min: next.from.min, size: next.from.size }, { min: next.to, size: turned }], moveSteps(next.from.size, skipAir), function* (step) {
+    yield* moveJob(next.dim, next.from, next.to, next.rot, skipAir, step);
     redo.pop();
     writeList(REDO_PROPERTY, redo);
     return [`ok|${readList(LAST_MOVE_PROPERTY).length}|${redo.length}`];

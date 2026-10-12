@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.89.2 (2026-10-12)
+
+- Fixed: Structure ▸ Apply Move not always working. A move now happens fully or not at all, and says why.
+- The structure is remembered after switching tabs or reopening Blockbench.
+- Update the Minecraft packs.
+
 ## 0.89.1 (2026-10-09)
 
 - Fixed: Drop to Ground did nothing in the Animate tab. It now drops from where the timeline has the player or mob.

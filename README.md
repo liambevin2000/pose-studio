@@ -277,9 +277,11 @@ Select a box of blocks in Minecraft, move it in Blockbench, and Minecraft moves 
 
    Green particles outline the selection.
 2. **Structure ▸ Get Selection**: it appears in Blockbench as one piece called `structure`, where it is in the world.
-3. **Move it** with the move tool. Turn it in quarter turns around the vertical axis (Y rotation 0, 90, 180 or 270). Blue particles in Minecraft outline where it would land.
+3. **Move it** with the move tool, by whole blocks (16 on Blockbench's grid is one block; less than half a block is no move). Turn it in quarter turns around the vertical axis (Y rotation 0, 90, 180 or 270). Blue particles in Minecraft outline where it would land. Move it as a whole: if Blockbench's selection mode is on faces or corners, select all of them (dragging only some changes its shape, which blocks cannot follow, and Apply Move says so).
 4. **Structure ▸ Apply Move**: the blocks are lifted out of the old place and put down in the new one, chests and signs with their contents. Whatever was there is replaced.
 5. **Structure ▸ Undo Move** (or Ctrl+Z) puts both places back; **Redo Move** (Ctrl+Y) does it again. The last 10 moves can be undone, and it still works after reopening the world.
+
+A move is all or nothing. Minecraft waits (up to 15 seconds) for both places to be loaded; if it cannot do the whole move, it puts back what it had changed and Blockbench says why. It only moves the selection Blockbench is showing: if the corners were changed in the game since, use Get Selection again. A big move is spread over a few moments, with its progress shown. The piece is remembered with the project, so it is still there after looking at another tab or reopening Blockbench.
 
 Mobs aren't moved. Up to 600,000 blocks at a time; above 40,000 visible blocks the piece is drawn as a plain box. Positions snap to whole blocks. After a move, Import World again if you use the terrain mesh.
 
