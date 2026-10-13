@@ -21,7 +21,23 @@
             "Texture.skin13",
             "Texture.skin14",
             "Texture.skin15",
-            "Texture.skin16"
+            "Texture.skin16",
+            "Texture.skin17",
+            "Texture.skin18",
+            "Texture.skin19",
+            "Texture.skin20",
+            "Texture.skin21",
+            "Texture.skin22",
+            "Texture.skin23",
+            "Texture.skin24",
+            "Texture.skin25",
+            "Texture.skin26",
+            "Texture.skin27",
+            "Texture.skin28",
+            "Texture.skin29",
+            "Texture.skin30",
+            "Texture.skin31",
+            "Texture.skin32"
           ]
         }
       },
@@ -32,7 +48,7 @@
         }
       ],
       "textures": [
-        "math.mod(q.property('pose:skin'), 128) >= 64 ? Texture.clear : Array.skins[math.mod(q.property('pose:skin'), 32)]"
+        "math.mod(q.property('pose:skin'), 128) >= 64 ? Texture.clear : Array.skins[math.mod(q.property('pose:skin'), 64)]"
       ],
       "part_visibility": [
         {

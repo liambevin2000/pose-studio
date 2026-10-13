@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.93.0 (2026-10-13)
+
+- The skin library now holds 32 skins instead of 16.
+- Update the Minecraft packs.
+
 ## 0.92.0 (2026-10-13)
 
 - New: copy structures. Duplicate or copy-paste the structure piece in Blockbench (or Structure ▸ Duplicate); Apply puts a copy of the blocks where each one stands.

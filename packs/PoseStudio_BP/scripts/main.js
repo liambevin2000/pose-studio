@@ -6,6 +6,7 @@ import { world, system, BlockVolume, BlockPermutation, StructureSaveMode, Struct
 
 const TYPE = "pose:mannequin";
 const TAG_PREFIX = "pose_id.";
+const SKIN_SLOTS = 32; // the skins of the library: textures/entity/pose_studio/skin_1.png to skin_32.png
 // The mannequin's pose, packed two 12-bit values per int property: turns (x, y, z per bone, in
 // 360/4096 steps) in pose:a0..14 and moves (x, y, z per bone, in 1/64 pixel steps) in pose:o0..13.
 const ANGLE_BONES = ["pose_root","waist","body","head","rightArm","leftArm","rightLeg","leftLeg","rightItem","leftItem"];
@@ -400,9 +401,9 @@ function setPose(player, data, glide = null) {
   if (!glide || !glideTo(glide, entity, spot, anchor, { x: spot.x - loc.x, y: spot.y - loc.y, z: spot.z - loc.z })) entity.teleport(spot, { rotation: { x: 0, y: 0 } });
 
   setPoseCode(entity, data.q);
-  // skin slot (0 = default Steve, 1-16 = textures/entity/pose_studio/skin_N.png) and arm type
+  // skin slot (0 = default Steve, 1-32 = textures/entity/pose_studio/skin_N.png) and arm type
   // (64 and up: not drawn, see applyHolder)
-  setShared(entity, Math.max(0, Math.min(16, Math.round(Number(data.s) || 0))));
+  setShared(entity, Math.max(0, Math.min(SKIN_SLOTS, Math.round(Number(data.s) || 0))));
   entity.setProperty("pose:slim", !!data.sl);
   if (data.e) wantedEquipment.set(data.id, data.e);
   const equipment = wantedEquipment.get(data.id);
@@ -2364,7 +2365,7 @@ function debug(player) {
 // Every name looks like `PSD[op|page|item]`; page 0 always carries
 // `M|ready|<pages>|<items>|<items per page>` or `M|busy|<percent>`.
 // What this script understands; Blockbench warns when the world runs an older one.
-const PACK_PROTOCOL = 43;
+const PACK_PROTOCOL = 44;
 const IO_OBJECTIVE = "pose_io";
 const ITEMS_PER_PAGE = 30;
 const MAX_PAGES_PER_BATCH = 16;

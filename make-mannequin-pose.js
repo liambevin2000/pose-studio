@@ -5,6 +5,9 @@
 //   packs/PoseStudio_BP/entities/mannequin.json (its properties: pose:far, and pose:skin that also says "not drawn")
 //   packs/PoseStudio_RP/models/entity/mannequin.geo.json (how far from the entity its model may be drawn)
 //   packs/PoseStudio_RP/render_controllers/mannequin.render_controllers.json (the skin, or nothing)
+// and the skins it can wear, one for every slot of the skin library (SKIN_SLOTS):
+//   the textures of mannequin.entity.json and of the render controller, and an empty
+//   textures/entity/pose_studio/skin_N.png for every slot that has none yet
 //
 // The pose arrives in the pose:a0..14 (turns) and pose:o0..13 (moves) properties, two 12-bit
 // numbers each, at most 20 times a second. Shown as they arrive, limbs would jump 20 times a
@@ -21,6 +24,7 @@ const path = require('path');
 const ANGLE_BONES = ['pose_root', 'waist', 'body', 'head', 'rightArm', 'leftArm', 'rightLeg', 'leftLeg', 'rightItem', 'leftItem'];
 const POS_BONES = ['waist', 'body', 'head', 'rightArm', 'leftArm', 'rightLeg', 'leftLeg', 'rightItem', 'leftItem'];
 const TICK = 0.05; // seconds between two updates when an animation plays
+const SKIN_SLOTS = 32; // the skins of the library (the plugin's SKIN_SLOTS, and the most the script lets pose:skin be)
 
 // the i-th 12-bit number of a set of properties
 const part = (prefix, i) => {
@@ -66,6 +70,9 @@ const preAnimation = []
 // An entity can have 32 properties and the player's were all taken: "not drawn" (what a mob copy
 // holds is held by a player that isn't drawn) is now a skin number of 64 or more, which freed one.
 //
+// So pose:skin is: the skin number (0 the game's own, 1 to SKIN_SLOTS the library's; under 64),
+// plus 64 when it isn't drawn, plus, in 128s, the next thing.
+//
 // One that's further than the game draws at all is drawn nearer and smaller (see the script): how
 // much smaller, in 4096ths (0: full size), is kept above the skin number, in 128s. The root of the
 // model is that much smaller, about where the model stands.
@@ -81,7 +88,7 @@ const FAR = {
   ],
   scale: `${small} > 0 ? ${small} / 4096 : 1`,
   // the skin (or nothing), from the part of pose:skin that's the skin number
-  texture: "math.mod(q.property('pose:skin'), 128) >= 64 ? Texture.clear : Array.skins[math.mod(q.property('pose:skin'), 32)]",
+  texture: "math.mod(q.property('pose:skin'), 128) >= 64 ? Texture.clear : Array.skins[math.mod(q.property('pose:skin'), 64)]",
   // the model is drawn up to 1008 blocks from the entity: this much to its side and height
   bounds: 2048,
 };
@@ -105,6 +112,12 @@ function write() {
   const others = (scripts.pre_animation || []).filter((line) => !/v\.(pose_|[tlfs][ao]\d)/.test(line));
   scripts.initialize = initialize;
   scripts.pre_animation = others.concat(preAnimation);
+  // the skins it can wear: the game's own, then one for every slot of the library
+  const description = entity['minecraft:client_entity'].description;
+  const textures = { default: description.textures.default };
+  for (let slot = 1; slot <= SKIN_SLOTS; slot++) textures[`skin${slot}`] = `textures/entity/pose_studio/skin_${slot}`;
+  for (const [key, value] of Object.entries(description.textures)) if (!/^skin\d+$/.test(key) && key !== 'default') textures[key] = value;
+  description.textures = textures;
   fs.writeFileSync(entityFile, JSON.stringify(entity, null, 2) + '\n');
   // its properties: how far from its place it's kept; and whether it's drawn, as part of the skin number
   const behaviorFile = path.join(__dirname, 'packs', 'PoseStudio_BP', 'entities', 'mannequin.json');
@@ -119,8 +132,16 @@ function write() {
   const controllers = JSON.parse(fs.readFileSync(controllerFile, 'utf8'));
   for (const controller of Object.values(controllers.render_controllers)) {
     controller.textures = controller.textures.map((line) => (line.includes('Array.skins') ? FAR.texture : line));
+    controller.arrays.textures['Array.skins'] = ['Texture.default'].concat(Array.from({ length: SKIN_SLOTS }, (unused, i) => `Texture.skin${i + 1}`));
   }
   fs.writeFileSync(controllerFile, JSON.stringify(controllers, null, 2) + '\n');
+  // an empty skin for every slot that has none yet (the library puts the real ones in the installed pack)
+  const skinFolder = path.join(rp, 'textures', 'entity', 'pose_studio');
+  const empty = fs.readFileSync(path.join(skinFolder, 'skin_1.png'));
+  for (let slot = 1; slot <= SKIN_SLOTS; slot++) {
+    const file = path.join(skinFolder, `skin_${slot}.png`);
+    if (!fs.existsSync(file)) fs.writeFileSync(file, empty);
+  }
   // …and its model allowed that far from the entity (or it's left out as soon as the entity is out of view)
   const geometryFile = path.join(rp, 'models', 'entity', 'mannequin.geo.json');
   const geometry = JSON.parse(fs.readFileSync(geometryFile, 'utf8'));
@@ -129,5 +150,5 @@ function write() {
   console.log(`${values.length} numbers -> ${path.relative(__dirname, animationFile)}, ${path.relative(__dirname, entityFile)} (${preAnimation.length} script lines)`);
 }
 
-module.exports = { initialize, preAnimation, bones, values, TICK, FAR };
+module.exports = { initialize, preAnimation, bones, values, TICK, FAR, SKIN_SLOTS };
 if (require.main === module) write();

@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.92.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.93.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -7939,11 +7939,11 @@ try {
   }
 
   // ---- Skins ---------------------------------------------------------------------------------
-  // Minecraft only loads textures when a world opens, so skins go into 16 numbered slots in the
+  // Minecraft only loads textures when a world opens, so skins go into 32 numbered slots in the
   // development resource pack (textures/entity/pose_studio/skin_N.png). Choosing which slot a
   // mannequin uses (and slim vs classic arms) is live; a new or changed skin image needs the
   // world to be reopened once.
-  const SKIN_SLOTS = 16;
+  const SKIN_SLOTS = 32; // (the pack has a texture for each: see make-mannequin-pose.js)
 
   // Standard 64x64 player skin layout, in Bedrock geometry coordinates (origin, size, uv).
   // Every part has a base cube and an outer-layer cube.
@@ -8017,7 +8017,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   }
 
   // ---- Skin library --------------------------------------------------------------------------
-  // The 16 slot images live in the development resource pack together with library.json
+  // The slot images live in the development resource pack together with library.json
   // (names, arm type, and which slots changed since Minecraft last loaded them). Once Minecraft
   // has loaded a slot, putting that skin on any mannequin is instant.
   const PLACEHOLDER_PNG_BASE64 =
@@ -8062,12 +8062,13 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     return canvas.toDataURL('image/png');
   }
 
-  // All 16 slots with what's in them, for the library dialog.
+  // All the slots with what's in them, for the library dialog.
   async function readLibrary() {
     const fs = libraryFs();
     const manifest = readManifest();
-    const slots = [];
-    for (let slot = 1; slot <= SKIN_SLOTS; slot++) {
+    // (all the slots at once: it's their pictures that take the time)
+    return Promise.all(Array.from({ length: SKIN_SLOTS }, async (unused, i) => {
+      const slot = i + 1;
       const info = manifest.slots[slot] || {};
       const entry = { slot, name: info.name || '', slim: !!info.slim, dirty: !!info.dirty, filled: false, dataUrl: '', face: '' };
       try {
@@ -8082,9 +8083,8 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
       } catch (e) {
         // missing file = empty slot
       }
-      slots.push(entry);
-    }
-    return slots;
+      return entry;
+    }));
   }
 
   function pickSkinFile() {
@@ -8371,7 +8371,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
             <p v-if="anyDirty" style="margin: 0 0 10px; color: var(--color-warning, #e8a33d)">
               Skins marked "needs reload" were added or changed since Minecraft last loaded them. Press Reload Minecraft Packs once when you're done.
             </p>
-            <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px;">
+            <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; max-height: 440px; overflow-y: auto; padding-right: 4px;">
               <div v-for="entry in slots" :key="entry.slot"
                    style="border: 1px solid var(--color-border); border-radius: 6px; padding: 8px; display: flex; gap: 8px; align-items: center; cursor: pointer; min-height: 64px;"
                    :title="entry.filled ? 'Put this skin on the selected mannequin' : 'Add a skin to this slot'"
@@ -14021,7 +14021,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     return { id: idItem.slice(2), name: scene.world || '', anchor: point('A|'), player: point('P|'), locations, removed: scene.removed || [], protocol: version ? Number(version.slice(2)) : 0 };
   }
 
-  const EXPECTED_PACK_PROTOCOL = 43; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
+  const EXPECTED_PACK_PROTOCOL = 44; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
   let warnedOldPack = false;
 
   // Scene files in the scenes folders that belong to a world (their pose_world says so), as
@@ -14856,6 +14856,14 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.93.0",
+      "date": "2026-10-13",
+      "changes": [
+        "The skin library now holds 32 skins instead of 16.",
+        "Update the Minecraft packs."
+      ]
+    },
     {
       "version": "0.92.0",
       "date": "2026-10-13",
