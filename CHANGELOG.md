@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.91.0 (2026-10-13)
+
+- Far players and mobs are now drawn at any distance. Past Minecraft's render distance they are drawn nearer and smaller, so they look the same from the camera.
+- New setting: Draw Smaller Beyond (blocks).
+- Update the Minecraft packs.
+
 ## 0.90.0 (2026-10-12)
 
 - New: players and mobs far away are still drawn in Minecraft (up to 1000 blocks), instead of vanishing past about 60.

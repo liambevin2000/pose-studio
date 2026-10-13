@@ -9,6 +9,11 @@
             "q.property('pose:far') > 0 ? (math.mod(q.property('pose:far'), 128) - 64) * 256 : 0",
             "q.property('pose:far') > 0 ? (math.mod(math.floor(q.property('pose:far') / 128), 128) - 64) * 256 : 0",
             "q.property('pose:far') > 0 ? (64 - math.floor(q.property('pose:far') / 16384)) * 256 : 0"
+          ],
+          "scale": [
+            "math.floor(q.property('pose:skin') / 128) > 0 ? math.floor(q.property('pose:skin') / 128) / 4096 : 1",
+            "math.floor(q.property('pose:skin') / 128) > 0 ? math.floor(q.property('pose:skin') / 128) / 4096 : 1",
+            "math.floor(q.property('pose:skin') / 128) > 0 ? math.floor(q.property('pose:skin') / 128) / 4096 : 1"
           ]
         },
         "pose_root": {

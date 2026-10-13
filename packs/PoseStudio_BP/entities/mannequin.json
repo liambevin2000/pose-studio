@@ -271,7 +271,7 @@
           "type": "int",
           "range": [
             0,
-            127
+            524287
           ],
           "default": 0,
           "client_sync": true

@@ -233,15 +233,25 @@ Every camera of the scene stands in the Minecraft world as a little camera: wher
 
 ## Players and mobs far away
 
-Minecraft only draws entities that are near you (about four chunks), so a mob standing on a far hill is not there in the shot. Pose Studio draws its own players and mob copies anyway:
+Two things stop Minecraft drawing a mob that stands on a far hill: it only draws entities that are near you (about four chunks), and it draws nothing at all past its render distance. Pose Studio draws its own players and mob copies anyway, at any distance:
 
-- One that is more than 56 blocks from you is kept near you instead (16 blocks or so above your head, where it is not in the way), and its model is shifted out to where it belongs, up to 1000 blocks away. It is the trick of an entity whose model is modelled far from its origin, done for you and kept up to date as you and it move.
+- **Far from you** (more than 56 blocks): it is kept near you instead (16 blocks or so above your head, where it is not in the way), and its model is shifted out to where it belongs. It is the trick of an entity whose model is modelled far from its origin, done for you and kept up to date as you and it move.
+- **Past the render distance** (from the game camera, or your own eyes when the camera is not Pose Studio's): it is drawn nearer and smaller. It is put on the line from the camera to where it belongs, a little inside the render distance, and made as much smaller as that is nearer, so in the picture it is in the same place at the same size. This is worked out again every tick as the camera moves.
 - Nothing changes in Blockbench: you place and pose it where it belongs. Come within 50 blocks and it is an ordinary entity in its own place again.
 - What a mob copy holds comes along. It works while an animation plays, and in Entity Shots.
 
-Things to know: a far one is lit as the spot above you where it is kept, not as where it is drawn (stand in the open for a sunlit valley). It is about where *you* are, not where the game camera is, so stay near the camera. The real mobs of a whole-scene recording and of Mob Actions are Minecraft's own entities and are not drawn far away.
+Things to know:
 
-**Settings ▸ Pose Studio: Draw Far Players and Mobs** turns it off; **Far Beyond (blocks)** sets the distance (raise it if your simulation distance is more than 4 chunks).
+- A far one is lit as the spot above you where it is kept, not as where it is drawn (stand in the open for a sunlit valley).
+- One that is drawn nearer is in front of whatever is further away than where it is drawn (a mountain past that distance does not hide it), and has the fog of that nearer distance.
+- Being kept near you is about where *you* are: stay within reach of the game camera, as for the terrain.
+- The real mobs of a whole-scene recording and of Mob Actions are Minecraft's own entities and are not drawn far away.
+
+**Settings ▸ Pose Studio:**
+
+- **Draw Far Players and Mobs** turns all of it off.
+- **Far Beyond (blocks)**: how far from you one has to be to be kept near you (raise it if your simulation distance is more than 4 chunks).
+- **Draw Smaller Beyond (blocks)**: how far from the camera one is drawn full size. At 0 it is four fifths of Minecraft's render distance, read from Minecraft's own options when it connects (for Vibrant Visuals at 24 chunks: 307 blocks). Lower it if far ones still vanish.
 
 ## Player View (first-person shots)
 

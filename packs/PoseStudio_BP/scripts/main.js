@@ -115,16 +115,28 @@ function findMannequin(dim, id) {
 }
 
 // ---- Players and mobs too far away to be drawn ----------------------------------------------------
-// Minecraft only shows a player the entities that are near them. A Pose Studio player or mob (and
-// what it holds) further from the player than `farBeyond` blocks is therefore kept near the player
-// instead, a whole number of 16-block steps from where it belongs on each axis, and told how many
-// (pose:far): its animation moves the whole model that many steps, so it's drawn where it belongs.
-// Where each one really is, is kept here (homes). `pose:far {"d":blocks}` says how far is too far
-// (0: nothing is carried). Entities whose pack files are from before this (no pose:far property)
-// are left where they are.
+// Two things stop Minecraft drawing a Pose Studio player or mob where it belongs:
+//
+// It only shows a player the entities that are near them. One that's further from the player than
+// `farBeyond` blocks is therefore kept near the player instead, a whole number of 16-block steps
+// from where it's drawn on each axis, and told how many (pose:far): its animation moves the whole
+// model that many steps.
+//
+// And it draws nothing further than its render distance from where the picture is taken (the game
+// camera when Pose Studio has it, else the player's eyes). One that's further than `farRange`
+// blocks from there is drawn nearer and smaller instead: on the line from the eye to where it
+// belongs, `farRange` blocks along it, and as much smaller as that's nearer. From the eye that
+// looks the same: the same place in the picture, the same size in it. How much smaller is a number
+// from 1 to 4095 (4096ths) kept in the spare room of a property the entity has anyway: pose:skin
+// (in 128s) for a Pose Studio player, pose:model (in 4096s) for a mob copy; 0 is full size. As
+// the eye moves, where it's drawn and how small are worked out again, every tick.
+//
+// Where each one really is, is kept here (homes). `pose:far {"d":blocks,"r":blocks}` says how far
+// from the player is too far, and how far from the eye things are drawn (0: neither is done).
+// Entities whose pack files are from before this (no pose:far property) are left where they are.
 //
 // pose:far: 0 in its own place, else (x steps + 64) + 128 * (y steps + 64) + 16384 * (z steps + 64),
-// the steps from the entity to its place (-63 to 63: up to 1008 blocks).
+// the steps from the entity to where it's drawn (-63 to 63: up to 1008 blocks).
 const FAR_PROPERTY = "pose:farbeyond";
 const FAR_STEP = 16;
 const FAR_STEPS = 63;
@@ -132,17 +144,37 @@ const CARRY_UP = 16; // a carried one is kept about this far above the player (o
 const CARRY_REACH = 28; // …and fetched again when the player is this far from where it's kept
 const FAR_BACK = 6; // it's only put back in its place when the player is this much nearer than too far
 let farBeyond = 0;
+let farRange = 0;
 let farViewer = null; // the player they're shown to (the one Blockbench talks through)
-const homes = new Map(); // entity id -> { entity, at: where it belongs, steps: [x, y, z] or null, code, plain: can't be carried }
+let freeCamera = null; // where the game camera is while Pose Studio has it: { dim, x, y, z }
+const homes = new Map(); // entity id -> { entity, at: where it belongs, steps: [x, y, z] or null, code, small: 0 or 4096ths, away, plain, stale, spot }
 
 const farCode = (steps) => steps[0] + 64 + 128 * (steps[1] + 64) + 16384 * (steps[2] + 64);
 const farSteps = (code) => [(code % 128) - 64, (Math.floor(code / 128) % 128) - 64, Math.floor(code / 16384) - 64];
 const carriedAt = (at, steps) => ({ x: at.x - steps[0] * FAR_STEP, y: at.y - steps[1] * FAR_STEP, z: at.z - steps[2] * FAR_STEP });
+// the property that has room for how much smaller an entity is drawn, and what one step of it is worth there
+const smallSlot = (entity) => (entity.typeId === TYPE ? ["pose:skin", 128] : ["pose:model", 4096]);
+
+// A property set that shares its number with how small the entity is drawn: `value` is the property's own part.
+function setShared(entity, value) {
+  const [property, unit] = smallSlot(entity);
+  const home = homes.get(entity.id);
+  entity.setProperty(property, value + unit * ((home && home.small) || 0));
+}
+
+function setSmall(home, small) {
+  if ((home.small || 0) === small) return;
+  const [property, unit] = smallSlot(home.entity);
+  const own = (Number(home.entity.getProperty(property)) || 0) % unit;
+  home.entity.setProperty(property, own + unit * small);
+  home.small = small;
+}
 
 function setFar(player, data) {
   farBeyond = Math.max(0, Math.min(1000, Number(data.d) || 0));
+  farRange = Math.max(0, Math.min(1000, Number(data.r) || 0));
   if (player) farViewer = player;
-  world.setDynamicProperty(FAR_PROPERTY, farBeyond || undefined);
+  world.setDynamicProperty(FAR_PROPERTY, farBeyond || farRange ? `${farBeyond},${farRange}` : undefined);
   settleAll();
 }
 
@@ -156,18 +188,13 @@ function viewer() {
   return farViewer;
 }
 
-// Whether a place is too far from the player for an entity there to be drawn. `carried`: it's
-// being carried already (it stays so until the player is well inside).
-function tooFar(at, dimension, carried = false) {
-  if (!(farBeyond > 0)) return false;
-  const player = viewer();
-  if (!player) return carried; // (nobody to show it to: it stays as it is)
+// Where the picture is taken from in a dimension: the game camera while Pose Studio has it, else the player's eyes.
+function eyeIn(dimension, player) {
+  if (freeCamera && freeCamera.dim === dimension.id) return freeCamera;
   try {
-    if (player.dimension.id !== dimension.id) return carried; // (…or the player is in another dimension)
-    const v = player.location;
-    return Math.hypot(v.x - at.x, v.y - at.y, v.z - at.z) > farBeyond - (carried ? FAR_BACK : 0);
+    return player.getHeadLocation();
   } catch {
-    return carried;
+    return player.location;
   }
 }
 
@@ -201,63 +228,100 @@ function stepsFor(at, player) {
   return [x, clamp(up), z];
 }
 
-// Carried or in its place, as it should be now: answers where the entity itself is to be.
+// Carried or in its place, full size or smaller, as it should be now: answers where the entity itself is to be.
 function settle(home) {
   const entity = home.entity;
-  if (!home.plain && tooFar(home.at, entity.dimension, !!home.steps)) {
-    const v = farViewer.location;
+  const player = home.plain ? null : viewer();
+  let here = false;
+  try {
+    here = !!player && player.dimension.id === entity.dimension.id;
+  } catch {
+    here = false;
+  }
+  // (nobody to show it to here: it stays as it is)
+  if (!here) return home.steps ? carriedAt(home.drawn || home.at, home.steps) : home.at;
+  const at = home.at;
+  const v = player.location;
+  // further from the eye than the game draws: nearer and smaller, in line with where it belongs
+  let drawn = at;
+  let small = 0;
+  if (farRange > 0 && !home.away) {
+    const eye = eyeIn(entity.dimension, player);
+    const d = Math.hypot(at.x - eye.x, at.y - eye.y, at.z - eye.z);
+    if (d > farRange * (home.small ? 0.98 : 1)) {
+      small = Math.max(1, Math.min(4095, Math.round((farRange / d) * 4096)));
+      const s = small / 4096;
+      drawn = { x: eye.x + (at.x - eye.x) * s, y: eye.y + (at.y - eye.y) * s, z: eye.z + (at.z - eye.z) * s };
+    }
+  }
+  const tooFar = farBeyond > 0 && Math.hypot(v.x - at.x, v.y - at.y, v.z - at.z) > farBeyond - (home.steps ? FAR_BACK : 0);
+  if (small || tooFar) {
     let steps = home.steps;
     if (steps) {
-      const spot = carriedAt(home.at, steps);
+      const spot = carriedAt(drawn, steps);
       if (Math.hypot(spot.x - v.x, spot.y - (v.y + CARRY_UP), spot.z - v.z) > CARRY_REACH) steps = null;
     }
-    if (!steps) steps = stepsFor(home.at, farViewer);
+    if (!steps) steps = stepsFor(drawn, player);
     const code = farCode(steps);
-    if (code !== home.code) {
-      try {
-        entity.setProperty("pose:far", code);
-      } catch {
-        home.plain = true; // (its pack files are older than this: it stays where it is)
-        home.steps = null;
-        home.code = 0;
-        return home.at;
-      }
+    try {
+      if (code !== home.code) entity.setProperty("pose:far", code);
+      setSmall(home, small);
+    } catch {
+      home.plain = true; // (its pack files are older than this: it stays where it is)
+      home.steps = null;
+      home.code = 0;
+      home.small = 0;
+      return at;
     }
     home.steps = steps;
     home.code = code;
-    return carriedAt(home.at, steps);
+    home.drawn = drawn;
+    return carriedAt(drawn, steps);
   }
   if (home.steps) {
     home.steps = null;
     home.code = 0;
+    home.drawn = null;
     entity.setProperty("pose:far", 0);
+    setSmall(home, 0);
   }
-  return home.at;
+  return at;
 }
 
 // A Pose Studio entity that belongs at a place in the world: answers where the entity itself is
-// to be put (there; or, too far off to be drawn there, near the player: see above).
-function placeEntity(entity, at, player = null) {
+// to be put (there; or, when it wouldn't be drawn there, near the player: see above). `away`:
+// it's being put out of sight (under the ground), which isn't to be drawn nearer.
+function placeEntity(entity, at, player = null, away = false) {
   if (player) farViewer = player;
   let home = homes.get(entity.id);
-  if (!home) homes.set(entity.id, (home = { entity, at, steps: null, code: 0, plain: false }));
+  if (!home) homes.set(entity.id, (home = { entity, at, steps: null, code: 0, small: 0, plain: false }));
   home.entity = entity;
   home.at = { x: at.x, y: at.y, z: at.z };
-  return settle(home);
+  home.away = away;
+  home.stale = false;
+  home.spot = settle(home);
+  return home.spot;
 }
 
 // where an entity belongs (not where it's kept while it's carried)
 function placeOf(entity) {
   const home = homes.get(entity.id);
-  return home && home.steps ? home.at : entity.location;
+  return home && home.steps && !home.stale ? home.at : entity.location;
 }
 
-// Where a new entity for a place is made: there, or beside the player when that's too far off (it's put right at once).
+// Where a new entity for a place is made: there, or beside the player when it wouldn't be drawn (or loaded) there. It's put right at once.
 function spawnPlace(at, dimension) {
-  return tooFar(at, dimension) ? Object.assign({}, viewer().location) : at;
+  const player = viewer();
+  try {
+    if (!player || player.dimension.id !== dimension.id || !(farBeyond > 0 || farRange > 0)) return at;
+    const v = player.location;
+    return Math.hypot(v.x - at.x, v.y - at.y, v.z - at.z) > Math.min(farBeyond || Infinity, farRange || Infinity) ? { x: v.x, y: v.y, z: v.z } : at;
+  } catch {
+    return at;
+  }
 }
 
-// everyone carried or in their place as they should be, as the player moves about
+// Everyone as they should be, as the player and the eye move about.
 function settleAll() {
   for (const [id, home] of homes) {
     try {
@@ -265,30 +329,40 @@ function settleAll() {
         homes.delete(id);
         continue;
       }
-      const was = home.code;
+      if (home.stale) continue;
+      const carried = !!home.steps;
       const to = settle(home);
-      if (home.code === was) continue;
-      if (!home.code && !isLoaded(home.entity.dimension, to)) {
+      if (carried && !home.steps && !isLoaded(home.entity.dimension, to)) {
         // (not carried any more, and its own place isn't loaded: an entity sent there couldn't be
         // found again until someone goes there. It's made again when Blockbench next sends it)
         home.entity.remove();
         homes.delete(id);
         continue;
       }
-      home.entity.teleport(to, { rotation: { x: 0, y: 0 }, keepVelocity: false });
+      const spot = home.spot;
+      if (!spot || Math.abs(spot.x - to.x) + Math.abs(spot.y - to.y) + Math.abs(spot.z - to.z) > 0.0005) {
+        home.entity.teleport(to, { rotation: { x: 0, y: 0 }, keepVelocity: false });
+        home.spot = to;
+      }
     } catch {
       homes.delete(id); // gone, or not loaded right now
     }
   }
 }
+// (every tick while what the eye sees matters: it can move every tick. Else now and then: the player walks)
+let farTick = 0;
 system.runInterval(() => {
-  if (homes.size && (farBeyond > 0 || [...homes.values()].some((home) => home.steps))) settleAll();
-}, 5);
+  if (!homes.size) return;
+  if (farRange > 0 || (++farTick % 5 === 0 && (farBeyond > 0 || [...homes.values()].some((home) => home.steps)))) settleAll();
+}, 1);
 
-// (after the script starts again: how far is too far, and the ones that were being carried)
+// (after the script starts again: the distances, and the ones that were being carried. Those stay
+// as they are until Blockbench sends them again: where they belong isn't known any more)
 system.runTimeout(() => {
   try {
-    farBeyond = Number(world.getDynamicProperty(FAR_PROPERTY)) || 0;
+    const kept = String(world.getDynamicProperty(FAR_PROPERTY) || "").split(",");
+    farBeyond = Number(kept[0]) || 0;
+    farRange = Number(kept[1]) || 0;
     for (const dimension of ["overworld", "nether", "the_end"]) {
       for (const entity of world.getDimension(dimension).getEntities({ families: ["pose_studio"] })) {
         try {
@@ -296,7 +370,9 @@ system.runTimeout(() => {
           if (!code || homes.has(entity.id)) continue;
           const steps = farSteps(code);
           const l = entity.location;
-          homes.set(entity.id, { entity, at: { x: l.x + steps[0] * FAR_STEP, y: l.y + steps[1] * FAR_STEP, z: l.z + steps[2] * FAR_STEP }, steps, code, plain: false });
+          const [property, unit] = smallSlot(entity);
+          const drawn = { x: l.x + steps[0] * FAR_STEP, y: l.y + steps[1] * FAR_STEP, z: l.z + steps[2] * FAR_STEP };
+          homes.set(entity.id, { entity, at: drawn, drawn, steps, code, small: Math.floor((Number(entity.getProperty(property)) || 0) / unit), plain: false, stale: true, spot: { x: l.x, y: l.y, z: l.z } });
         } catch {
           // not one that can be carried
         }
@@ -326,7 +402,7 @@ function setPose(player, data, glide = null) {
   setPoseCode(entity, data.q);
   // skin slot (0 = default Steve, 1-16 = textures/entity/pose_studio/skin_N.png) and arm type
   // (64 and up: not drawn, see applyHolder)
-  entity.setProperty("pose:skin", Math.max(0, Math.min(16, Math.round(Number(data.s) || 0))));
+  setShared(entity, Math.max(0, Math.min(16, Math.round(Number(data.s) || 0))));
   entity.setProperty("pose:slim", !!data.sl);
   if (data.e) wantedEquipment.set(data.id, data.e);
   const equipment = wantedEquipment.get(data.id);
@@ -407,7 +483,7 @@ function setEntity(player, data) {
   entity.setRotation({ x: 0, y: yaw });
   if (data.m !== undefined) {
     try {
-      entity.setProperty("pose:model", Math.max(0, Math.round(Number(data.m) || 0)));
+      setShared(entity, Math.max(0, Math.min(4095, Math.round(Number(data.m) || 0))));
     } catch (e) {
       throw new Error("This entity was added after Minecraft last loaded Pose Studio's entities. Reload Minecraft's packs once.");
     }
@@ -465,11 +541,11 @@ function applyHolder(player, data) {
   if (!holder) {
     holder = dim.spawnEntity(TYPE, spawnPlace(loc, dim));
     holder.addTag(tag);
-    holder.setProperty("pose:skin", data.v ? 0 : 64);
+    setShared(holder, data.v ? 0 : 64);
   }
   holder.teleport(placeEntity(holder, loc, player), { rotation: { x: 0, y: 0 } });
   setPoseProperties(holder, data.r.map(Number), []);
-  holder.setProperty("pose:skin", data.v ? 0 : 64); // "v":1 = visible, for testing
+  setShared(holder, data.v ? 0 : 64); // "v":1 = visible, for testing
   // always the main hand: the off hand refuses most items (swords, tools...)
   applyEquipment(holder, { mainhand: data.i });
 }
@@ -1779,6 +1855,7 @@ function showPathStart(player) {
   const anchor = requireAnchor(player);
   const at = { x: anchor.x + first.p[0], y: anchor.y + first.p[1], z: anchor.z + first.p[2] };
   player.runCommand(`camera @s set minecraft:free pos ${fmt(at)} facing ${fmt({ x: at.x + first.dir[0] * 16, y: at.y + first.dir[1] * 16, z: at.z + first.dir[2] * 16 })}`);
+  freeCamera = { dim: anchor.dim, x: at.x, y: at.y, z: at.z };
   if (Number.isFinite(first.f)) {
     try {
       player.runCommand(`camera @s fov_set ${first.f.toFixed(2)}`);
@@ -1835,6 +1912,7 @@ function playPath(player, data) {
     const s = pathAt(keys, cameraPath.ramp, time);
     const look = { x: s.p[0] + s.dir[0] * 16, y: s.p[1] + s.dir[1] * 16, z: s.p[2] + s.dir[2] * 16 };
     player.runCommand(`camera @s set minecraft:free ${ease ? "ease 0.1 linear " : ""}pos ${fmt({ x: s.p[0], y: s.p[1], z: s.p[2] })} facing ${fmt(look)}`);
+    freeCamera = { dim: anchor.dim, x: s.p[0], y: s.p[1], z: s.p[2] };
     if (Number.isFinite(s.f) && (fov === null || Math.abs(s.f - fov) > 0.02)) {
       fov = s.f;
       try {
@@ -1960,10 +2038,13 @@ function setCamera(player, data) {
   const anchor = requireAnchor(player);
   const pos = toWorld(anchor, data.p);
   const target = toWorld(anchor, data.t);
-  if (data.v) setPlayerView(player, pos, target);
-  else {
+  if (data.v) {
+    setPlayerView(player, pos, target);
+    freeCamera = null; // (the player's own eyes)
+  } else {
     endPlayerView();
     player.runCommand(`camera @s set minecraft:free pos ${fmt(pos)} facing ${fmt(target)}`);
+    freeCamera = { dim: anchor.dim, x: pos.x, y: pos.y, z: pos.z };
   }
   if (data.f) {
     try {
@@ -1979,6 +2060,7 @@ function clearCamera(player) {
   if (!player) return;
   stopPath();
   endPlayerView();
+  freeCamera = null;
   player.runCommand("camera @s clear");
   try {
     player.runCommand("camera @s fov_clear");
@@ -2216,7 +2298,7 @@ function setShotHidden(data) {
     for (const tag of [id, `${id}__main`, `${id}__off`]) {
       for (const e of findMannequins(dim, tag)) {
         const at = Object.assign({}, placeOf(e));
-        e.teleport(placeEntity(e, { x: at.x, y: bottom, z: at.z }), { keepVelocity: false });
+        e.teleport(placeEntity(e, { x: at.x, y: bottom, z: at.z }, null, true), { keepVelocity: false });
         shotHidden.set(e.id, { entity: e, at });
       }
     }
@@ -2282,7 +2364,7 @@ function debug(player) {
 // Every name looks like `PSD[op|page|item]`; page 0 always carries
 // `M|ready|<pages>|<items>|<items per page>` or `M|busy|<percent>`.
 // What this script understands; Blockbench warns when the world runs an older one.
-const PACK_PROTOCOL = 41;
+const PACK_PROTOCOL = 42;
 const IO_OBJECTIVE = "pose_io";
 const ITEMS_PER_PAGE = 30;
 const MAX_PAGES_PER_BATCH = 16;

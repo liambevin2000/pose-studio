@@ -1,5 +1,14 @@
 [
   {
+    "version": "0.91.0",
+    "date": "2026-10-13",
+    "changes": [
+      "Far players and mobs are now drawn at any distance. Past Minecraft's render distance they are drawn nearer and smaller, so they look the same from the camera.",
+      "New setting: Draw Smaller Beyond (blocks).",
+      "Update the Minecraft packs."
+    ]
+  },
+  {
     "version": "0.90.0",
     "date": "2026-10-12",
     "changes": [

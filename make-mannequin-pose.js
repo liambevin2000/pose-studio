@@ -65,7 +65,12 @@ const preAnimation = []
 //
 // An entity can have 32 properties and the player's were all taken: "not drawn" (what a mob copy
 // holds is held by a player that isn't drawn) is now a skin number of 64 or more, which freed one.
+//
+// One that's further than the game draws at all is drawn nearer and smaller (see the script): how
+// much smaller, in 4096ths (0: full size), is kept above the skin number, in 128s. The root of the
+// model is that much smaller, about where the model stands.
 const far = "q.property('pose:far')";
+const small = "math.floor(q.property('pose:skin') / 128)";
 const FAR = {
   property: { type: 'int', range: [0, 2097151], default: 0, client_sync: true },
   // (16 blocks are 256 of a bone's units; a bone's x and y go the world's way, its z the other way)
@@ -74,11 +79,14 @@ const FAR = {
     `${far} > 0 ? (math.mod(math.floor(${far} / 128), 128) - 64) * 256 : 0`,
     `${far} > 0 ? (64 - math.floor(${far} / 16384)) * 256 : 0`,
   ],
+  scale: `${small} > 0 ? ${small} / 4096 : 1`,
+  // the skin (or nothing), from the part of pose:skin that's the skin number
+  texture: "math.mod(q.property('pose:skin'), 128) >= 64 ? Texture.clear : Array.skins[math.mod(q.property('pose:skin'), 32)]",
   // the model is drawn up to 1008 blocks from the entity: this much to its side and height
   bounds: 2048,
 };
 
-const bones = { root: { position: FAR.position } };
+const bones = { root: { position: FAR.position, scale: [FAR.scale, FAR.scale, FAR.scale] } };
 for (const bone of ANGLE_BONES) {
   const b = ANGLE_BONES.indexOf(bone);
   bones[bone] = { rotation: [0, 1, 2].map((axis) => `v.sa${b * 3 + axis}`) };
@@ -103,14 +111,14 @@ function write() {
   const behavior = JSON.parse(fs.readFileSync(behaviorFile, 'utf8'));
   const properties = behavior['minecraft:entity'].description.properties;
   delete properties['pose:hidden'];
-  properties['pose:skin'] = { type: 'int', range: [0, 127], default: 0, client_sync: true };
+  properties['pose:skin'] = { type: 'int', range: [0, 127 + 128 * 4095], default: 0, client_sync: true };
   properties['pose:far'] = FAR.property;
   if (Object.keys(properties).length > 32) throw new Error(`${Object.keys(properties).length} properties: an entity can have 32`);
   fs.writeFileSync(behaviorFile, JSON.stringify(behavior, null, 2) + '\n');
   const controllerFile = path.join(rp, 'render_controllers', 'mannequin.render_controllers.json');
   const controllers = JSON.parse(fs.readFileSync(controllerFile, 'utf8'));
   for (const controller of Object.values(controllers.render_controllers)) {
-    controller.textures = controller.textures.map((line) => (/Array\.skins/.test(line) ? "q.property('pose:skin') >= 64 ? Texture.clear : Array.skins[math.mod(q.property('pose:skin'), 32)]" : line));
+    controller.textures = controller.textures.map((line) => (line.includes('Array.skins') ? FAR.texture : line));
   }
   fs.writeFileSync(controllerFile, JSON.stringify(controllers, null, 2) + '\n');
   // …and its model allowed that far from the entity (or it's left out as soon as the entity is out of view)
