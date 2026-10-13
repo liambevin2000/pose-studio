@@ -1,6 +1,6 @@
 {
-  "version": "0.91.0",
-  "revision": "00161880eda6",
+  "version": "0.92.0",
+  "revision": "93a9793af22d",
   "files": [
     {
       "path": "PoseStudio_BP/entities/backdrop.json",
@@ -24,8 +24,8 @@
     },
     {
       "path": "PoseStudio_BP/scripts/main.js",
-      "size": 147807,
-      "sha1": "9d17c3f46ae9d8396a16b03abcbf34e4b0956a2e"
+      "size": 151369,
+      "sha1": "432d2106f94295997653c0c0eb147d76c0d7e3df"
     },
     {
       "path": "PoseStudio_RP/animations/backdrop.animation.json",

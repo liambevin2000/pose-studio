@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.92.0 (2026-10-13)
+
+- New: copy structures. Duplicate or copy-paste the structure piece in Blockbench (or Structure ▸ Duplicate); Apply puts a copy of the blocks where each one stands.
+- New: Structure ▸ Apply as Copy. Apply Move is now called Apply.
+- Update the Minecraft packs.
+
 ## 0.91.0 (2026-10-13)
 
 - Far players and mobs are now drawn at any distance. Past Minecraft's render distance they are drawn nearer and smaller, so they look the same from the camera.

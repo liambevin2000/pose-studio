@@ -300,8 +300,14 @@ Select a box of blocks in Minecraft, move it in Blockbench, and Minecraft moves 
    Green particles outline the selection.
 2. **Structure ▸ Get Selection**: it appears in Blockbench as one piece called `structure`, where it is in the world.
 3. **Move it** with the move tool, by whole blocks (16 on Blockbench's grid is one block; less than half a block is no move). Turn it in quarter turns around the vertical axis (Y rotation 0, 90, 180 or 270). Blue particles in Minecraft outline where it would land. Move it as a whole: if Blockbench's selection mode is on faces or corners, select all of them (dragging only some changes its shape, which blocks cannot follow, and Apply Move says so).
-4. **Structure ▸ Apply Move**: the blocks are lifted out of the old place and put down in the new one, chests and signs with their contents. Whatever was there is replaced.
+4. **Structure ▸ Apply**: the blocks are lifted out of the old place and put down in the new one, chests and signs with their contents. Whatever was there is replaced.
 5. **Structure ▸ Undo Move** (or Ctrl+Z) puts both places back; **Redo Move** (Ctrl+Y) does it again. The last 10 moves can be undone, and it still works after reopening the world.
+
+**Copying.** The piece can be copied like anything in Blockbench, and every copy of it becomes a copy of the blocks:
+
+- **Duplicate the piece** (Ctrl+D, copy and paste, or **Structure ▸ Duplicate**, which puts one beside it), move and turn the copy to where the blocks should be copied to, and **Apply**. Make as many copies as you like (up to 8 at a time). The blocks themselves stay where they are, unless you moved their own piece too: then they are moved and copied in one go. Blue particles outline where each one would land.
+- **Structure ▸ Apply as Copy** is the quick way for one copy: move the piece, and instead of moving the blocks there it puts a copy of them there. The copy is the selection afterwards, so you can move the piece on and Apply as Copy again to put down a row of them.
+- Every copy is of the blocks as they were when you applied (a copy that lands on the blocks themselves does not change the other copies). One Apply is one step to undo, however many copies it put down.
 
 A move is all or nothing. Minecraft waits (up to 15 seconds) for both places to be loaded; if it cannot do the whole move, it puts back what it had changed and Blockbench says why. It only moves the selection Blockbench is showing: if the corners were changed in the game since, use Get Selection again. A big move is spread over a few moments, with its progress shown. The piece is remembered with the project, so it is still there after looking at another tab or reopening Blockbench.
 

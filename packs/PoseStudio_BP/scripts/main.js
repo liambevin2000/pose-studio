@@ -2364,7 +2364,7 @@ function debug(player) {
 // Every name looks like `PSD[op|page|item]`; page 0 always carries
 // `M|ready|<pages>|<items>|<items per page>` or `M|busy|<percent>`.
 // What this script understands; Blockbench warns when the world runs an older one.
-const PACK_PROTOCOL = 42;
+const PACK_PROTOCOL = 43;
 const IO_OBJECTIVE = "pose_io";
 const ITEMS_PER_PAGE = 30;
 const MAX_PAGES_PER_BATCH = 16;
@@ -2740,7 +2740,7 @@ const LAST_MOVE_PROPERTY = "pose:lastmove";
 const MAX_SELECTION = 600000; // blocks
 const MAX_PREVIEW_BLOCKS = 40000;
 const STRUCTURE_XZ = 64; // the most one saved structure can span sideways
-let targetBox = null; // { dim, min, size } where Blockbench has the selection now
+let targetBoxes = []; // [{ dim, min, size }] where Blockbench has the selection now, and each copy of it
 
 function getSelection() {
   const raw = world.getDynamicProperty(SELECTION_PROPERTY);
@@ -2761,7 +2761,7 @@ function setCorner(player, text) {
   const word = String(text || "").trim().toLowerCase();
   if (word === "clear") {
     world.setDynamicProperty(SELECTION_PROPERTY, undefined);
-    targetBox = null;
+    targetBoxes = [];
     player.sendMessage("§b[Pose Studio]§r Selection cleared");
     return;
   }
@@ -2786,7 +2786,7 @@ function setCorner(player, text) {
   const next = old && old.dim === player.dimension.id ? { dim: old.dim, a: old.a, b: old.b } : { dim: player.dimension.id };
   next[m[2] === "1" ? "a" : "b"] = here;
   world.setDynamicProperty(SELECTION_PROPERTY, JSON.stringify(next));
-  targetBox = null;
+  targetBoxes = [];
   const s = getSelection();
   const size = s && s.size ? ` — ${s.size.x}×${s.size.y}×${s.size.z} (${s.size.x * s.size.y * s.size.z} blocks)` : "";
   player.sendMessage(`§b[Pose Studio]§r Corner ${m[2]} at ${here.join(" ")}${size}`);
@@ -2859,19 +2859,21 @@ function reportSelection(player, data) {
   system.runJob(selectionJob(world.getDimension(s.dim), anchor, s));
 }
 
+// `pose:target {"boxes":[{"min":[..],"size":[..]}]}` ({"min","size"} alone: one box; {}: none)
 function setTarget(data) {
   const anchor = getAnchor();
   const s = getSelection();
-  if (!anchor || !s || !finite(data.min) || !finite(data.size)) {
-    targetBox = null;
+  const boxes = (Array.isArray(data.boxes) ? data.boxes : [data]).filter((box) => box && finite(box.min) && finite(box.size)).slice(0, MAX_OPS);
+  if (!anchor || !s || !boxes.length) {
+    targetBoxes = [];
     return;
   }
   const base = { x: Math.floor(anchor.x), y: Math.floor(anchor.y), z: Math.floor(anchor.z) };
-  targetBox = {
+  targetBoxes = boxes.map((box) => ({
     dim: s.dim,
-    min: { x: base.x + Number(data.min[0]), y: base.y + Number(data.min[1]), z: base.z + Number(data.min[2]) },
-    size: { x: Number(data.size[0]), y: Number(data.size[1]), z: Number(data.size[2]) },
-  };
+    min: { x: base.x + Number(box.min[0]), y: base.y + Number(box.min[1]), z: base.z + Number(box.min[2]) },
+    size: { x: Number(box.size[0]), y: Number(box.size[1]), z: Number(box.size[2]) },
+  }));
 }
 
 // A box as { at (lowest corner), size } pieces no bigger than `span` sideways and `tall` high.
@@ -2889,7 +2891,7 @@ function boxPieces(min, size, span, tall) {
 
 const cornerOf = (p) => ({ x: p.at.x + p.size.x - 1, y: p.at.y + p.size.y - 1, z: p.at.z + p.size.z - 1 });
 
-// Saves a box as structures, a piece at a time (a job: see moveJob). Returns [{ id, off, size }].
+// Saves a box as structures, a piece at a time (a job: see applyJob). Returns [{ id, off, size }].
 function* saveBoxJob(dim, min, size, prefix, step) {
   const saved = [];
   try {
@@ -2937,16 +2939,17 @@ function turnedOffset(off, pieceSize, size, rot) {
 
 const ROTATIONS = { 0: StructureRotation.None, 90: StructureRotation.Rotate90, 180: StructureRotation.Rotate180, 270: StructureRotation.Rotate270 };
 const MOVE_AREAS = ["pose_move_from", "pose_move_to"];
+const moveArea = (i) => MOVE_AREAS[i] || `pose_move_${i}`; // (the box, where it's moved to, and a copy's place each)
 
 function loadAreas(dim, boxes) {
   boxes.forEach((box, i) => {
     try {
-      dim.runCommand(`tickingarea remove ${MOVE_AREAS[i]}`);
+      dim.runCommand(`tickingarea remove ${moveArea(i)}`);
     } catch {
       // none there
     }
     try {
-      dim.runCommand(`tickingarea add ${box.min.x} ${box.min.y} ${box.min.z} ${box.min.x + box.size.x - 1} ${box.min.y + box.size.y - 1} ${box.min.z + box.size.z - 1} ${MOVE_AREAS[i]} true`);
+      dim.runCommand(`tickingarea add ${box.min.x} ${box.min.y} ${box.min.z} ${box.min.x + box.size.x - 1} ${box.min.y + box.size.y - 1} ${box.min.z + box.size.z - 1} ${moveArea(i)} true`);
     } catch {
       // the world has its 10: the chunks may be loaded anyway
     }
@@ -2954,9 +2957,9 @@ function loadAreas(dim, boxes) {
 }
 
 function unloadAreas(dim) {
-  for (const name of MOVE_AREAS) {
+  for (let i = 0; i <= MAX_OPS; i++) {
     try {
-      dim.runCommand(`tickingarea remove ${name}`);
+      dim.runCommand(`tickingarea remove ${moveArea(i)}`);
     } catch {
       // none there
     }
@@ -3072,101 +3075,135 @@ function writeList(property, list) {
 
 function selectBox(dim, min, size) {
   world.setDynamicProperty(SELECTION_PROPERTY, JSON.stringify({ dim, a: [min.x, min.y, min.z], b: [min.x + size.x - 1, min.y + size.y - 1, min.z + size.z - 1] }));
-  targetBox = null;
+  targetBoxes = [];
 }
 
 const pieceCount = (size, span, tall) => Math.ceil(size.x / span) * Math.ceil(size.z / span) * Math.ceil(size.y / tall);
-// how many steps a move of a box takes (for its progress): see moveJob
-const moveSteps = (size, skipAir) => pieceCount(size, STRUCTURE_XZ, 384) * (skipAir ? 4 : 3) + pieceCount(size, 32, 32) * (skipAir ? 2 : 1);
+const turnedSize = (size, rot) => (rot === 90 || rot === 270 ? { x: size.z, y: size.y, z: size.x } : size);
+const MAX_OPS = 8; // the places one Apply puts the box down at
+// how many steps an Apply takes (for its progress): see applyJob
+const applySteps = (size, ops, skipAir) => pieceCount(size, STRUCTURE_XZ, 384) * (1 + ops.length * 2 + (skipAir ? 1 : 0)) + pieceCount(size, 32, 32) * (skipAir ? 2 : 1);
 
-// Moves the box at `from` (min, size) so its lowest corner is at `to`, turned `rot`: a job, a piece
-// at a time, so a big one is spread over ticks (the game doesn't stand still, and Blockbench is told
-// how far it is). Both places are saved before anything is changed; if a step fails after that,
-// what was changed is put back from them and nothing is kept, so a move that fails changes nothing.
-// skipAir: the air in the selection isn't moved, so where the selection is empty, what's at the
-// landing place stays (the air is saved as structure voids, which a structure leaves alone).
-function* moveJob(dimId, from, to, rot, skipAir, step) {
+// One Apply: the box at `from` (min, size) is put down at each of `ops` ([{ to, rot, copy, sel }]):
+// moved there (at most one of them: the blocks leave where they were) or copied there (they stay
+// where they were too). It's a job, a piece at a time, so a big one is spread over ticks (the game
+// doesn't stand still, and Blockbench is told how far it is). Everything is saved before anything
+// is changed: the box, and what each place has now. It's the box as it was then that's put down
+// everywhere (a copy that lands on the box itself doesn't change the other copies). If a step
+// fails, what was changed is put back and nothing is kept, so an Apply that fails changes nothing.
+// skipAir: the air in the box isn't put down, so where the box is empty, what's at the landing
+// place stays (the air is saved as structure voids, which a structure leaves alone).
+// sel: the place that's the selection afterwards.
+// Kept for undo: { dim, air, from: { min, size, saved (when the blocks were moved away) },
+//   parts: [{ rot, copy, sel, to: { min, size, saved: what was there } }] }.
+function* applyJob(dimId, from, ops, skipAir, step) {
   const dim = world.getDimension(dimId);
   const size = from.size;
-  const turned = rot === 90 || rot === 270 ? { x: size.z, y: size.y, z: size.x } : size;
   const stamp = Date.now().toString(36);
+  const moved = ops.some((op) => !op.copy);
   const put = (pieces, at) => {
     for (const piece of pieces) world.structureManager.place(piece.id, dim, { x: at.x + piece.off.x, y: at.y + piece.off.y, z: at.z + piece.off.z }, { includeEntities: false });
   };
   let lifted = null;
-  let covered = null;
   let carried = null;
-  let touched = 0; // 1: the old place has been changed, 2: the new one too
+  const covered = [];
+  const placed = []; // the places something has been put down at
+  let touched = false; // the box itself has been changed
   const drops = dropsOff();
   try {
     lifted = yield* saveBoxJob(dim, from.min, size, `pose:move_${stamp}_a`, step);
-    covered = yield* saveBoxJob(dim, to, turned, `pose:move_${stamp}_b`, step);
-    // what is put down: the blocks as lifted, or a copy of them with voids for the air
+    for (let i = 0; i < ops.length; i++) covered.push(yield* saveBoxJob(dim, ops[i].to, turnedSize(size, ops[i].rot), `pose:move_${stamp}_b${i}`, step));
+    // what is put down: the blocks as they are, or a copy of them with voids for the air
+    carried = lifted;
     if (skipAir) {
-      touched = 1;
+      touched = true;
       yield* fillJob(dim, from.min, size, "minecraft:structure_void", "minecraft:air", step);
       carried = yield* saveBoxJob(dim, from.min, size, `pose:move_${stamp}_c`, step);
     }
-    touched = 1;
-    yield* fillJob(dim, from.min, size, "minecraft:air", null, step);
-    touched = 2;
-    for (const piece of carried || lifted) {
-      const off = turnedOffset(piece.off, piece.size, size, rot);
-      world.structureManager.place(piece.id, dim, { x: to.x + off.x, y: to.y + off.y, z: to.z + off.z }, { includeEntities: false, rotation: ROTATIONS[rot] });
-      step();
-      yield;
+    // the box itself: emptied when the blocks are moved away, its air back when they're only copied
+    if (moved) {
+      touched = true;
+      yield* fillJob(dim, from.min, size, "minecraft:air", null, step);
+    } else if (skipAir) yield* fillJob(dim, from.min, size, "minecraft:air", "minecraft:structure_void", step);
+    // put down: where it's moved to first, then the copies (they're what's seen where they overlap)
+    const order = ops.map((op, i) => i).sort((a, b) => (ops[a].copy ? 1 : 0) - (ops[b].copy ? 1 : 0));
+    for (const i of order) {
+      placed.push(i);
+      for (const piece of carried) {
+        const off = turnedOffset(piece.off, piece.size, size, ops[i].rot);
+        world.structureManager.place(piece.id, dim, { x: ops[i].to.x + off.x, y: ops[i].to.y + off.y, z: ops[i].to.z + off.z }, { includeEntities: false, rotation: ROTATIONS[ops[i].rot] });
+        step();
+        yield;
+      }
     }
   } catch (e) {
-    // as it was: what it landed on first, then the blocks back where they were
+    // as it was: what each place had (the last one put down first), then the box
     try {
-      if (touched >= 2) put(covered, to);
-      if (touched >= 1) put(lifted, from.min);
+      for (const i of placed.reverse()) put(covered[i], ops[i].to);
+      if (touched) put(lifted, from.min);
     } catch (again) {
-      console.warn(`[Pose Studio] a move that failed couldn't be put back: ${again}`);
+      console.warn(`[Pose Studio] an Apply that failed couldn't be put back: ${again}`);
     }
-    forgetStructures([].concat(lifted || [], covered || [], carried || []));
+    forgetStructures([].concat(lifted || [], carried && carried !== lifted ? carried : [], ...covered));
     throw e;
   } finally {
     dropsOn(drops);
   }
-  forgetStructures(carried);
+  if (carried !== lifted) forgetStructures(carried);
+  if (!moved) forgetStructures(lifted); // (the blocks are where they were: there's nothing of them to put back)
   // kept, so it can be undone
   const history = readList(LAST_MOVE_PROPERTY);
-  history.push({ dim: dimId, rot, air: skipAir ? 0 : 1, from: { min: from.min, size, saved: lifted }, to: { min: to, size: turned, saved: covered } });
-  while (history.length > MAX_UNDO) {
-    const old = history.shift();
-    forgetStructures([].concat(old.from.saved, old.to.saved));
-  }
+  history.push({
+    dim: dimId,
+    air: skipAir ? 0 : 1,
+    from: { min: from.min, size, saved: moved ? lifted : null },
+    parts: ops.map((op, i) => ({ rot: op.rot, copy: op.copy ? 1 : 0, sel: op.sel ? 1 : 0, to: { min: op.to, size: turnedSize(size, op.rot), saved: covered[i] } })),
+  });
+  while (history.length > MAX_UNDO) forgetStructures(savedOf(history.shift()));
   writeList(LAST_MOVE_PROPERTY, history);
-  // the selection is where the blocks are now
-  selectBox(dimId, to, turned);
+  // the selection is where it was said to be afterwards (a move: where the blocks are now)
+  const chosen = ops.find((op) => op.sel);
+  if (chosen) selectBox(dimId, chosen.to, turnedSize(size, chosen.rot));
 }
 
+// the places of something that was applied (one kept by an earlier version is a single move: from, to, rot)
+const partsOf = (entry) => entry.parts || [{ rot: entry.rot || 0, copy: 0, sel: 1, to: entry.to }];
+// …and every structure saved for it
+const savedOf = (entry) => [].concat((entry.from && entry.from.saved) || [], ...partsOf(entry).map((part) => part.to.saved || []));
+
+// `pose:move {"ops":[{"to":[x,y,z],"rot":0|90|180|270,"copy":0|1,"sel":0|1}],"skip","from","size",op}`:
+// the selection is put down at each of them (see applyJob). {"to","rot"} alone is one move.
 function moveSelection(player, data) {
   beginResult(data.op);
   const anchor = requireAnchor(player);
   const s = requireSelection();
-  if (!finite(data.to)) throw new Error("move needs to:[x,y,z]");
-  const rot = [0, 90, 180, 270].includes(Number(data.rot)) ? Number(data.rot) : 0;
   const dim = world.getDimension(s.dim);
   const size = s.size;
-  const turned = rot === 90 || rot === 270 ? { x: size.z, y: size.y, z: size.x } : size;
   const base = { x: Math.floor(anchor.x), y: Math.floor(anchor.y), z: Math.floor(anchor.z) };
   // (Blockbench says which selection it's showing: another one isn't moved by mistake)
   if (finite(data.from) && finite(data.size)) {
     const same = base.x + Number(data.from[0]) === s.min.x && base.y + Number(data.from[1]) === s.min.y && base.z + Number(data.from[2]) === s.min.z && Number(data.size[0]) === size.x && Number(data.size[1]) === size.y && Number(data.size[2]) === size.z;
     if (!same) throw new Error("The selection in Minecraft isn't the one Blockbench is showing. Use Get Selection again");
   }
-  const to = { x: base.x + Math.round(Number(data.to[0])), y: base.y + Math.round(Number(data.to[1])), z: base.z + Math.round(Number(data.to[2])) };
+  const asked = Array.isArray(data.ops) && data.ops.length ? data.ops : [{ to: data.to, rot: data.rot, copy: data.copy, sel: 1 }];
+  if (asked.length > MAX_OPS) throw new Error(`At most ${MAX_OPS} places at once`);
   const range = dim.heightRange;
-  if (range && (to.y < range.min || to.y + size.y > range.max)) throw new Error("That's above or below the world");
-  if (rot === 0 && to.x === s.min.x && to.y === s.min.y && to.z === s.min.z) throw new Error("It's already there: move it in Blockbench first");
+  const ops = asked.map((op) => {
+    if (!op || !finite(op.to)) throw new Error("move needs to:[x,y,z]");
+    const rot = [0, 90, 180, 270].includes(Number(op.rot)) ? Number(op.rot) : 0;
+    const to = { x: base.x + Math.round(Number(op.to[0])), y: base.y + Math.round(Number(op.to[1])), z: base.z + Math.round(Number(op.to[2])) };
+    if (range && (to.y < range.min || to.y + size.y > range.max)) throw new Error("That's above or below the world");
+    if (rot === 0 && to.x === s.min.x && to.y === s.min.y && to.z === s.min.z) throw new Error(op.copy ? "A copy is where the blocks already are: move it in Blockbench first" : "It's already there: move it in Blockbench first");
+    return { to, rot, copy: op.copy ? 1 : 0, sel: op.sel ? 1 : 0 };
+  });
+  if (ops.filter((op) => !op.copy).length > 1) throw new Error("The blocks can only be moved to one place: the others are copies");
   const skipAir = !!data.skip;
-  whenLoaded(dim, [{ min: s.min, size }, { min: to, size: turned }], moveSteps(size, skipAir), function* (step) {
-    yield* moveJob(s.dim, { min: s.min, size }, to, rot, skipAir, step);
-    writeList(REDO_PROPERTY, []); // a new move: nothing to redo any more
+  const boxes = [{ min: s.min, size }].concat(ops.map((op) => ({ min: op.to, size: turnedSize(size, op.rot) })));
+  whenLoaded(dim, boxes, applySteps(size, ops, skipAir), function* (step) {
+    yield* applyJob(s.dim, { min: s.min, size }, ops, skipAir, step);
+    writeList(REDO_PROPERTY, []); // something new: nothing to redo any more
     return [`ok|${readList(LAST_MOVE_PROPERTY).length}|0`];
-  }, "The place it's moving from or to wouldn't load. Stand closer and try again.");
+  }, "A place it's taken from or put at wouldn't load. Stand closer and try again.");
 }
 
 function undoMove(player, data) {
@@ -3175,11 +3212,15 @@ function undoMove(player, data) {
   const last = history[history.length - 1];
   if (!last) return failResult("There's no move to undo");
   const dim = world.getDimension(last.dim);
-  whenLoaded(dim, [{ min: last.from.min, size: last.from.size }, { min: last.to.min, size: last.to.size }], last.to.saved.length + last.from.saved.length, function* (step) {
+  const parts = partsOf(last);
+  const boxes = [{ min: last.from.min, size: last.from.size }].concat(parts.map((part) => ({ min: part.to.min, size: part.to.size })));
+  whenLoaded(dim, boxes, savedOf(last).length, function* (step) {
     const drops = dropsOff();
     try {
-      // what it landed on comes back, then the blocks go back where they were
-      for (const [saved, at] of [[last.to.saved, last.to.min], [last.from.saved, last.from.min]]) {
+      // what each place had comes back (the last one put down first), then the blocks go back where they were
+      const back = parts.slice().sort((a, b) => (b.copy ? 1 : 0) - (a.copy ? 1 : 0)).map((part) => [part.to.saved || [], part.to.min]);
+      if (last.from.saved) back.push([last.from.saved, last.from.min]);
+      for (const [saved, at] of back) {
         for (const piece of saved) {
           world.structureManager.place(piece.id, dim, { x: at.x + piece.off.x, y: at.y + piece.off.y, z: at.z + piece.off.z }, { includeEntities: false });
           step();
@@ -3192,10 +3233,10 @@ function undoMove(player, data) {
     selectBox(last.dim, last.from.min, last.from.size);
     history.pop();
     writeList(LAST_MOVE_PROPERTY, history);
-    forgetStructures([].concat(last.from.saved, last.to.saved));
-    // how to do it again: the same box, to the same place, turned the same way
+    forgetStructures(savedOf(last));
+    // how to do it again: the same box, put down at the same places the same way
     const redo = readList(REDO_PROPERTY);
-    redo.push({ dim: last.dim, rot: last.rot, air: last.air, from: { min: last.from.min, size: last.from.size }, to: last.to.min });
+    redo.push({ dim: last.dim, air: last.air, from: { min: last.from.min, size: last.from.size }, ops: parts.map((part) => ({ to: part.to.min, rot: part.rot, copy: part.copy, sel: part.sel })) });
     writeList(REDO_PROPERTY, redo.slice(-MAX_UNDO));
     return [`ok|${history.length}|${Math.min(redo.length, MAX_UNDO)}`];
   }, "The places of that move wouldn't load. Stand closer and try again.");
@@ -3207,10 +3248,12 @@ function redoMove(player, data) {
   const next = redo[redo.length - 1];
   if (!next) return failResult("There's no move to redo");
   const dim = world.getDimension(next.dim);
-  const turned = next.rot === 90 || next.rot === 270 ? { x: next.from.size.z, y: next.from.size.y, z: next.from.size.x } : next.from.size;
+  // (one kept by an earlier version is a single move: to, rot)
+  const ops = next.ops || [{ to: next.to, rot: next.rot || 0, copy: 0, sel: 1 }];
   const skipAir = next.air === 0;
-  whenLoaded(dim, [{ min: next.from.min, size: next.from.size }, { min: next.to, size: turned }], moveSteps(next.from.size, skipAir), function* (step) {
-    yield* moveJob(next.dim, next.from, next.to, next.rot, skipAir, step);
+  const boxes = [{ min: next.from.min, size: next.from.size }].concat(ops.map((op) => ({ min: op.to, size: turnedSize(next.from.size, op.rot) })));
+  whenLoaded(dim, boxes, applySteps(next.from.size, ops, skipAir), function* (step) {
+    yield* applyJob(next.dim, next.from, ops, skipAir, step);
     redo.pop();
     writeList(REDO_PROPERTY, redo);
     return [`ok|${readList(LAST_MOVE_PROPERTY).length}|${redo.length}`];
@@ -3251,7 +3294,7 @@ system.runInterval(() => {
   }
   if (s.size) outlineBox(dim, s.min, s.size, "minecraft:villager_happy");
   else if (s.a || s.b) outlineBox(dim, { x: (s.a || s.b)[0], y: (s.a || s.b)[1], z: (s.a || s.b)[2] }, { x: 1, y: 1, z: 1 }, "minecraft:villager_happy");
-  if (targetBox && targetBox.dim === s.dim) outlineBox(dim, targetBox.min, targetBox.size, "minecraft:blue_flame_particle");
+  for (const box of targetBoxes) if (box.dim === s.dim) outlineBox(dim, box.min, box.size, "minecraft:blue_flame_particle");
 }, 20);
 
 function handle(ev) {

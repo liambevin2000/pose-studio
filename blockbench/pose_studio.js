@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.91.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.92.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -3027,9 +3027,13 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
   // ---- Moving structures ---------------------------------------------------------------------------
   // Pose Studio ▸ Structure: select a box of blocks in the game (two corners, by command or from
   // this menu), Get Selection brings it into Blockbench as one piece ("structure"), you move it
-  // with the move tool and turn it in quarter turns around the vertical axis, and Apply Move makes
+  // with the move tool and turn it in quarter turns around the vertical axis, and Apply makes
   // Minecraft move the blocks. Minecraft outlines the selection in green and, while you move it,
   // where it would land in blue. Undo Move (or Ctrl+Z) puts both places back as they were, up to 10 moves back.
+  // The piece can be duplicated, or copied and pasted, like anything in Blockbench (or with Structure
+  // ▸ Duplicate): each copy of it is a copy of the blocks, put down where it stands by the same
+  // Apply (the blocks themselves stay, unless their own piece was moved too). Apply as Copy puts
+  // down a copy where the piece itself was moved to, and leaves the blocks.
   // A move is all or nothing: Minecraft waits for both places to be loaded, changes nothing if it
   // can't do all of it, and only moves the selection Blockbench is showing.
   const STRUCTURE_NAME = 'structure';
@@ -3040,21 +3044,31 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
   // The piece in the project that's open. What it is (where the selection was, how big it is) is
   // kept on the mesh itself (pose_structure), so it's still known after another project's tab was
   // looked at, after an undo, and when the project is saved and opened again.
+  // (a piece: a mesh that has what it is kept on it. A copy of the piece, made in Blockbench, has
+  // that too, but it says another mesh: the piece it was copied from)
+  const isStructurePiece = (el) => el instanceof Mesh && !!el.pose_structure && Array.isArray(el.pose_structure.min) && Array.isArray(el.pose_structure.size);
+  const isStructureCopy = (el) => isStructurePiece(el) && !!el.pose_structure.id && el.pose_structure.id !== el.uuid;
   function structureMesh() {
     if (typeof Project === 'undefined' || !Project) return null;
     const elements = Project.elements || [];
     let mesh = (structure && elements.find((el) => el.uuid === structure.uuid)) || null;
     if (!mesh) {
-      mesh = elements.find((el) => el.name === STRUCTURE_NAME && el instanceof Mesh && el.pose_structure && Array.isArray(el.pose_structure.min) && Array.isArray(el.pose_structure.size)) || null;
+      mesh = elements.find((el) => isStructurePiece(el) && !isStructureCopy(el)) || null;
       if (mesh) structure = { uuid: mesh.uuid, min: mesh.pose_structure.min.slice(), size: mesh.pose_structure.size.slice() };
     }
     return mesh;
+  }
+  // The copies of the piece in the project that's open.
+  function structureCopies() {
+    if (typeof Project === 'undefined' || !Project) return [];
+    const piece = structureMesh();
+    return piece ? (Project.elements || []).filter((el) => el !== piece && isStructureCopy(el)) : [];
   }
 
   // How far the piece's own corners were moved since it was fetched (in the mesh editor: all of
   // its faces or corners selected, and dragged): that counts as moving the piece. Throws when only
   // some of it was moved (its shape was changed: blocks can't follow that). `thorough`: every
-  // corner is looked at, not just a few (Apply Move; the outline in Minecraft goes by a few).
+  // corner is looked at, not just a few (Apply; the outline in Minecraft goes by a few).
   const RESHAPED = "Only part of the structure was moved (some of its faces or corners), which changes its shape: blocks can't follow that.\n\nUndo it (Ctrl+Z), then move the whole piece: click it in the outliner, or set the selection mode above the viewport to Object.";
   function structureShift(mesh, thorough = false) {
     const info = mesh.pose_structure;
@@ -3083,6 +3097,10 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
   function structureTarget(thorough = false) {
     const mesh = structureMesh();
     if (!mesh) throw new Error('Get the selection first (Pose Studio ▸ Structure ▸ Get Selection).');
+    return pieceTarget(mesh, thorough);
+  }
+  // …and where a piece (the piece itself, or a copy of it) is.
+  function pieceTarget(mesh, thorough = false) {
     const r = (mesh.rotation || [0, 0, 0]).map((v) => ((v % 360) + 360) % 360);
     const quarter = Math.round(r[1] / 90) * 90;
     const off = (v) => Math.min(v, 360 - v);
@@ -3090,7 +3108,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
       throw new Error('Blocks can only be turned in quarter turns around the vertical axis: set the structure\'s rotation to 0, 90, 180 or 270 on Y (and 0 on X and Z).');
     }
     const turn = quarter % 360;
-    const [sx, sy, sz] = structure.size;
+    const [sx, sy, sz] = mesh.pose_structure ? mesh.pose_structure.size : structure.size;
     const size = turn === 90 || turn === 270 ? [sz, sy, sx] : [sx, sy, sz];
     // moved as a piece (its origin), or by all of its corners at once (turned as the piece is): both count
     const shift = structureShift(mesh, thorough);
@@ -3103,7 +3121,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
   }
 
   function removeStructureMesh() {
-    const old = (typeof Project !== 'undefined' && Project ? Project.elements || [] : []).filter((el) => el.name === STRUCTURE_NAME && el instanceof Mesh);
+    const old = (typeof Project !== 'undefined' && Project ? Project.elements || [] : []).filter((el) => el instanceof Mesh && (el.name === STRUCTURE_NAME || isStructurePiece(el)));
     for (const el of old) el.remove();
     const texture = Texture.all.find((t) => t.name === STRUCTURE_TEXTURE);
     if (texture) texture.remove(true);
@@ -3176,7 +3194,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     }
     const sum = [0, 0, 0];
     for (const key of keys) for (let i = 0; i < 3; i++) sum[i] += mesh.vertices[key][i];
-    mesh.pose_structure = { min: min.slice(), size: size.slice(), probe, sum, n: keys.length };
+    mesh.pose_structure = { id: mesh.uuid, min: min.slice(), size: size.slice(), probe, sum, n: keys.length };
     mesh.init();
     structure = { uuid: mesh.uuid, min: min.slice(), size: size.slice() };
     lastTarget = '';
@@ -3212,7 +3230,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     const mesh = buildStructure(min, size, palette, blocks);
     if (!quiet) {
       Blockbench.showQuickMessage(
-        Number(head[8]) < 0 ? `Structure: ${size.join('×')} blocks (too many to draw one by one: shown as a box)` : `Structure: ${size.join('×')} blocks. Move it, then Structure ▸ Apply Move`,
+        Number(head[8]) < 0 ? `Structure: ${size.join('×')} blocks (too many to draw one by one: shown as a box)` : `Structure: ${size.join('×')} blocks. Move it, then Structure ▸ Apply (Duplicate it first to copy the blocks instead)`,
         4000
       );
     }
@@ -3239,14 +3257,16 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
       lastTarget = '';
       return;
     }
-    let message = '{}';
-    try {
-      const t = structureTarget();
-      const moved = t.rot !== 0 || t.to.some((v, i) => v !== structure.min[i]);
-      if (moved) message = JSON.stringify({ min: t.to, size: t.size });
-    } catch (e) {
-      message = '{}'; // turned some other way (or reshaped): no outline until it's a quarter turn
+    const boxes = [];
+    for (const piece of [structureMesh()].concat(structureCopies()).slice(0, 8)) {
+      try {
+        const t = pieceTarget(piece);
+        if (t.rot !== 0 || t.to.some((v, i) => v !== structure.min[i])) boxes.push({ min: t.to, size: t.size });
+      } catch (e) {
+        // turned some other way (or reshaped): no outline until it's a quarter turn
+      }
     }
+    const message = boxes.length ? JSON.stringify({ boxes }) : '{}';
     if (message === lastTarget || link.inFlight >= MAX_IN_FLIGHT) return;
     send(`scriptevent pose:target ${message}`);
     lastTarget = message;
@@ -3268,22 +3288,42 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
   const STRUCTURE_UNDO = 'Pose Studio: move structure in Minecraft';
   let structureBusy = false; // a move (or its undo or redo) is being made: one at a time
 
-  async function applyStructureMove() {
+  // asCopy: the blocks stay, and a copy of them is put down where the piece was moved to.
+  async function applyStructureMove(asCopy = false) {
     if (!requireConnection()) return;
     if (structureBusy) {
       Blockbench.showQuickMessage('Minecraft is still moving the blocks…', 2000);
       return;
     }
-    let target;
+    const piece = structureMesh();
+    if (!piece) {
+      Blockbench.showMessageBox({ title: 'Pose Studio: structure', message: 'Get the selection first (Pose Studio ▸ Structure ▸ Get Selection).' });
+      return;
+    }
+    const from = { min: structure.min.slice(), size: structure.size.slice() };
+    const there = (target) => target.rot === 0 && target.to.every((v, i) => v === from.min[i]);
+    const copies = structureCopies();
+    const ops = [];
+    let own = null; // where the piece itself was moved to
+    let untouched = 0; // copies still on top of the blocks
     try {
-      target = structureTarget(true);
+      const target = pieceTarget(piece, true);
+      if (!there(target)) ops.push((own = { to: target.to, rot: target.rot, copy: asCopy ? 1 : 0, sel: 1 }));
+      for (const copy of copies) {
+        const at = pieceTarget(copy, true);
+        if (there(at)) untouched++;
+        else ops.push({ to: at.to, rot: at.rot, copy: 1, sel: 0 });
+      }
     } catch (e) {
       Blockbench.showMessageBox({ title: 'Pose Studio: structure', message: e.message });
       return;
     }
-    const from = { min: structure.min.slice(), size: structure.size.slice() };
-    if (target.rot === 0 && target.to.every((v, i) => v === from.min[i])) {
-      Blockbench.showQuickMessage("The structure is where it was: move it first (by whole blocks: 16 on Blockbench's grid is one block)", 3500);
+    if (!ops.length) {
+      Blockbench.showQuickMessage(untouched ? 'The copy is still on top of the structure: move it first' : "The structure is where it was: move it first (by whole blocks: 16 on Blockbench's grid is one block)", 3500);
+      return;
+    }
+    if (ops.length > 8) {
+      Blockbench.showMessageBox({ title: 'Pose Studio: structure', message: `That's ${ops.length} places at once: Minecraft is given 8 at a time. Apply some of the copies first.` });
       return;
     }
     structureBusy = true;
@@ -3291,34 +3331,72 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
       let failed = null;
       try {
         // (from and size: the selection Blockbench is showing. Minecraft refuses when it has another one by now)
-        await runGameQuery('pose:move', { to: target.to, rot: target.rot, skip: ignoreAir() ? 1 : 0, from: from.min, size: from.size }, 'Moving the blocks', MOVE_PATIENCE);
+        await runGameQuery('pose:move', { ops, skip: ignoreAir() ? 1 : 0, from: from.min, size: from.size }, copies.length || asCopy ? 'Copying the blocks' : 'Moving the blocks', MOVE_PATIENCE);
       } catch (e) {
         failed = e;
       }
-      if (failed && !failed.game) {
+      if (failed && !failed.game && own) {
         // No answer isn't a no (Minecraft was too busy to say, or the connection hiccuped): where
-        // the selection is now tells whether the blocks moved.
+        // the selection is now tells whether it was done.
         await sleep(1000);
         const now = await selectionNow();
-        if (now && target.to.every((v, i) => v === now.min[i])) failed = null;
+        if (now && own.to.every((v, i) => v === now.min[i])) failed = null;
       }
       if (failed) {
-        Blockbench.showMessageBox({ title: 'Pose Studio: structure', message: `Minecraft couldn't move it: ${failed.message || failed}\n\n${failed.game ? 'Nothing was changed.' : 'If the blocks did move, use Structure ▸ Get Selection.'}` });
+        Blockbench.showMessageBox({ title: 'Pose Studio: structure', message: `Minecraft couldn't do it: ${failed.message || failed}\n\n${failed.game ? 'Nothing was changed.' : 'If the blocks did change, use Structure ▸ Get Selection.'}` });
         return;
       }
-      // the selection is now where the blocks are: fetched again, as Minecraft has it
+      // the selection is fetched again, as Minecraft has it now (the copies are blocks now: their pieces go)
       await getStructureSelection(true);
-      // a step in Blockbench's own history, so Ctrl+Z / Ctrl+Y undo and redo the move in Minecraft
+      // a step in Blockbench's own history, so Ctrl+Z / Ctrl+Y undo and redo it in Minecraft
       try {
         Undo.initEdit({});
         Undo.finishEdit(STRUCTURE_UNDO);
       } catch (e) {
         // the Structure menu's Undo Move still works
       }
-      Blockbench.showQuickMessage('Moved. Ctrl+Z (or Structure ▸ Undo Move) puts it back', 4000);
+      const pasted = ops.filter((op) => op.copy).length;
+      const what = [own && !asCopy ? 'Moved' : '', pasted ? `${pasted} ${pasted === 1 ? 'copy' : 'copies'} put down` : ''].filter(Boolean).join(', ');
+      Blockbench.showQuickMessage(`${what}${untouched ? ` (${untouched} still on top of the structure left out)` : ''}. Ctrl+Z (or Structure ▸ Undo Move) puts it back`, 4000);
     } finally {
       structureBusy = false;
     }
+  }
+
+  // Structure ▸ Duplicate: a copy of the piece beside it, selected, to be moved where the copy of
+  // the blocks is wanted (Blockbench's own Duplicate, or copy and paste, does as well).
+  function duplicateStructure() {
+    const piece = structureMesh();
+    if (!piece) {
+      Blockbench.showQuickMessage('Get the selection first (Structure ▸ Get Selection)', 2500);
+      return null;
+    }
+    let target;
+    try {
+      target = pieceTarget(piece);
+    } catch (e) {
+      target = { size: piece.pose_structure.size };
+    }
+    Undo.initEdit({ outliner: true, elements: [] });
+    // (a block further than its own width along, so it stands clear of the piece)
+    const copy = new Mesh({ name: STRUCTURE_NAME, origin: [piece.origin[0] - (target.size[0] + 1) * 16, piece.origin[1], piece.origin[2]], rotation: (piece.rotation || [0, 0, 0]).slice(), vertices: {} });
+    for (const key of Object.keys(copy.vertices)) delete copy.vertices[key];
+    for (const key of Object.keys(copy.faces)) delete copy.faces[key];
+    for (const [key, vertex] of Object.entries(piece.vertices)) copy.vertices[key] = vertex.slice();
+    for (const face of Object.values(piece.faces)) copy.addFaces(new MeshFace(copy, { vertices: (face.vertices || []).slice(), uv: JSON.parse(JSON.stringify(face.uv || {})), texture: face.texture }));
+    copy.pose_structure = JSON.parse(JSON.stringify(piece.pose_structure));
+    copy.pose_structure.id = piece.uuid;
+    copy.init();
+    Undo.finishEdit('Duplicate structure', { outliner: true, elements: [copy] });
+    Canvas.updateAll();
+    try {
+      if (typeof unselectAllElements === 'function') unselectAllElements();
+      if (typeof copy.select === 'function') copy.select();
+    } catch (e) {
+      // it's in the outliner either way
+    }
+    Blockbench.showQuickMessage('A copy of the structure: move it where the blocks should be copied to, then Apply', 4000);
+    return copy;
   }
 
   // Undo / redo of structure moves: the last 10 moves, one at a time. `quiet`: asked by Ctrl+Z /
@@ -6707,7 +6785,7 @@ try {
           a.wildmobs,
           {
             name: 'Structure', id: 'pose_studio_structure_menu', icon: 'view_in_ar',
-            children: [a.structcorner1, a.structcorner2, a.structlook1, a.structlook2, '_', a.structget, a.structapply, a.structair, '_', a.structundo, a.structredo, '_', a.structclear],
+            children: [a.structcorner1, a.structcorner2, a.structlook1, a.structlook2, '_', a.structget, a.structdup, '_', a.structapply, a.structcopy, a.structair, '_', a.structundo, a.structredo, '_', a.structclear],
           },
           { name: 'Add Camera', id: 'pose_studio_add_camera', icon: 'videocam', children: [a.grabcam, a.savecam] },
           { name: 'Lights', id: 'pose_studio_light_menu', icon: 'lightbulb', children: [a.addlight, a.lightlevel] },
@@ -7038,7 +7116,9 @@ try {
               <div class="ps-btn" @click="run('pose_studio_struct_look1')" title="The block you're looking at"><i class="material-icons">looks_one</i><span>Corner 1: Look</span></div>
               <div class="ps-btn" @click="run('pose_studio_struct_look2')" title="The block you're looking at"><i class="material-icons">looks_two</i><span>Corner 2: Look</span></div>
               <div class="ps-btn ps-wide" @click="run('pose_studio_struct_get')"><i class="material-icons">select_all</i><span>Get Selection</span></div>
-              <div class="ps-btn ps-wide" :class="{ 'ps-off': !s.structure }" @click="run('pose_studio_struct_apply')"><i class="material-icons">open_with</i><span>Apply Move</span></div>
+              <div class="ps-btn" :class="{ 'ps-off': !s.structure }" @click="run('pose_studio_struct_duplicate')" title="A copy of the structure beside it: move it where the blocks should be copied to, then Apply"><i class="material-icons">library_add</i><span>Duplicate</span></div>
+              <div class="ps-btn" :class="{ 'ps-off': !s.structure }" @click="run('pose_studio_struct_copy')" title="Puts a copy of the blocks where the structure was moved to; the blocks themselves stay"><i class="material-icons">content_copy</i><span>Apply as Copy</span></div>
+              <div class="ps-btn ps-wide" :class="{ 'ps-off': !s.structure }" @click="run('pose_studio_struct_apply')" title="Moves the blocks to where the structure is, and puts a copy where each copy of it stands"><i class="material-icons">open_with</i><span>Apply</span></div>
               <div class="ps-btn" @click="run('pose_studio_struct_undo')"><i class="material-icons">undo</i><span>Undo Move</span></div>
               <div class="ps-btn" @click="run('pose_studio_struct_redo')"><i class="material-icons">redo</i><span>Redo Move</span></div>
               <div class="ps-btn ps-wide" @click="run('pose_studio_struct_clear')"><i class="material-icons">deselect</i><span>Clear Selection</span></div>
@@ -13941,7 +14021,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     return { id: idItem.slice(2), name: scene.world || '', anchor: point('A|'), player: point('P|'), locations, removed: scene.removed || [], protocol: version ? Number(version.slice(2)) : 0 };
   }
 
-  const EXPECTED_PACK_PROTOCOL = 42; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
+  const EXPECTED_PACK_PROTOCOL = 43; // the behavior pack this plugin expects (main.js PACK_PROTOCOL)
   let warnedOldPack = false;
 
   // Scene files in the scenes folders that belong to a world (their pose_world says so), as
@@ -14776,6 +14856,15 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.92.0",
+      "date": "2026-10-13",
+      "changes": [
+        "New: copy structures. Duplicate or copy-paste the structure piece in Blockbench (or Structure ▸ Duplicate); Apply puts a copy of the blocks where each one stands.",
+        "New: Structure ▸ Apply as Copy. Apply Move is now called Apply.",
+        "Update the Minecraft packs."
+      ]
+    },
     {
       "version": "0.91.0",
       "date": "2026-10-13",
@@ -15934,7 +16023,7 @@ ${PLUGIN_URL}`,
 
   // for the plugin's own tests only (they set this flag); nothing happens otherwise
   if (typeof globalThis !== 'undefined' && globalThis.__POSE_STUDIO_TEST) {
-    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS, sceneSpot, addLight, lightRoots, stopPath, cameraPathsOn, cameraPose, sampleCameraAnimation, playCameraAnimation, animateCamera, zoomedFov, setupClipChannel, removeClipChannel, clipKeys, clipPose, clipState, displayClips, addAnimationKey, placeClipKey, clipKeyAt, parseRecording, tidyRecording, recordingTicks, recordingAnimation, importRecording, placeRecording, keepRecording, setRecording, poseState, showRecordedWalk, displayClipBones, displayClipRoot, updateRecordingLines, entityAnimations, clipDelta, sampleAnimation, liveRotation, liveOrigin, poseMessage, entityMessage, setContentCache: (c) => (contentCache = c), liveWorldName, adoptCopies, adoptTextures, poseKind, copyName, deckConnect, autoStartDeck, swingStates, heldItemAnswers, sequenceRows, sequenceKeys, sequenceEnd, writeSequence, clipPass, worldPlaces, parseLocate, locatePlace, goToPlace, openPlaces, doLaundry, LOCATE_VERSIONS, sceneTakes, liveMobs, actKeys, writeActs, mobActionChoices, openMobActions, actNumber, propertyStates, rootYaw, isLiveMob, tryAct, endTries, actTicks, mobActionsComponent, actLook, ACTS_CSS, placeKey, moveKey, modelSpacePoints, structureShift, structureMesh, selectionNow, sendStructureTarget, sendFar, FAR_POSITION, FAR_PROPERTY, FAR_SCALE, PROXY_MODEL, renderDistance, farRange, cameraMarkMessage, hideCameraMarks, cameraMarksShown, setCameraMarks, sendTimelineForTake, placeRecording, sampleAnimation, sendAnimation, exportVideo, startRecorder, RECORDER_CS, RECORD_PS1, turnedEffect, turnVector, fxTurn, prepareTurned, turnedId, saddleParts, entityMessages, entityIds, flatParts, packFlat, partPlace, proxyModelFor, anyPartOn, prepareProxy, particleList, particleEntry, placeParticle, fxMessage, fxRoots };
+    globalThis.__POSE_STUDIO_TEST.api = { loadWorldContent, entityList, variantEntries, entryKey, worldChoices, resizeMinecraftWindow, aspectPreset, entityModel, mountSeats, seatSpot, proxyModelFor, posableBones, movingBones, entityAnimations, boneUsage, importEntity, bindRotations, computeMatte, backdropPlan, medianFrames, renderNormalPass, fitNormalsToMatte, compareImage, nearMask, restDelta, buildEquipmentPreview, stillItems, prepareStillItems, currentItemId, worldPacks, deck, deckState, deckRun, buildStructure, structureTarget, getStructureSelection, applyStructureMove, undoStructureMove, redoStructureMove, onBlockbenchUndo, onBlockbenchRedo, panelState, PANEL_CSS, sceneSpot, addLight, lightRoots, stopPath, cameraPathsOn, cameraPose, sampleCameraAnimation, playCameraAnimation, animateCamera, zoomedFov, setupClipChannel, removeClipChannel, clipKeys, clipPose, clipState, displayClips, addAnimationKey, placeClipKey, clipKeyAt, parseRecording, tidyRecording, recordingTicks, recordingAnimation, importRecording, placeRecording, keepRecording, setRecording, poseState, showRecordedWalk, displayClipBones, displayClipRoot, updateRecordingLines, entityAnimations, clipDelta, sampleAnimation, liveRotation, liveOrigin, poseMessage, entityMessage, setContentCache: (c) => (contentCache = c), liveWorldName, adoptCopies, adoptTextures, poseKind, copyName, deckConnect, autoStartDeck, swingStates, heldItemAnswers, sequenceRows, sequenceKeys, sequenceEnd, writeSequence, clipPass, worldPlaces, parseLocate, locatePlace, goToPlace, openPlaces, doLaundry, LOCATE_VERSIONS, sceneTakes, liveMobs, actKeys, writeActs, mobActionChoices, openMobActions, actNumber, propertyStates, rootYaw, isLiveMob, tryAct, endTries, actTicks, mobActionsComponent, actLook, ACTS_CSS, placeKey, moveKey, modelSpacePoints, structureShift, structureMesh, selectionNow, sendStructureTarget, duplicateStructure, structureCopies, pieceTarget, sendFar, FAR_POSITION, FAR_PROPERTY, FAR_SCALE, PROXY_MODEL, renderDistance, farRange, cameraMarkMessage, hideCameraMarks, cameraMarksShown, setCameraMarks, sendTimelineForTake, placeRecording, sampleAnimation, sendAnimation, exportVideo, startRecorder, RECORDER_CS, RECORD_PS1, turnedEffect, turnVector, fxTurn, prepareTurned, turnedId, saddleParts, entityMessages, entityIds, flatParts, packFlat, partPlace, proxyModelFor, anyPartOn, prepareProxy, particleList, particleEntry, placeParticle, fxMessage, fxRoots };
   }
 
   Plugin.register('pose_studio', {
@@ -16115,8 +16204,16 @@ ${PLUGIN_URL}`,
           description: 'Brings the box of blocks selected in Minecraft into Blockbench as one piece you can move.',
         }),
         structapply: new Action('pose_studio_struct_apply', {
-          name: 'Apply Move', icon: 'open_with', click: () => applyStructureMove(),
-          description: 'Moves the selected blocks in Minecraft to where the structure is in Blockbench (quarter turns around the vertical axis too).',
+          name: 'Apply', icon: 'open_with', click: () => applyStructureMove(),
+          description: 'Moves the selected blocks in Minecraft to where the structure is in Blockbench (quarter turns around the vertical axis too), and puts a copy of them down wherever a copy of the structure stands.',
+        }),
+        structcopy: new Action('pose_studio_struct_copy', {
+          name: 'Apply as Copy', icon: 'content_copy', click: () => applyStructureMove(true),
+          description: 'Puts a copy of the selected blocks down where the structure was moved to, and leaves the blocks themselves where they are. The copy is the selection afterwards, so the next one can be put down from there.',
+        }),
+        structdup: new Action('pose_studio_struct_duplicate', {
+          name: 'Duplicate', icon: 'library_add', click: () => duplicateStructure(),
+          description: "A copy of the structure beside it (Blockbench's own Duplicate, or copy and paste, does as well). Move it where the blocks should be copied to, then Apply.",
         }),
         structair: new Toggle('pose_studio_struct_air', {
           name: 'Ignore Air Blocks', icon: 'layers_clear', value: ignoreAir(),

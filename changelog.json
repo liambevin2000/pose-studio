@@ -1,5 +1,14 @@
 [
   {
+    "version": "0.92.0",
+    "date": "2026-10-13",
+    "changes": [
+      "New: copy structures. Duplicate or copy-paste the structure piece in Blockbench (or Structure ▸ Duplicate); Apply puts a copy of the blocks where each one stands.",
+      "New: Structure ▸ Apply as Copy. Apply Move is now called Apply.",
+      "Update the Minecraft packs."
+    ]
+  },
+  {
     "version": "0.91.0",
     "date": "2026-10-13",
     "changes": [
