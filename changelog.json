@@ -1,5 +1,12 @@
 [
   {
+    "version": "0.94.0",
+    "date": "2026-10-14",
+    "changes": [
+      "New entity shot option: Shading pass. Each face is a grey of its own, so on Overlay it shades the shot."
+    ]
+  },
+  {
     "version": "0.93.0",
     "date": "2026-10-13",
     "changes": [

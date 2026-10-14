@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.93.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.94.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -2444,7 +2444,7 @@ Write-Output $Out
   // comes from the normal shot, taken before anything was cleared. "On the sky" puts them in front of a shot of the sky
   // taken from straight above the camera, looking the same way.
   const ENTITY_SHOT_KEY = 'pose_studio_entity_shot';
-  const ENTITY_SHOT_DEFAULTS = { transparent: true, sky: true, full: false, separate: false, normals: false, ids: false, depth: false, particles: false };
+  const ENTITY_SHOT_DEFAULTS = { transparent: true, sky: true, full: false, separate: false, normals: false, shading: false, ids: false, depth: false, particles: false };
   const SKY_RISE = 256; // blocks the camera goes up for the sky shot
   const STILL_FRAMES = 3; // frames per shot when removing particles (what doesn't move is kept)
   let shooting = false; // the camera isn't synced while an entity shot is being taken
@@ -2470,6 +2470,7 @@ Write-Output $Out
         sky: { label: 'Entities on the sky', type: 'checkbox', value: o.sky },
         full: { label: 'The normal shot', type: 'checkbox', value: o.full },
         normals: { label: 'Normal pass (each face coloured by its direction)', type: 'checkbox', value: o.normals },
+        shading: { label: 'Shading pass (each face a grey of its own: put it on Overlay)', type: 'checkbox', value: o.shading },
         ids: { label: 'ID mask pass (each player and mob one flat colour)', type: 'checkbox', value: o.ids },
         depth: { label: 'Depth pass (white near, black far)', type: 'checkbox', value: o.depth },
         separate: { label: 'Each player and mob separately too', type: 'checkbox', value: o.separate },
@@ -2512,7 +2513,9 @@ Write-Output $Out
   // up→green, south→blue; a face's colour doesn't change with the camera), the rest transparent. Pixels a texture leaves see-through (an empty hat layer) stay
   // see-through, as in Minecraft.
   // mode 'ids': each player and mob one flat colour of its own (idColour); 'depth': distance from
-  // the camera in grey, white nearest, black furthest, over the range these entities span.
+  // the camera in grey, white nearest, black furthest, over the range these entities span;
+  // 'shading': each face a grey by the way it faces the camera (lit from above and the left: tops
+  // lightest, then the left, the front, the right, bottoms darkest), so on Overlay it shades the shot.
   function idColour(root) {
     const all = mannequinRoots().concat(entityRoots());
     const index = Math.max(0, all.indexOf(root));
@@ -2570,7 +2573,7 @@ Write-Output $Out
       range[0] = Math.max(0, range[0] - pad);
       range[1] += pad;
     }
-    const modeIndex = mode === 'ids' ? 1 : mode === 'depth' ? 2 : 0;
+    const modeIndex = mode === 'ids' ? 1 : mode === 'depth' ? 2 : mode === 'shading' ? 3 : 0;
     const materials = new Map(); // root + texture -> material
     const normalMaterial = (original, root) => {
       const map = original && ((original.uniforms && original.uniforms.map && original.uniforms.map.value) || original.map) || null;
@@ -2581,8 +2584,8 @@ Write-Output $Out
             map: { value: map }, useMap: { value: map ? 1 : 0 }, toGame: { value: toGame },
             mode: { value: modeIndex }, idColour: { value: idColour(root) }, depthRange: { value: new THREE.Vector2(range[0], range[1]) },
           },
-          vertexShader: 'uniform mat3 toGame; varying vec3 vN; varying vec2 vUv; varying float vDepth; void main() { vN = toGame * normalize(mat3(modelMatrix) * normal); vUv = uv; vec4 view = modelViewMatrix * vec4(position, 1.0); vDepth = -view.z; gl_Position = projectionMatrix * view; }',
-          fragmentShader: 'uniform sampler2D map; uniform float useMap; uniform float mode; uniform vec3 idColour; uniform vec2 depthRange; varying vec3 vN; varying vec2 vUv; varying float vDepth; void main() { if (useMap > 0.5 && texture2D(map, vUv).a < 0.5) discard; if (mode > 1.5) { float g = 1.0 - clamp((vDepth - depthRange.x) / (depthRange.y - depthRange.x), 0.0, 1.0); gl_FragColor = vec4(g, g, g, 1.0); } else if (mode > 0.5) { gl_FragColor = vec4(idColour, 1.0); } else { gl_FragColor = vec4(normalize(vN) * 0.5 + 0.5, 1.0); } }',
+          vertexShader: 'uniform mat3 toGame; varying vec3 vN; varying vec2 vUv; varying float vDepth; varying vec3 vView; void main() { vN = toGame * normalize(mat3(modelMatrix) * normal); vView = normalize(normalMatrix * normal); vUv = uv; vec4 view = modelViewMatrix * vec4(position, 1.0); vDepth = -view.z; gl_Position = projectionMatrix * view; }',
+          fragmentShader: 'uniform sampler2D map; uniform float useMap; uniform float mode; uniform vec3 idColour; uniform vec2 depthRange; varying vec3 vN; varying vec2 vUv; varying float vDepth; varying vec3 vView; void main() { if (useMap > 0.5 && texture2D(map, vUv).a < 0.5) discard; if (mode > 2.5) { vec3 n = normalize(vView); if (!gl_FrontFacing) n = -n; float g = 0.5 + 0.35 * dot(n, normalize(vec3(-0.5, 0.8, 0.35))); gl_FragColor = vec4(g, g, g, 1.0); } else if (mode > 1.5) { float g = 1.0 - clamp((vDepth - depthRange.x) / (depthRange.y - depthRange.x), 0.0, 1.0); gl_FragColor = vec4(g, g, g, 1.0); } else if (mode > 0.5) { gl_FragColor = vec4(idColour, 1.0); } else { gl_FragColor = vec4(normalize(vN) * 0.5 + 0.5, 1.0); } }',
           side: THREE.DoubleSide,
         }));
       }
@@ -2905,8 +2908,8 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     }
     if (shooting) return;
     // Compare with Game: only the cut-out and Blockbench's outline, everyone together
-    const options = compare ? { transparent: false, sky: false, full: false, normals: false, ids: false, depth: false, separate: false, particles: false } : entityShotOptions();
-    if (!compare && !options.transparent && !options.sky && !options.full && !options.normals && !options.ids && !options.depth) {
+    const options = compare ? { transparent: false, sky: false, full: false, normals: false, shading: false, ids: false, depth: false, separate: false, particles: false } : entityShotOptions();
+    if (!compare && !options.transparent && !options.sky && !options.full && !options.normals && !options.shading && !options.ids && !options.depth) {
       entityShotOptionsDialog();
       return;
     }
@@ -2921,7 +2924,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
     const why = 'run PowerShell to screenshot the Minecraft window';
     const frames = options.particles ? STILL_FRAMES : 1;
     const grab = async () => (await runPowerShell(`$Frames = ${frames}; $Gap = 400` + '\n' + GRAB_PS1, '', why)).split(/\r?\n/).filter(Boolean);
-    const needMatte = compare || options.transparent || options.sky || options.normals || options.ids || options.depth;
+    const needMatte = compare || options.transparent || options.sky || options.normals || options.shading || options.ids || options.depth;
     // the shots: everyone together, then (separately) each one with the others away
     const takes = [{ suffix: '', roots, ids: [] }];
     if (options.separate && roots.length > 1) {
@@ -3010,7 +3013,7 @@ foreach ($line in ([Console]::In.ReadToEnd() -split "\r?\n")) {
           if (options.transparent) lines.push(`_entities${take.suffix}|` + encodePng(result.cut, a.width, a.height));
           if (options.sky && result.sky) lines.push(`_entities${take.suffix}_sky|` + encodePng(result.sky, a.width, a.height));
           if (options.normals) lines.push(`_normals${take.suffix}|` + encodePng(fitNormalsToMatte(drawn, result.alpha, a.width, a.height), a.width, a.height));
-          for (const pass of ['ids', 'depth']) {
+          for (const pass of ['shading', 'ids', 'depth']) {
             if (options[pass]) lines.push(`_${pass}${take.suffix}|` + encodePng(fitNormalsToMatte(renderNormalPass(take.roots, a.width, a.height, pass), result.alpha, a.width, a.height), a.width, a.height));
           }
           if (compare) lines.push('_compare|' + encodePng(compareImage(a.data, drawn, result.alpha, a.width, a.height), a.width, a.height));
@@ -14856,6 +14859,13 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.94.0",
+      "date": "2026-10-14",
+      "changes": [
+        "New entity shot option: Shading pass. Each face is a grey of its own, so on Overlay it shades the shot."
+      ]
+    },
     {
       "version": "0.93.0",
       "date": "2026-10-13",

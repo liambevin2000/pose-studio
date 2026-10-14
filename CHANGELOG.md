@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.94.0 (2026-10-14)
+
+- New entity shot option: Shading pass. Each face is a grey of its own, so on Overlay it shades the shot.
+
 ## 0.93.0 (2026-10-13)
 
 - The skin library now holds 32 skins instead of 16.
