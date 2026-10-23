@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.94.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.94.1'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -11925,7 +11925,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
       // (every part of a model shown by several copies can be posed)
       return { key: entryKey(entry), entry, geometry, parts, bones: parts ? geometry.bones.map((b) => b.name) : model ? posableBones(model, boneUsage(content, entry.id)) : [] };
     });
-    const hash = hashString('v16|' + JSON.stringify(models.map((m) => [m.key, m.entry.material, m.bones, m.geometry && m.geometry.bones.length].concat(m.parts ? [m.parts] : []))));
+    const hash = hashString('v17|' + JSON.stringify(models.map((m) => [m.key, m.entry.material, m.bones, m.geometry && m.geometry.bones.length].concat(m.parts ? [m.parts] : []))));
     const registry = proxyRegistry();
     if (registry.hash === hash) return 0;
 
@@ -12126,7 +12126,8 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     fs.writeFileSync(`${bp}\\entities\\pose_proxy.json`, JSON.stringify(behavior, null, 2));
     fs.writeFileSync(`${rp}\\entity\\pose_proxy.entity.json`, JSON.stringify({ format_version: '1.10.0', 'minecraft:client_entity': { description } }, null, 2));
     fs.writeFileSync(`${rp}\\animations\\pose_proxy.animation.json`, JSON.stringify(animations));
-    fs.writeFileSync(`${rp}\\models\\entity\\pose_proxy.geo.json`, JSON.stringify({ format_version: '1.12.0', 'minecraft:geometry': geometries }));
+    // (1.21.0: the first geometry format whose faces can be turned, uv_rotation)
+    fs.writeFileSync(`${rp}\\models\\entity\\pose_proxy.geo.json`, JSON.stringify({ format_version: '1.21.0', 'minecraft:geometry': geometries }));
     fs.writeFileSync(`${rp}\\render_controllers\\pose_proxy.render_controllers.json`, JSON.stringify(controller, null, 2));
     registryCache = { hash, models: registryModels, world: content.world || '' };
     fs.writeFileSync(PROXY_REGISTRY(), JSON.stringify(registryCache, null, 2));
@@ -14859,6 +14860,14 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.94.1",
+      "date": "2026-10-23",
+      "changes": [
+        "Fixed: rotated UVs on mobs (wings, staffs) were drawn unrotated in Minecraft.",
+        "Open Add Entity… once and reload when asked."
+      ]
+    },
     {
       "version": "0.94.0",
       "date": "2026-10-14",

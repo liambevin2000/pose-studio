@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.94.1 (2026-10-23)
+
+- Fixed: rotated UVs on mobs (wings, staffs) were drawn unrotated in Minecraft.
+- Open Add Entity… once and reload when asked.
+
 ## 0.94.0 (2026-10-14)
 
 - New entity shot option: Shading pass. Each face is a grey of its own, so on Overlay it shades the shot.
