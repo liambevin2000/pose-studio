@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.94.1'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.94.2'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -11917,6 +11917,56 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     return /^entity(_|$)/.test(material || '') ? material : 'entity_alphatest';
   }
 
+  function hasTurnedFaces(geometry) {
+    return geometry.bones.some((b) => (b.cubes || []).some((c) => c.uv && !Array.isArray(c.uv) && Object.values(c.uv).some((f) => f && f.uv_rotation)));
+  }
+
+  // A geometry with only what format 1.21.0 allows, every value of the right kind.
+  function strictGeometry(geometry) {
+    const vec = (v, n = 3) => Array.isArray(v) && v.length === n && v.every((x) => typeof x === 'number' && Number.isFinite(x));
+    const pick = (from, keys, test) => {
+      const out = {};
+      for (const k of keys) if (from[k] !== undefined && test(k, from[k])) out[k] = from[k];
+      return out;
+    };
+    const face = (f) => {
+      const out = pick(f, ['uv', 'uv_size'], (k, v) => vec(v, 2));
+      if ([90, 180, 270].includes(f.uv_rotation)) out.uv_rotation = f.uv_rotation;
+      if (typeof f.material_instance === 'string') out.material_instance = f.material_instance;
+      return out;
+    };
+    const cube = (c) => {
+      const out = pick(c, ['origin', 'size', 'pivot', 'rotation'], (k, v) => vec(v));
+      if (typeof c.inflate === 'number') out.inflate = c.inflate;
+      if (typeof c.mirror === 'boolean') out.mirror = c.mirror;
+      if (vec(c.uv, 2)) out.uv = c.uv;
+      else if (c.uv && typeof c.uv === 'object') {
+        out.uv = {};
+        for (const key of ['north', 'south', 'east', 'west', 'up', 'down']) if (c.uv[key] && vec(c.uv[key].uv, 2)) out.uv[key] = face(c.uv[key]);
+      }
+      return out;
+    };
+    const bone = (b) => {
+      const out = { name: b.name };
+      if (typeof b.parent === 'string') out.parent = b.parent;
+      Object.assign(out, pick(b, ['pivot', 'rotation', 'bind_pose_rotation'], (k, v) => vec(v)));
+      if (typeof b.mirror === 'boolean') out.mirror = b.mirror;
+      if (typeof b.inflate === 'number') out.inflate = b.inflate;
+      if (typeof b.binding === 'string') out.binding = b.binding;
+      out.cubes = b.neverRender ? [] : (b.cubes || []).filter((c) => vec(c.origin) && vec(c.size)).map(cube);
+      if (b.locators && typeof b.locators === 'object') {
+        const locators = {};
+        for (const [k, v] of Object.entries(b.locators)) {
+          if (vec(v)) locators[k] = v;
+          else if (v && vec(v.offset)) locators[k] = Object.assign({ offset: v.offset }, vec(v.rotation) ? { rotation: v.rotation } : {});
+        }
+        if (Object.keys(locators).length) out.locators = locators;
+      }
+      return out;
+    };
+    return { description: geometry.description, bones: geometry.bones.map(bone) };
+  }
+
   async function prepareProxy(content, list) {
     const models = list.map((entry) => {
       const geometry = restGeometry(content, entry.id, entry.geometryId, entry.flags);
@@ -11925,7 +11975,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
       // (every part of a model shown by several copies can be posed)
       return { key: entryKey(entry), entry, geometry, parts, bones: parts ? geometry.bones.map((b) => b.name) : model ? posableBones(model, boneUsage(content, entry.id)) : [] };
     });
-    const hash = hashString('v17|' + JSON.stringify(models.map((m) => [m.key, m.entry.material, m.bones, m.geometry && m.geometry.bones.length].concat(m.parts ? [m.parts] : []))));
+    const hash = hashString('v18|' + JSON.stringify(models.map((m) => [m.key, m.entry.material, m.bones, m.geometry && m.geometry.bones.length].concat(m.parts ? [m.parts] : []))));
     const registry = proxyRegistry();
     if (registry.hash === hash) return 0;
 
@@ -12126,8 +12176,14 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     fs.writeFileSync(`${bp}\\entities\\pose_proxy.json`, JSON.stringify(behavior, null, 2));
     fs.writeFileSync(`${rp}\\entity\\pose_proxy.entity.json`, JSON.stringify({ format_version: '1.10.0', 'minecraft:client_entity': { description } }, null, 2));
     fs.writeFileSync(`${rp}\\animations\\pose_proxy.animation.json`, JSON.stringify(animations));
-    // (1.21.0: the first geometry format whose faces can be turned, uv_rotation)
-    fs.writeFileSync(`${rp}\\models\\entity\\pose_proxy.geo.json`, JSON.stringify({ format_version: '1.21.0', 'minecraft:geometry': geometries }));
+    // Most models as they always were (1.12.0). The ones with turned faces (uv_rotation) need
+    // 1.21.0, which Minecraft reads strictly: they go in a file of their own, cleaned to what that
+    // format allows, so if it's refused all the other models still show.
+    const turned = geometries.filter(hasTurnedFaces);
+    fs.writeFileSync(`${rp}\\models\\entity\\pose_proxy.geo.json`, JSON.stringify({ format_version: '1.12.0', 'minecraft:geometry': geometries.filter((g) => !turned.includes(g)) }));
+    const turnedFile = `${rp}\\models\\entity\\pose_proxy_turned.geo.json`;
+    if (turned.length) fs.writeFileSync(turnedFile, JSON.stringify({ format_version: '1.21.0', 'minecraft:geometry': turned.map(strictGeometry) }));
+    else if (fs.existsSync(turnedFile)) fs.rmSync(turnedFile, { force: true });
     fs.writeFileSync(`${rp}\\render_controllers\\pose_proxy.render_controllers.json`, JSON.stringify(controller, null, 2));
     registryCache = { hash, models: registryModels, world: content.world || '' };
     fs.writeFileSync(PROXY_REGISTRY(), JSON.stringify(registryCache, null, 2));
@@ -14860,6 +14916,14 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.94.2",
+      "date": "2026-10-26",
+      "changes": [
+        "Fixed: mobs added in Pose Studio not showing in Minecraft since 0.94.1.",
+        "Open Add Entity… once and reload when asked."
+      ]
+    },
     {
       "version": "0.94.1",
       "date": "2026-10-23",

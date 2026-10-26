@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.94.2 (2026-10-26)
+
+- Fixed: mobs added in Pose Studio not showing in Minecraft since 0.94.1.
+- Open Add Entity… once and reload when asked.
+
 ## 0.94.1 (2026-10-23)
 
 - Fixed: rotated UVs on mobs (wings, staffs) were drawn unrotated in Minecraft.
