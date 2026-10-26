@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.94.3 (2026-10-26)
+
+- Fixed: one more thing Minecraft refused in the file of mobs with rotated UVs.
+
 ## 0.94.2 (2026-10-26)
 
 - Fixed: mobs added in Pose Studio not showing in Minecraft since 0.94.1.

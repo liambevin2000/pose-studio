@@ -1,5 +1,12 @@
 [
   {
+    "version": "0.94.3",
+    "date": "2026-10-26",
+    "changes": [
+      "Fixed: one more thing Minecraft refused in the file of mobs with rotated UVs."
+    ]
+  },
+  {
     "version": "0.94.2",
     "date": "2026-10-26",
     "changes": [

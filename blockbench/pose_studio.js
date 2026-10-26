@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.94.2'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.94.3'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -11949,7 +11949,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     const bone = (b) => {
       const out = { name: b.name };
       if (typeof b.parent === 'string') out.parent = b.parent;
-      Object.assign(out, pick(b, ['pivot', 'rotation', 'bind_pose_rotation'], (k, v) => vec(v)));
+      Object.assign(out, pick(b, ['pivot', 'rotation'], (k, v) => vec(v))); // (not neverRender, reset or bind_pose_rotation: 1.21.0 refuses the whole file for them)
       if (typeof b.mirror === 'boolean') out.mirror = b.mirror;
       if (typeof b.inflate === 'number') out.inflate = b.inflate;
       if (typeof b.binding === 'string') out.binding = b.binding;
@@ -14916,6 +14916,13 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.94.3",
+      "date": "2026-10-26",
+      "changes": [
+        "Fixed: one more thing Minecraft refused in the file of mobs with rotated UVs."
+      ]
+    },
     {
       "version": "0.94.2",
       "date": "2026-10-26",
