@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.94.3'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.95.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -6771,7 +6771,7 @@ try {
           a.anchor,
           a.clear,
           '_',
-          { name: 'Setup', id: 'pose_studio_more', icon: 'settings', children: [a.folders, a.installpacks, a.reloadpacks, '_', a.checkupdates, a.debuginfo] },
+          { name: 'Setup', id: 'pose_studio_more', icon: 'settings', children: [a.folders, a.installpacks, a.reloadpacks, '_', a.checkupdates, a.switchversion, a.debuginfo] },
         ]
       : [
           a.link,
@@ -6802,7 +6802,7 @@ try {
           a.entityshot,
           a.entityshotoptions,
           '_',
-          { name: 'More', id: 'pose_studio_more', icon: 'more_horiz', children: [a.folders, a.installpacks, a.reloadpacks, '_', a.deck, a.deckplugin, '_', a.comparegame, a.anchor, a.skin, a.clear, '_', a.checkupdates, a.debuginfo] },
+          { name: 'More', id: 'pose_studio_more', icon: 'more_horiz', children: [a.folders, a.installpacks, a.reloadpacks, '_', a.deck, a.deckplugin, '_', a.comparegame, a.anchor, a.skin, a.clear, '_', a.checkupdates, a.switchversion, a.debuginfo] },
         ];
     menu = new BarMenu('pose_studio', items, { name: 'Pose Studio' });
     MenuBar.addMenu(menu, 'tools');
@@ -14917,6 +14917,13 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // <changelog>
   const CHANGELOG = [
     {
+      "version": "0.95.0",
+      "date": "2026-10-26",
+      "changes": [
+        "New: More ▸ Switch Version… goes back to an earlier version (and its Minecraft packs) if an update breaks something, or to the latest again."
+      ]
+    },
+    {
       "version": "0.94.3",
       "date": "2026-10-26",
       "changes": [
@@ -16082,7 +16089,8 @@ ${PLUGIN_URL}`,
     const installed = installedPacks();
     const packsOld = installed.missing || installed.revision !== packList.revision;
     if (!pluginOld && !packsOld) {
-      if (manual) Blockbench.showQuickMessage(`Pose Studio ${PLUGIN_VERSION} is up to date`, 2000);
+      if (manual && pinnedVersion()) Blockbench.showQuickMessage(`Pose Studio is kept on ${PLUGIN_VERSION}: More ▸ Switch Version… to get updates again`, 4000);
+      else if (manual) Blockbench.showQuickMessage(`Pose Studio ${PLUGIN_VERSION} is up to date`, 2000);
       return;
     }
     const notes = [];
@@ -16117,6 +16125,75 @@ ${PLUGIN_URL}`,
       if (self && self.source === 'url' && typeof self.reload === 'function') setTimeout(() => self.reload(), 300);
       else Blockbench.showMessageBox({ title: 'Pose Studio', message: 'Restart Blockbench to load the new version.' });
     }
+  }
+
+  // Pose Studio ▸ More ▸ Switch Version…: goes back to an earlier release (or forward to the
+  // latest again). Every release is tagged v<version> in the repository; the plugin is loaded from
+  // that tag's URL instead of main's (Blockbench remembers it, so it stays on that version until
+  // switched back), and the Minecraft packs of that release are installed with it.
+  const REPO_RAW = 'https://raw.githubusercontent.com/liambevin2000/pose-studio';
+  const releaseBase = (version) => (version ? `${REPO_RAW}/v${version}` : `${REPO_RAW}/main`);
+  const SWITCHER_SINCE = '0.95.0'; // the first version with this menu
+
+  // the release this copy was loaded from: null when it follows main (the latest)
+  function pinnedVersion() {
+    const m = updateBase().match(/\/v(\d+\.\d+\.\d+)$/);
+    return m ? m[1] : null;
+  }
+
+  async function switchVersion() {
+    const self = typeof Plugins !== 'undefined' && Plugins.registered && Plugins.registered.pose_studio;
+    if (!self || self.source !== 'url') {
+      Blockbench.showMessageBox({ title: 'Pose Studio', message: `This copy was installed from a file, so it can't switch versions. Install it with File > Plugins > Load Plugin from URL:\n\n${PLUGIN_URL}` });
+      return;
+    }
+    let changelog;
+    try {
+      changelog = await fetchRepo(releaseBase(null), 'changelog.json');
+    } catch (e) {
+      return showError('Pose Studio: versions', e);
+    }
+    const pinned = pinnedVersion();
+    const options = { latest: `Latest (${changelog[0].version}), and every update after it${pinned ? '' : ' (now)'}` };
+    for (const e of changelog.slice(0, 40)) {
+      options[e.version] = `${e.version}${e.date ? '  ' + e.date : ''}${pinned === e.version ? ' (now)' : ''}: ${(e.changes || [])[0] || ''}`.slice(0, 120);
+    }
+    new Dialog({
+      id: 'pose_studio_switch_version',
+      title: 'Switch Version',
+      width: 640,
+      form: {
+        info: { type: 'info', text: pinned ? `You're on ${pinned}, and it stays there (no updates) until you switch back to Latest here.` : `You're on the latest version (${PLUGIN_VERSION}), which updates by itself.` },
+        version: { label: 'Version', type: 'select', options, value: pinned || 'latest' },
+        note: { type: 'info', text: `The Minecraft packs of that version are installed with it: reopen the world afterwards. Versions before ${SWITCHER_SINCE} don't have this menu: to come back from one, use File > Plugins > Load Plugin from URL with ${PLUGIN_URL}` },
+      },
+      onConfirm(form) {
+        const version = form.version === 'latest' ? null : form.version;
+        if (version === pinned) return;
+        applyVersion(self, version);
+      },
+    }).show();
+  }
+
+  async function applyVersion(self, version) {
+    const base = releaseBase(version);
+    let packList;
+    try {
+      packList = await fetchRepo(base, 'packs.json');
+    } catch (e) {
+      return showError('Pose Studio: switching version', new Error(`Version ${version} can't be downloaded (${e.message || e}).`));
+    }
+    try {
+      await installPacks(base, packList);
+    } catch (e) {
+      Blockbench.setProgress(0);
+      return showError('Pose Studio: installing the Minecraft packs', e);
+    }
+    if (link.connected) reloadMinecraftPacks();
+    Blockbench.showQuickMessage(`Switching to Pose Studio ${version || 'latest'}… Reopen the Minecraft world once it's loaded.`, 5000);
+    // reloading replaces this code with that version's; nothing may run after it
+    self.path = `${base}/blockbench/pose_studio.js`;
+    setTimeout(() => self.reload(), 300);
   }
 
   // for the plugin's own tests only (they set this flag); nothing happens otherwise
@@ -16340,6 +16417,10 @@ ${PLUGIN_URL}`,
         showpanel: new Action('pose_studio_show_panel', {
           name: 'Show Panel', icon: 'dock_to_left', click: showPosePanel,
           description: 'Shows the Pose Studio panel (the buttons for everyday things) if it was hidden or folded.',
+        }),
+        switchversion: new Action('pose_studio_switch_version', {
+          name: 'Switch Version…', icon: 'history', click: () => switchVersion(),
+          description: 'Goes back to an earlier version of Pose Studio and its Minecraft packs (or to the latest again).',
         }),
         checkupdates: new Action('pose_studio_check_updates_now', {
           name: 'Check for Updates', icon: 'update', click: () => checkForUpdates(true),

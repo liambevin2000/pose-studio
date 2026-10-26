@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.95.0 (2026-10-26)
+
+- New: More ▸ Switch Version… goes back to an earlier version (and its Minecraft packs) if an update breaks something, or to the latest again.
+
 ## 0.94.3 (2026-10-26)
 
 - Fixed: one more thing Minecraft refused in the file of mobs with rotated UVs.

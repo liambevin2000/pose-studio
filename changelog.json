@@ -1,5 +1,12 @@
 [
   {
+    "version": "0.95.0",
+    "date": "2026-10-26",
+    "changes": [
+      "New: More ▸ Switch Version… goes back to an earlier version (and its Minecraft packs) if an update breaks something, or to the latest again."
+    ]
+  },
+  {
     "version": "0.94.3",
     "date": "2026-10-26",
     "changes": [
