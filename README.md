@@ -32,7 +32,7 @@ Blockbench plugin ──websocket──► Minecraft (/connect) ──/scripteve
 - **Getting updates:** restart Blockbench (or File → Plugins → Pose Studio → Reload), or use File → Plugins → Pose Studio →
   Settings → **Pose Studio: Check for Updates**, which also updates the Minecraft packs when they've changed. Blockbench also checks by itself
   a few seconds after it starts and asks when something is out of date.
-- **Going back a version:** Pose Studio ▸ More ▸ **Switch Version…** picks any earlier release; its Minecraft packs are
+- **Going back a version:** Pose Studio ▸ Setup (More in the old menu) ▸ **Switch Version…** picks any earlier release; its Minecraft packs are
   installed with it (reopen the world). It stays on that version, without updates, until you switch back to **Latest** there.
   Versions before 0.95.0 don't have that menu: to come back from one, load the plugin from its URL again (File → Plugins →
   Load Plugin from URL, `https://raw.githubusercontent.com/liambevin2000/pose-studio/main/blockbench/pose_studio.js`).

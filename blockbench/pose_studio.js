@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.95.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.95.1'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -14917,10 +14917,17 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // <changelog>
   const CHANGELOG = [
     {
+      "version": "0.95.1",
+      "date": "2026-10-26",
+      "changes": [
+        "Switch Version… is in the Pose Studio menu under Setup (More in the old menu)."
+      ]
+    },
+    {
       "version": "0.95.0",
       "date": "2026-10-26",
       "changes": [
-        "New: More ▸ Switch Version… goes back to an earlier version (and its Minecraft packs) if an update breaks something, or to the latest again."
+        "New: Pose Studio ▸ Setup ▸ Switch Version… goes back to an earlier version (and its Minecraft packs) if an update breaks something, or to the latest again."
       ]
     },
     {
@@ -16089,7 +16096,7 @@ ${PLUGIN_URL}`,
     const installed = installedPacks();
     const packsOld = installed.missing || installed.revision !== packList.revision;
     if (!pluginOld && !packsOld) {
-      if (manual && pinnedVersion()) Blockbench.showQuickMessage(`Pose Studio is kept on ${PLUGIN_VERSION}: More ▸ Switch Version… to get updates again`, 4000);
+      if (manual && pinnedVersion()) Blockbench.showQuickMessage(`Pose Studio is kept on ${PLUGIN_VERSION}: Pose Studio ▸ Setup (or More) ▸ Switch Version… to get updates again`, 4000);
       else if (manual) Blockbench.showQuickMessage(`Pose Studio ${PLUGIN_VERSION} is up to date`, 2000);
       return;
     }
@@ -16127,7 +16134,7 @@ ${PLUGIN_URL}`,
     }
   }
 
-  // Pose Studio ▸ More ▸ Switch Version…: goes back to an earlier release (or forward to the
+  // Pose Studio ▸ Setup (old menu: More) ▸ Switch Version…: goes back to an earlier release (or forward to the
   // latest again). Every release is tagged v<version> in the repository; the plugin is loaded from
   // that tag's URL instead of main's (Blockbench remembers it, so it stays on that version until
   // switched back), and the Minecraft packs of that release are installed with it.

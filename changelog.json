@@ -1,9 +1,16 @@
 [
   {
+    "version": "0.95.1",
+    "date": "2026-10-26",
+    "changes": [
+      "Switch Version… is in the Pose Studio menu under Setup (More in the old menu)."
+    ]
+  },
+  {
     "version": "0.95.0",
     "date": "2026-10-26",
     "changes": [
-      "New: More ▸ Switch Version… goes back to an earlier version (and its Minecraft packs) if an update breaks something, or to the latest again."
+      "New: Pose Studio ▸ Setup ▸ Switch Version… goes back to an earlier version (and its Minecraft packs) if an update breaks something, or to the latest again."
     ]
   },
   {
