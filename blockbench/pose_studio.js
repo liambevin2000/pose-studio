@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.95.1'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.95.2'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -9145,6 +9145,12 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
       const id = typeof rc === 'string' ? rc : Object.keys(rc)[0];
       const def = content.controllers.get(id);
       if (!def || def === main) continue;
+      // a layer only for babies isn't drawn on a grown-up (DragonCraft's NPCs: "q.is_baby")
+      const when = typeof rc === 'string' ? null : Object.values(rc)[0];
+      if (typeof when === 'string' && /\bis_baby\b/i.test(when) && !idleCondition(when)) continue;
+      // nor is one drawn on a model of its own: its texture belongs to that model, not this one
+      const geo = (e) => String(e || '').replace(/\s+/g, '').toLowerCase();
+      if (def.geometry && main.geometry && geo(def.geometry) !== geo(main.geometry)) continue;
       const hidesAll = (def.part_visibility || []).some((p) => p['*'] === false);
       const usesArrays = (def.textures || []).some((t) => /\barray\./i.test(String(t)));
       if (!hidesAll && usesArrays) out.push(def);
@@ -11975,7 +11981,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
       // (every part of a model shown by several copies can be posed)
       return { key: entryKey(entry), entry, geometry, parts, bones: parts ? geometry.bones.map((b) => b.name) : model ? posableBones(model, boneUsage(content, entry.id)) : [] };
     });
-    const hash = hashString('v18|' + JSON.stringify(models.map((m) => [m.key, m.entry.material, m.bones, m.geometry && m.geometry.bones.length].concat(m.parts ? [m.parts] : []))));
+    const hash = hashString('v19|' + JSON.stringify(models.map((m) => [m.key, m.entry.material, m.bones, m.geometry && m.geometry.bones.length].concat(m.parts ? [m.parts] : []))));
     const registry = proxyRegistry();
     if (registry.hash === hash) return 0;
 
@@ -14916,6 +14922,14 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.95.2",
+      "date": "2026-10-27",
+      "changes": [
+        "Fixed: mobs with a separate baby look (DragonCraft's Nicheny NPCs) had the baby skin painted over their own in Minecraft.",
+        "Open Add Entity… once and reload when asked."
+      ]
+    },
     {
       "version": "0.95.1",
       "date": "2026-10-26",

@@ -1,5 +1,13 @@
 [
   {
+    "version": "0.95.2",
+    "date": "2026-10-27",
+    "changes": [
+      "Fixed: mobs with a separate baby look (DragonCraft's Nicheny NPCs) had the baby skin painted over their own in Minecraft.",
+      "Open Add Entity… once and reload when asked."
+    ]
+  },
+  {
     "version": "0.95.1",
     "date": "2026-10-26",
     "changes": [

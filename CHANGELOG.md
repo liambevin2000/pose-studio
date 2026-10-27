@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.95.2 (2026-10-27)
+
+- Fixed: mobs with a separate baby look (DragonCraft's Nicheny NPCs) had the baby skin painted over their own in Minecraft.
+- Open Add Entity… once and reload when asked.
+
 ## 0.95.1 (2026-10-26)
 
 - Switch Version… is in the Pose Studio menu under Setup (More in the old menu).
