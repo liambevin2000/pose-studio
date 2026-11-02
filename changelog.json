@@ -1,5 +1,13 @@
 [
   {
+    "version": "0.95.3",
+    "date": "2026-11-02",
+    "changes": [
+      "Fixed: players and mobs could vanish for good when you went far away while the game camera stayed at the scene. They now go back to their own place.",
+      "Update the Minecraft packs."
+    ]
+  },
+  {
     "version": "0.95.2",
     "date": "2026-10-27",
     "changes": [

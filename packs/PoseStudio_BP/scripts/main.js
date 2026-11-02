@@ -256,13 +256,35 @@ function settle(home) {
     }
   }
   const tooFar = farBeyond > 0 && Math.hypot(v.x - at.x, v.y - at.y, v.z - at.z) > farBeyond - (home.steps ? FAR_BACK : 0);
-  if (small || tooFar) {
+  const unloaded = !!home.steps && !isLoaded(entity.dimension, at); // (its own place isn't loaded yet: it stays carried)
+  if (small || tooFar || unloaded) {
     let steps = home.steps;
     if (steps) {
       const spot = carriedAt(drawn, steps);
       if (Math.hypot(spot.x - v.x, spot.y - (v.y + CARRY_UP), spot.z - v.z) > CARRY_REACH) steps = null;
     }
     if (!steps) steps = stepsFor(drawn, player);
+    // (a spot that isn't near the player any more, or isn't loaded: fetched again. Where even that
+    // can't be near them, more than the steps reach (the game camera far from them), it goes back to
+    // its own place: not drawn from here, but there when someone goes back, instead of left behind
+    // somewhere on the way, unloaded, and lost)
+    const keepable = (s) => {
+      const spot = carriedAt(drawn, s);
+      return Math.hypot(spot.x - v.x, spot.y - (v.y + CARRY_UP), spot.z - v.z) <= CARRY_REACH * 2 && isLoaded(entity.dimension, spot);
+    };
+    if (!keepable(steps)) {
+      steps = stepsFor(drawn, player);
+      if (!keepable(steps)) {
+        if (home.steps || home.small) {
+          home.steps = null;
+          home.code = 0;
+          home.drawn = null;
+          entity.setProperty("pose:far", 0);
+          setSmall(home, 0);
+        }
+        return at;
+      }
+    }
     const code = farCode(steps);
     try {
       if (code !== home.code) entity.setProperty("pose:far", code);
@@ -331,22 +353,14 @@ function settleAll() {
         continue;
       }
       if (home.stale) continue;
-      const carried = !!home.steps;
       const to = settle(home);
-      if (carried && !home.steps && !isLoaded(home.entity.dimension, to)) {
-        // (not carried any more, and its own place isn't loaded: an entity sent there couldn't be
-        // found again until someone goes there. It's made again when Blockbench next sends it)
-        home.entity.remove();
-        homes.delete(id);
-        continue;
-      }
       const spot = home.spot;
       if (!spot || Math.abs(spot.x - to.x) + Math.abs(spot.y - to.y) + Math.abs(spot.z - to.z) > 0.0005) {
         home.entity.teleport(to, { rotation: { x: 0, y: 0 }, keepVelocity: false });
         home.spot = to;
       }
     } catch {
-      homes.delete(id); // gone, or not loaded right now
+      // not loaded right now: tried again next time (forgotten only once it's gone: isValid above)
     }
   }
 }

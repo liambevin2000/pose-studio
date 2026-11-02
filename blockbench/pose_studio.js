@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.95.2'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.95.3'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -14922,6 +14922,14 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.95.3",
+      "date": "2026-11-02",
+      "changes": [
+        "Fixed: players and mobs could vanish for good when you went far away while the game camera stayed at the scene. They now go back to their own place.",
+        "Update the Minecraft packs."
+      ]
+    },
     {
       "version": "0.95.2",
       "date": "2026-10-27",

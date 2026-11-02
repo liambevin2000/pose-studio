@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.95.3 (2026-11-02)
+
+- Fixed: players and mobs could vanish for good when you went far away while the game camera stayed at the scene. They now go back to their own place.
+- Update the Minecraft packs.
+
 ## 0.95.2 (2026-10-27)
 
 - Fixed: mobs with a separate baby look (DragonCraft's Nicheny NPCs) had the baby skin painted over their own in Minecraft.
