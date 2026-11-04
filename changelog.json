@@ -1,5 +1,12 @@
 [
   {
+    "version": "0.95.4",
+    "date": "2026-11-04",
+    "changes": [
+      "Moving or turning a cube of a player or mob now says to move its folder instead: only folders (bones) move in Minecraft."
+    ]
+  },
+  {
     "version": "0.95.3",
     "date": "2026-11-02",
     "changes": [

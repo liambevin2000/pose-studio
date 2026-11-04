@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.95.3'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.95.4'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -6730,7 +6730,31 @@ try {
     } catch (e) {
       console.warn('[Pose Studio] copy', e);
     }
+    try {
+      warnCubeEdit(edit);
+    } catch (e) {
+      console.warn('[Pose Studio] cube edit', e);
+    }
   };
+
+  // A cube of a player or mob moved, turned or resized: Minecraft draws its own model, and only
+  // the bones (the folders) are posed there, so say so (the folder is what to move).
+  let cubeWarnedAt = 0;
+  function warnCubeEdit(edit) {
+    if (!edit || !/move|rotat|resize|scale/i.test(String(edit.message || ''))) return;
+    const cubes = ((edit.aspects && edit.aspects.elements) || []).filter((e) => typeof Cube !== 'undefined' && e instanceof Cube);
+    const roots = new Set(mannequinRoots().concat(entityRoots()));
+    const topOf = (node) => {
+      let top = null;
+      for (let n = node.parent; n instanceof Group; n = n.parent) top = n;
+      return top;
+    };
+    const hit = cubes.map(topOf).find((top) => top && roots.has(top));
+    if (!hit || Date.now() - cubeWarnedAt < 20000) return;
+    cubeWarnedAt = Date.now();
+    const folder = cubes.find((c) => topOf(c) === hit).parent;
+    Blockbench.showQuickMessage(`Cubes don't change in Minecraft: move or turn the folder (${folder && folder.name ? folder.name : 'its bone'}) instead`, 5000);
+  }
 
   // ---- Classic menu or the panel (experimental) ------------------------------------------------------
   // Settings ▸ Pose Studio: New Panel Interface (experimental). Off (the default): everything is in
@@ -14922,6 +14946,13 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.95.4",
+      "date": "2026-11-04",
+      "changes": [
+        "Moving or turning a cube of a player or mob now says to move its folder instead: only folders (bones) move in Minecraft."
+      ]
+    },
     {
       "version": "0.95.3",
       "date": "2026-11-02",

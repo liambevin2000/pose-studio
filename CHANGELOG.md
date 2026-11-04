@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.95.4 (2026-11-04)
+
+- Moving or turning a cube of a player or mob now says to move its folder instead: only folders (bones) move in Minecraft.
+
 ## 0.95.3 (2026-11-02)
 
 - Fixed: players and mobs could vanish for good when you went far away while the game camera stayed at the scene. They now go back to their own place.
