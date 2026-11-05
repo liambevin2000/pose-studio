@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.96.0 (2026-11-05)
+
+- Mobs that pick their look from an entity property now have all their variants (DragonCraft soldiers, archers, dragoids, bears, deer…).
+- Open Add Entity… once and reload when asked.
+
 ## 0.95.4 (2026-11-04)
 
 - Moving or turning a cube of a player or mob now says to move its folder instead: only folders (bones) move in Minecraft.

@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.95.4'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.96.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -9111,6 +9111,11 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
       .replace(/\b(array)\.(\w+)\s*\[/gi, (m, a, name) => `A(${JSON.stringify(name)},`)
       .replace(/\]/g, ')')
       .replace(/\b(texture|geometry|material)\.(\w+)/gi, (m, k, name) => JSON.stringify('K:' + name))
+      .replace(/\b(?:query|q)\.property\s*\(\s*'([^']+)'\s*\)/gi, (m, name) => {
+        const n = name.toLowerCase();
+        const value = state[n] !== undefined ? state[n] : /(^|:)is_baby$/.test(n) ? state.is_baby : 0;
+        return typeof value === 'string' ? JSON.stringify(value) : `(${Number(value) || 0})`;
+      })
       .replace(/\b(query|q|variable|v|temp|t|context|c)\.([a-z0-9_.]+)(\s*\([^()]*\))?/gi, (m, k, name) => {
         const n = name.toLowerCase();
         if (typeof state[n] === 'string') return JSON.stringify(state[n]);
@@ -9209,6 +9214,36 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
         }
       }
     }
+    // an entity property in an array's index ("Array.tex[q.property('spark_dc:variant')]", or with
+    // others: "[q.property('x') + 3 * q.property('y')]"): its options are the values the behavior
+    // pack allows (an "is_baby" one is the baby switch, not a choice)
+    const defs = (content.entityPropertyDefs && content.entityPropertyDefs.get(description.identifier)) || {};
+    for (const def of controllers) {
+      const all = Object.assign({}, (def.arrays || {}).textures, (def.arrays || {}).geometries);
+      for (const expr of [def.geometry].concat(def.textures || [])) {
+        for (const m of String(expr || '').matchAll(/\barray\.(\w+)\s*\[([^\]]*)\]/gi)) {
+          const key = Object.keys(all).find((k) => k.toLowerCase() === `array.${m[1]}`.toLowerCase());
+          const list = key ? all[key] : [];
+          for (const p of m[2].matchAll(/\b(?:query|q)\.property\s*\(\s*'([^']+)'\s*\)/gi)) {
+            const name = p[1].toLowerCase();
+            if (choices.has(name) || /(^|:)is_baby$/.test(name)) continue;
+            const pd = defs[p[1]] || defs[name] || {};
+            const alone = m[2].trim().toLowerCase() === p[0].toLowerCase();
+            let values;
+            if (pd.type === 'bool') values = [0, 1];
+            else if (pd.type === 'enum' && Array.isArray(pd.values)) values = pd.values.slice(0, 64);
+            else if (Array.isArray(pd.range) && pd.range.length === 2 && pd.range.every(Number.isFinite)) {
+              values = [];
+              for (let v = Math.ceil(pd.range[0]); v <= pd.range[1] && values.length < 64; v++) values.push(v);
+            } else if (alone) values = list.map((unused, i) => i);
+            if (!values || values.length < 2) continue;
+            // named from what each picks when it's the whole index, else numbered
+            const labels = values.map((v) => (alone && typeof v === 'number' && list[v] ? String(list[v]).replace(/^(texture|geometry)\./i, '') : String(v)));
+            choices.set(name, { name, array: p[1].replace(/^.*:/, ''), size: values.length, labels, values, prop: true });
+          }
+        }
+      }
+    }
     // a variable compared with text: its options are the texts (plus "anything else", named from
     // the entity's own property values when the variable reads one)
     const scripts = description.scripts || {};
@@ -9249,7 +9284,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // A choice's value for a state: text choices pick their text, the others their index.
   function choiceState(choices, combo) {
     const state = Object.assign({}, combo);
-    for (const c of choices) if (c.text && combo[c.name] !== undefined) state[c.name] = c.values[combo[c.name]];
+    for (const c of choices) if ((c.text || c.prop) && combo[c.name] !== undefined) state[c.name] = c.values[combo[c.name]];
     return state;
   }
 
@@ -14946,6 +14981,14 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.96.0",
+      "date": "2026-11-05",
+      "changes": [
+        "Mobs that pick their look from an entity property now have all their variants (DragonCraft soldiers, archers, dragoids, bears, deer…).",
+        "Open Add Entity… once and reload when asked."
+      ]
+    },
     {
       "version": "0.95.4",
       "date": "2026-11-04",
