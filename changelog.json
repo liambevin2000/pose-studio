@@ -1,5 +1,13 @@
 [
   {
+    "version": "0.97.1",
+    "date": "2026-11-16",
+    "changes": [
+      "Fixed: a mob's own particles (Vlachdam's crown) now turn and move with the mob instead of staying as at rest.",
+      "Open Add Entity… once and reload when asked."
+    ]
+  },
+  {
     "version": "0.97.0",
     "date": "2026-11-16",
     "changes": [

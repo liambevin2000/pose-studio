@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.97.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.97.1'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -12040,7 +12040,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
       // (every part of a model shown by several copies can be posed)
       return { key: entryKey(entry), entry, geometry, parts, bones: parts ? geometry.bones.map((b) => b.name) : model ? posableBones(model, boneUsage(content, entry.id)) : [] };
     });
-    const hash = hashString('v20|' + JSON.stringify(models.map((m) => [m.key, m.entry.material, m.bones, m.geometry && m.geometry.bones.length].concat(m.parts ? [m.parts] : []))));
+    const hash = hashString('v21|' + JSON.stringify(models.map((m) => [m.key, m.entry.material, m.bones, m.geometry && m.geometry.bones.length].concat(m.parts ? [m.parts] : []))));
     const registry = proxyRegistry();
     if (registry.hash === hash) return 0;
 
@@ -12211,8 +12211,10 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
       description.scripts.animate.push({ [`a${g}`]: indices.map((i) => `${PROXY_MODEL} == ${i}`).join(' || ') });
     }
     // A mob's particles that play by themselves (Vlachdam's crown of light): the looping ones its
-    // idle state plays, from the same points on the model, for every look of it. A point on a part
-    // the copy doesn't draw (a mob shown by several copies) is kept where it is at rest.
+    // idle state plays, from the same points on the model, for every look of it. On a mob shown by
+    // several copies, a point on a part none of them draws goes on the drawn part nearest it in the
+    // model (what holds it, else the nearest drawn part of what holds it), and plays from the copy
+    // that draws that part: so it moves and turns with it.
     const fxNames = new Map(); // particle identifier -> its name here
     models.forEach((m, i) => {
       const entity = content.entities.get(m.entry.id);
@@ -12223,36 +12225,68 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
       } catch (e) {
         return;
       }
+      if (!loops.length) return;
       const effects = entity.description.particle_effects || {};
-      const geometry = geometries[geometryOf[i]];
-      const hasLocator = (name) => geometry.bones.some((b) => b.locators && b.locators[name] !== undefined);
-      const restLocator = (name) => {
-        const bone = m.geometry.bones.find((b) => b.locators && b.locators[name] !== undefined);
-        return bone ? bone.locators[name] : undefined;
+      const restBones = m.geometry.bones;
+      const byName = new Map(restBones.map((b) => [b.name, b]));
+      const geometryAt = (index) => geometries[Number(String(arrays.geos[index]).replace(/^Geometry\.g/, ''))];
+      // the copies of this look: { index, geometry, bones it draws }
+      const copies = m.parts && registryModels[m.key].parts
+        ? registryModels[m.key].parts.map((p) => ({ index: p.index, geometry: geometryAt(p.index), bones: new Set(p.bones) }))
+        : [{ index: i, geometry: geometries[geometryOf[i]], bones: null }];
+      const copyOf = (bone) => copies.find((c) => !c.bones || c.bones.has(bone));
+      const ownerOf = (locator) => restBones.find((b) => b.locators && b.locators[locator] !== undefined);
+      // where a point goes: { copy, bone } (a drawn bone of that copy), or null
+      const placeFor = (locator) => {
+        const owner = ownerOf(locator);
+        if (!owner) return null;
+        if (!m.parts) return { copy: copies[0], bone: owner.name };
+        for (let b = owner; b; b = byName.get(b.parent)) {
+          if (copyOf(b.name)) return { copy: copyOf(b.name), bone: b.name };
+          // the nearest drawn part inside what holds the point
+          let level = [b.name];
+          for (let depth = 0; depth < 8 && level.length; depth++) {
+            const next = restBones.filter((c) => level.includes(c.parent)).map((c) => c.name);
+            const drawn = next.find((n) => copyOf(n));
+            if (drawn) return { copy: copyOf(drawn), bone: drawn };
+            level = next;
+          }
+        }
+        return null;
+      };
+      const placed = new Map(); // locator -> { copy } once it's on a drawn bone
+      const put = (locator) => {
+        if (placed.has(locator)) return placed.get(locator);
+        const spot = placeFor(locator);
+        if (spot && m.parts) {
+          const bone = spot.copy.geometry.bones.find((b) => b.name === spot.bone);
+          if (bone) bone.locators = Object.assign({}, bone.locators, { [locator]: ownerOf(locator).locators[locator] });
+        }
+        placed.set(locator, spot);
+        return spot;
       };
       loops.forEach((a, k) => {
-        const timeline = {};
+        const timelines = new Map(); // copy index -> its timeline
         for (const [time, list] of Object.entries(a.particle_effects)) {
-          const out = [];
           for (const fx of [].concat(list || [])) {
             const id = fx && effects[fx.effect];
             if (typeof id !== 'string') continue;
             if (!fxNames.has(id)) fxNames.set(id, `p${fxNames.size}`);
             const copy = Object.assign({}, fx, { effect: fxNames.get(id) });
-            if (fx.locator && !hasLocator(fx.locator)) {
-              const at = restLocator(fx.locator);
-              if (at !== undefined) geometry.bones[0].locators = Object.assign({}, geometry.bones[0].locators, { [fx.locator]: at });
-              else delete copy.locator;
-            }
-            out.push(copy);
+            const spot = fx.locator ? put(fx.locator) : null;
+            if (fx.locator && !spot) delete copy.locator;
+            const index = spot ? spot.copy.index : copies[0].index;
+            if (!timelines.has(index)) timelines.set(index, {});
+            const timeline = timelines.get(index);
+            (timeline[time] = timeline[time] || []).push(copy);
           }
-          if (out.length) timeline[time] = out;
         }
-        if (!Object.keys(timeline).length) return;
-        const name = `fx${i}_${k}`;
-        animations.animations[`animation.pose_studio.proxy.${name}`] = { loop: true, animation_length: Number(a.animation_length) || 1, particle_effects: timeline };
-        description.animations[name] = `animation.pose_studio.proxy.${name}`;
-        description.scripts.animate.push({ [name]: `${PROXY_MODEL} == ${i}` });
+        for (const [index, timeline] of timelines) {
+          const name = `fx${i}_${k}_${index}`;
+          animations.animations[`animation.pose_studio.proxy.${name}`] = { loop: true, animation_length: Number(a.animation_length) || 1, particle_effects: timeline };
+          description.animations[name] = `animation.pose_studio.proxy.${name}`;
+          description.scripts.animate.push({ [name]: `${PROXY_MODEL} == ${index}` });
+        }
       });
     });
     if (fxNames.size) description.particle_effects = Object.fromEntries([...fxNames].map(([id, name]) => [name, id]));
@@ -15028,6 +15062,14 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.97.1",
+      "date": "2026-11-16",
+      "changes": [
+        "Fixed: a mob's own particles (Vlachdam's crown) now turn and move with the mob instead of staying as at rest.",
+        "Open Add Entity… once and reload when asked."
+      ]
+    },
     {
       "version": "0.97.0",
       "date": "2026-11-16",

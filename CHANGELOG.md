@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.97.1 (2026-11-16)
+
+- Fixed: a mob's own particles (Vlachdam's crown) now turn and move with the mob instead of staying as at rest.
+- Open Add Entity… once and reload when asked.
+
 ## 0.97.0 (2026-11-16)
 
 - Mobs now show the particles they play by themselves in Minecraft (Vlachdam's crown of light, glowing dust and flames on DragonCraft mobs).
