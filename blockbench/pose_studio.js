@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.96.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.97.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -12040,7 +12040,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
       // (every part of a model shown by several copies can be posed)
       return { key: entryKey(entry), entry, geometry, parts, bones: parts ? geometry.bones.map((b) => b.name) : model ? posableBones(model, boneUsage(content, entry.id)) : [] };
     });
-    const hash = hashString('v19|' + JSON.stringify(models.map((m) => [m.key, m.entry.material, m.bones, m.geometry && m.geometry.bones.length].concat(m.parts ? [m.parts] : []))));
+    const hash = hashString('v20|' + JSON.stringify(models.map((m) => [m.key, m.entry.material, m.bones, m.geometry && m.geometry.bones.length].concat(m.parts ? [m.parts] : []))));
     const registry = proxyRegistry();
     if (registry.hash === hash) return 0;
 
@@ -12210,6 +12210,53 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     for (const { g, indices } of gates) {
       description.scripts.animate.push({ [`a${g}`]: indices.map((i) => `${PROXY_MODEL} == ${i}`).join(' || ') });
     }
+    // A mob's particles that play by themselves (Vlachdam's crown of light): the looping ones its
+    // idle state plays, from the same points on the model, for every look of it. A point on a part
+    // the copy doesn't draw (a mob shown by several copies) is kept where it is at rest.
+    const fxNames = new Map(); // particle identifier -> its name here
+    models.forEach((m, i) => {
+      const entity = content.entities.get(m.entry.id);
+      if (!entity || !m.geometry) return;
+      let loops = [];
+      try {
+        loops = idleAnimations(content, entity.description, m.entry.flags).filter((a) => a && (a.loop === true || a.loop === 'true') && a.particle_effects && typeof a.particle_effects === 'object');
+      } catch (e) {
+        return;
+      }
+      const effects = entity.description.particle_effects || {};
+      const geometry = geometries[geometryOf[i]];
+      const hasLocator = (name) => geometry.bones.some((b) => b.locators && b.locators[name] !== undefined);
+      const restLocator = (name) => {
+        const bone = m.geometry.bones.find((b) => b.locators && b.locators[name] !== undefined);
+        return bone ? bone.locators[name] : undefined;
+      };
+      loops.forEach((a, k) => {
+        const timeline = {};
+        for (const [time, list] of Object.entries(a.particle_effects)) {
+          const out = [];
+          for (const fx of [].concat(list || [])) {
+            const id = fx && effects[fx.effect];
+            if (typeof id !== 'string') continue;
+            if (!fxNames.has(id)) fxNames.set(id, `p${fxNames.size}`);
+            const copy = Object.assign({}, fx, { effect: fxNames.get(id) });
+            if (fx.locator && !hasLocator(fx.locator)) {
+              const at = restLocator(fx.locator);
+              if (at !== undefined) geometry.bones[0].locators = Object.assign({}, geometry.bones[0].locators, { [fx.locator]: at });
+              else delete copy.locator;
+            }
+            out.push(copy);
+          }
+          if (out.length) timeline[time] = out;
+        }
+        if (!Object.keys(timeline).length) return;
+        const name = `fx${i}_${k}`;
+        animations.animations[`animation.pose_studio.proxy.${name}`] = { loop: true, animation_length: Number(a.animation_length) || 1, particle_effects: timeline };
+        description.animations[name] = `animation.pose_studio.proxy.${name}`;
+        description.scripts.animate.push({ [name]: `${PROXY_MODEL} == ${i}` });
+      });
+    });
+    if (fxNames.size) description.particle_effects = Object.fromEntries([...fxNames].map(([id, name]) => [name, id]));
+
     // Minecraft finds the hand bones for held items in the entity's "default" geometry, which the
     // arrays above never use. Point it at a humanoid model (the zombie's if there is one) so
     // humanoid copies draw what they hold.
@@ -14981,6 +15028,14 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.97.0",
+      "date": "2026-11-16",
+      "changes": [
+        "Mobs now show the particles they play by themselves in Minecraft (Vlachdam's crown of light, glowing dust and flames on DragonCraft mobs).",
+        "Open Add Entity… once and reload when asked."
+      ]
+    },
     {
       "version": "0.96.0",
       "date": "2026-11-05",

@@ -1,5 +1,13 @@
 [
   {
+    "version": "0.97.0",
+    "date": "2026-11-16",
+    "changes": [
+      "Mobs now show the particles they play by themselves in Minecraft (Vlachdam's crown of light, glowing dust and flames on DragonCraft mobs).",
+      "Open Add Entity… once and reload when asked."
+    ]
+  },
+  {
     "version": "0.96.0",
     "date": "2026-11-05",
     "changes": [

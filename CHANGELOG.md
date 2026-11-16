@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.97.0 (2026-11-16)
+
+- Mobs now show the particles they play by themselves in Minecraft (Vlachdam's crown of light, glowing dust and flames on DragonCraft mobs).
+- Open Add Entity… once and reload when asked.
+
 ## 0.96.0 (2026-11-05)
 
 - Mobs that pick their look from an entity property now have all their variants (DragonCraft soldiers, archers, dragoids, bears, deer…).
