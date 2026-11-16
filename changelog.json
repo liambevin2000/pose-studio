@@ -1,5 +1,13 @@
 [
   {
+    "version": "0.97.2",
+    "date": "2026-11-16",
+    "changes": [
+      "The bones a mob's own particles come from can be turned and moved now (Vlachdam's crown: vfx_crown_up, vfx_crown_down, vfx_crown_left, vfx_crown_right).",
+      "Open Add Entity… once and reload when asked."
+    ]
+  },
+  {
     "version": "0.97.1",
     "date": "2026-11-16",
     "changes": [

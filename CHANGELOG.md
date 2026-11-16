@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.97.2 (2026-11-16)
+
+- The bones a mob's own particles come from can be turned and moved now (Vlachdam's crown: vfx_crown_up, vfx_crown_down, vfx_crown_left, vfx_crown_right).
+- Open Add Entity… once and reload when asked.
+
 ## 0.97.1 (2026-11-16)
 
 - Fixed: a mob's own particles (Vlachdam's crown) now turn and move with the mob instead of staying as at rest.

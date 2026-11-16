@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.97.1'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.97.2'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -11885,11 +11885,13 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   }
 
   // The parts each copy of a model draws ([[bone names], …]), or null when one copy does it all.
-  function flatParts(geometry) {
+  // `points`: bones that hold the points the mob's own particles come from (see prepareProxy): drawn
+  // too, so they can be turned (Vlachdam's crown)
+  function flatParts(geometry, points = []) {
     if (!anyPartOn() || !geometry || geometry.bones.length <= 9) return null;
     const names = new Set(geometry.bones.map((b) => String(b.name).toLowerCase()));
     if (names.has('rightarm') && names.has('leftarm')) return null;
-    const drawn = geometry.bones.filter((b) => !b.neverRender && ((b.cubes || []).length || b.poly_mesh || (b.texture_meshes || []).length)).map((b) => b.name);
+    const drawn = geometry.bones.filter((b) => (!b.neverRender && ((b.cubes || []).length || b.poly_mesh || (b.texture_meshes || []).length)) || points.includes(b.name)).map((b) => b.name);
     if (!drawn.length) return null;
     const parts = [];
     for (let i = 0; i < drawn.length; i += FLAT_PER_COPY) parts.push(drawn.slice(i, i + FLAT_PER_COPY));
@@ -12032,15 +12034,29 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     return { description: geometry.description, bones: geometry.bones.map(bone) };
   }
 
+  // The bones that hold the points a mob's own looping particles come from (Vlachdam's crown).
+  function fxPointBones(content, entry, geometry) {
+    const entity = content.entities.get(entry.id);
+    if (!entity || !geometry) return [];
+    let loops = [];
+    try {
+      loops = idleAnimations(content, entity.description, entry.flags).filter((a) => a && (a.loop === true || a.loop === 'true') && a.particle_effects && typeof a.particle_effects === 'object');
+    } catch (e) {
+      return [];
+    }
+    const points = new Set(loops.flatMap((a) => Object.values(a.particle_effects).flatMap((list) => [].concat(list || []).map((fx) => fx && fx.locator).filter(Boolean))));
+    return geometry.bones.filter((b) => b.locators && Object.keys(b.locators).some((k) => points.has(k))).map((b) => b.name);
+  }
+
   async function prepareProxy(content, list) {
     const models = list.map((entry) => {
       const geometry = restGeometry(content, entry.id, entry.geometryId, entry.flags);
       const model = geometry ? bedrockToBlockbench(geometry) : null;
-      const parts = flatParts(geometry);
+      const parts = flatParts(geometry, fxPointBones(content, entry, geometry));
       // (every part of a model shown by several copies can be posed)
       return { key: entryKey(entry), entry, geometry, parts, bones: parts ? geometry.bones.map((b) => b.name) : model ? posableBones(model, boneUsage(content, entry.id)) : [] };
     });
-    const hash = hashString('v21|' + JSON.stringify(models.map((m) => [m.key, m.entry.material, m.bones, m.geometry && m.geometry.bones.length].concat(m.parts ? [m.parts] : []))));
+    const hash = hashString('v22|' + JSON.stringify(models.map((m) => [m.key, m.entry.material, m.bones, m.geometry && m.geometry.bones.length].concat(m.parts ? [m.parts] : []))));
     const registry = proxyRegistry();
     if (registry.hash === hash) return 0;
 
@@ -15062,6 +15078,14 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.97.2",
+      "date": "2026-11-16",
+      "changes": [
+        "The bones a mob's own particles come from can be turned and moved now (Vlachdam's crown: vfx_crown_up, vfx_crown_down, vfx_crown_left, vfx_crown_right).",
+        "Open Add Entity… once and reload when asked."
+      ]
+    },
     {
       "version": "0.97.1",
       "date": "2026-11-16",
