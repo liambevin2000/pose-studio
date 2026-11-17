@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.97.2'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.98.0'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -12048,15 +12048,43 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     return geometry.bones.filter((b) => b.locators && Object.keys(b.locators).some((k) => points.has(k))).map((b) => b.name);
   }
 
+  // Parts a mob keeps facing the camera (the glow on the Risen Stoshniq Lord's staff): bones its
+  // idle animations turn by where the camera looks. Model bone name -> { turn: its [x, y, z]
+  // Molang, relative: measured from the entity rather than from what holds it }.
+  function billboardBones(content, entry, geometry) {
+    const out = new Map();
+    const entity = content.entities.get(entry.id);
+    if (!entity || !geometry) return out;
+    let anims = [];
+    try {
+      anims = idleAnimations(content, entity.description, entry.flags);
+    } catch (e) {
+      return out;
+    }
+    for (const a of anims) {
+      for (const [name, channels] of Object.entries((a && a.bones) || {})) {
+        const r = channels && channels.rotation;
+        if (!Array.isArray(r) || r.length !== 3) continue;
+        const text = r.map(String).join(' ');
+        // (only what the copy can work out: the camera and its own turn, no variables of the mob's)
+        if (!/camera_rotation/i.test(text) || /\b(?:v|variable|t|temp|c|context)\./i.test(text)) continue;
+        const bone = geometry.bones.find((b) => b.name.toLowerCase() === name.toLowerCase());
+        if (bone) out.set(bone.name, { turn: r.map((v) => (typeof v === 'number' ? v : String(v))), relative: !!(channels.relative_to && channels.relative_to.rotation === 'entity') });
+      }
+    }
+    return out;
+  }
+
   async function prepareProxy(content, list) {
     const models = list.map((entry) => {
       const geometry = restGeometry(content, entry.id, entry.geometryId, entry.flags);
       const model = geometry ? bedrockToBlockbench(geometry) : null;
       const parts = flatParts(geometry, fxPointBones(content, entry, geometry));
+      const billboards = billboardBones(content, entry, geometry);
       // (every part of a model shown by several copies can be posed)
-      return { key: entryKey(entry), entry, geometry, parts, bones: parts ? geometry.bones.map((b) => b.name) : model ? posableBones(model, boneUsage(content, entry.id)) : [] };
+      return { key: entryKey(entry), entry, geometry, parts, billboards, bones: parts ? geometry.bones.map((b) => b.name) : model ? posableBones(model, boneUsage(content, entry.id)) : [] };
     });
-    const hash = hashString('v22|' + JSON.stringify(models.map((m) => [m.key, m.entry.material, m.bones, m.geometry && m.geometry.bones.length].concat(m.parts ? [m.parts] : []))));
+    const hash = hashString('v23|' + JSON.stringify(models.map((m) => [m.key, m.entry.material, m.bones, m.geometry && m.geometry.bones.length, [...m.billboards.keys()]].concat(m.parts ? [m.parts] : []))));
     const registry = proxyRegistry();
     if (registry.hash === hash) return 0;
 
@@ -12122,11 +12150,36 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     const addFlat = (m, names) => {
       const g = geometries.length;
       const geometryId = `geometry.pose_studio.proxy.${g}`;
-      const flat = names.map((name) => {
-        const bone = Object.assign({}, m.geometry.bones.find((b) => b.name === name), { parent: PROXY_ROOT_BONE });
-        delete bone.rotation;
+      const byName = new Map(m.geometry.bones.map((b) => [b.name, b]));
+      // A part kept facing the camera, or inside one that is: it turns with the camera (around its
+      // own pivot), and is moved where it's posed. Inside one: a holder of its own does the turning,
+      // the part keeps how it sits in what faces the camera.
+      const facing = (name) => {
+        if (m.billboards.has(name)) return { self: true, turn: m.billboards.get(name) };
+        const chain = [byName.get(name)];
+        for (let b = byName.get(chain[0].parent); b; b = byName.get(b.parent)) {
+          if (m.billboards.has(b.name)) return { holder: `${name}__face`, turn: m.billboards.get(b.name), chain };
+          chain.unshift(b);
+        }
+        return null;
+      };
+      const flat = [];
+      const faces = names.map(facing);
+      names.forEach((name, k) => {
+        const bone = Object.assign({}, byName.get(name), { parent: PROXY_ROOT_BONE });
         delete bone.bind_pose_rotation;
-        return bone;
+        const face = faces[k];
+        if (face && face.holder) {
+          flat.push({ name: face.holder, parent: PROXY_ROOT_BONE, pivot: bone.pivot || [0, 0, 0] });
+          bone.parent = face.holder;
+          const q = new THREE.Quaternion();
+          for (const b of face.chain) if (b.rotation) q.multiply(eulerQuaternion([-b.rotation[0], -b.rotation[1], b.rotation[2]]));
+          const e = new THREE.Euler().setFromQuaternion(q, eulerOrder());
+          const turn = toBedrockRot([e.x / DEG, e.y / DEG, e.z / DEG]).map((v) => round(v, 4));
+          if (turn.some((v) => v)) bone.rotation = turn;
+          else delete bone.rotation;
+        } else if (!face) delete bone.rotation;
+        flat.push(bone);
       });
       geometries.push({
         description: { identifier: geometryId, texture_width: m.geometry.texture_width, texture_height: m.geometry.texture_height, visible_bounds_width: FAR_BOUNDS, visible_bounds_height: FAR_BOUNDS, visible_bounds_offset: [0, 2, 0] },
@@ -12137,7 +12190,10 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
       const bones = { [PROXY_ROOT_BONE]: { position: FAR_POSITION, scale: [FAR_SCALE, FAR_SCALE, FAR_SCALE] } };
       names.forEach((name, k) => {
         const a = k * 7;
-        bones[name] = { rotation: [angleExpr(a), angleExpr(a + 1), angleExpr(a + 2)], position: [flatMoveExpr(a + 3, 0), flatMoveExpr(a + 3, 1), flatMoveExpr(a + 3, 2)] };
+        const position = [flatMoveExpr(a + 3, 0), flatMoveExpr(a + 3, 1), flatMoveExpr(a + 3, 2)];
+        const face = faces[k];
+        if (face) bones[face.holder || name] = Object.assign(face.turn.relative ? { relative_to: { rotation: 'entity' } } : {}, { rotation: face.turn.turn, position });
+        else bones[name] = { rotation: [angleExpr(a), angleExpr(a + 1), angleExpr(a + 2)], position };
       });
       animations.animations[`animation.pose_studio.proxy.${g}`] = { loop: true, bones };
       return g;
@@ -12176,6 +12232,8 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
           const o = 3 + m.bones.length * 3 + k * 3;
           bones[bone].position = [offsetExpr(o), offsetExpr(o + 1), offsetExpr(o + 2)];
         });
+        // parts kept facing the camera turn with it, not as posed
+        for (const [bone, turn] of m.billboards) bones[bone] = Object.assign({}, bones[bone], turn.relative ? { relative_to: { rotation: 'entity' } } : {}, { rotation: turn.turn });
         animations.animations[`animation.pose_studio.proxy.${g}`] = { loop: true, bones };
         slot = { g, indices: [] };
         shared.set(geoKey, slot);
@@ -15078,6 +15136,14 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.98.0",
+      "date": "2026-11-17",
+      "changes": [
+        "Parts a mob keeps facing the camera do that in Minecraft too (the glow on the Risen Stoshniq Lord's staff), and can be moved.",
+        "Open Add Entity… once and reload when asked."
+      ]
+    },
     {
       "version": "0.97.2",
       "date": "2026-11-16",

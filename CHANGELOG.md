@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.98.0 (2026-11-17)
+
+- Parts a mob keeps facing the camera do that in Minecraft too (the glow on the Risen Stoshniq Lord's staff), and can be moved.
+- Open Add Entity… once and reload when asked.
+
 ## 0.97.2 (2026-11-16)
 
 - The bones a mob's own particles come from can be turned and moved now (Vlachdam's crown: vfx_crown_up, vfx_crown_down, vfx_crown_left, vfx_crown_right).

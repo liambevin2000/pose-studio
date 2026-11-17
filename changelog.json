@@ -1,5 +1,13 @@
 [
   {
+    "version": "0.98.0",
+    "date": "2026-11-17",
+    "changes": [
+      "Parts a mob keeps facing the camera do that in Minecraft too (the glow on the Risen Stoshniq Lord's staff), and can be moved.",
+      "Open Add Entity… once and reload when asked."
+    ]
+  },
+  {
     "version": "0.97.2",
     "date": "2026-11-16",
     "changes": [
