@@ -1,5 +1,12 @@
 [
   {
+    "version": "0.98.1",
+    "date": "2026-11-17",
+    "changes": [
+      "Moving or turning a mob's folder that Minecraft can't follow now says so, and how to fix it (Move Any Part)."
+    ]
+  },
+  {
     "version": "0.98.0",
     "date": "2026-11-17",
     "changes": [

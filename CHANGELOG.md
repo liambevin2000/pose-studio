@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.98.1 (2026-11-17)
+
+- Moving or turning a mob's folder that Minecraft can't follow now says so, and how to fix it (Move Any Part).
+
 ## 0.98.0 (2026-11-17)
 
 - Parts a mob keeps facing the camera do that in Minecraft too (the glow on the Risen Stoshniq Lord's staff), and can be moved.

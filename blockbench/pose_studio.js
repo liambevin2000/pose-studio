@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.98.0'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.98.1'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -6735,7 +6735,39 @@ try {
     } catch (e) {
       console.warn('[Pose Studio] cube edit', e);
     }
+    try {
+      warnFolderEdit(edit);
+    } catch (e) {
+      console.warn('[Pose Studio] folder edit', e);
+    }
   };
+
+  // A mob's folder moved or turned that Minecraft's copy can't move or turn (a big mob shows only
+  // its first 19 bones, and moves fewer): say so, and what does it (Move Any Part).
+  let folderWarnedAt = 0;
+  function warnFolderEdit(edit) {
+    if (!edit || !/^(move|rotate) (elements|selection|group|pivot)$/i.test(String(edit.message || ''))) return;
+    if (Date.now() - folderWarnedAt < 20000) return;
+    const selected = [].concat(Group.multi_selected || [], Group.first_selected || Group.selected || []).filter((g) => g instanceof Group);
+    const turning = /rotat/i.test(String(edit.message));
+    for (const group of selected) {
+      let root = group;
+      while (root.parent instanceof Group) root = root.parent;
+      if (root === group || !ENTITY_PREFIX.test(root.name) || !root.pose_entity) continue;
+      const model = proxyModelFor(root.pose_entity);
+      if (!model || model.parts) continue; // (every part of a mob shown by several copies follows)
+      const name = group.name.toLowerCase();
+      const bones = (model.bones || []).map((b) => String(b).toLowerCase());
+      const follows = turning ? bones.includes(name) : movingBones(model.bones || []).some((b) => String(b).toLowerCase() === name);
+      if (follows) continue;
+      folderWarnedAt = Date.now();
+      const fix = anyPartOn()
+        ? 'open Add Entity… once and reload when asked'
+        : 'turn on Settings ▸ Pose Studio ▸ Move Any Part, then open Add Entity… once and reload when asked';
+      Blockbench.showQuickMessage(`${group.name} doesn't ${turning ? 'turn' : 'move'} in Minecraft yet: ${fix}`, 6000);
+      return;
+    }
+  }
 
   // A cube of a player or mob moved, turned or resized: Minecraft draws its own model, and only
   // the bones (the folders) are posed there, so say so (the folder is what to move).
@@ -15136,6 +15168,13 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.98.1",
+      "date": "2026-11-17",
+      "changes": [
+        "Moving or turning a mob's folder that Minecraft can't follow now says so, and how to fix it (Move Any Part)."
+      ]
+    },
     {
       "version": "0.98.0",
       "date": "2026-11-17",
