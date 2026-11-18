@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.98.1'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.98.2'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -6670,7 +6670,7 @@ try {
         return;
       }
       if (!root.pose_entity) return;
-      const state = contentCache || (await loadWorldContent(null));
+      const state = await openWorldContent();
       const base = state.list.find((e) => e.id === root.pose_entity.entity);
       const look = base ? variantEntries(state.content, base).find((l) => entryKey(l) === root.pose_entity.key) : null;
       if (look) await setEntityVariant(root, state.content, look);
@@ -12714,7 +12714,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     }
     let state;
     try {
-      state = contentCache || (await loadWorldContent(null));
+      state = await openWorldContent();
     } catch (e) {
       showError('Pose Studio: variants', e);
       return;
@@ -12722,7 +12722,7 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     const base = state.list.find((e) => e.id === root.pose_entity.entity);
     const looks = base ? variantEntries(state.content, base) : [];
     if (looks.length < 2) {
-      Blockbench.showMessageBox({ title: 'Pose Studio', message: `${base ? base.name : root.pose_entity.entity} has no other variants.` });
+      Blockbench.showMessageBox({ title: 'Pose Studio', message: base ? `${base.name} has no other variants.` : `${root.pose_entity.entity} isn't in this world's packs. Pick its world in Add Entity… and try again.` });
       return;
     }
     const choices = looks.choiceList || [];
@@ -13068,14 +13068,21 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   async function previewContent() {
     // the open world's packs: the picked world, else the last played one (loaded again only when
     // that's a different world from the one loaded last)
+    return (await openWorldContent()).content;
+  }
+
+  // The open world's packs and mobs: the picked world, else the last played one (loaded again only
+  // when that's a different world from the one loaded last). Never just the game's own packs: a
+  // world's own mobs (DragonCraft's) are only in its packs.
+  async function openWorldContent() {
     let world = null;
     try {
       world = worldChoices()[0] || null;
     } catch (e) {
       world = null;
     }
-    if (contentCache && (!world || contentCache.worldPath === world.path)) return contentCache.content;
-    return (await loadWorldContent(world)).content;
+    if (contentCache && (!world || contentCache.worldPath === world.path)) return contentCache;
+    return loadWorldContent(world);
   }
 
   // ---- Do the Laundry --------------------------------------------------------------------------------
@@ -15168,6 +15175,13 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.98.2",
+      "date": "2026-11-18",
+      "changes": [
+        "Variant… finds a world's own mobs (Tabaly, Nicheny…) even before Add Entity… has been opened."
+      ]
+    },
     {
       "version": "0.98.1",
       "date": "2026-11-17",

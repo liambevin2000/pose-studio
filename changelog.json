@@ -1,5 +1,12 @@
 [
   {
+    "version": "0.98.2",
+    "date": "2026-11-18",
+    "changes": [
+      "Variant… finds a world's own mobs (Tabaly, Nicheny…) even before Add Entity… has been opened."
+    ]
+  },
+  {
     "version": "0.98.1",
     "date": "2026-11-17",
     "changes": [
