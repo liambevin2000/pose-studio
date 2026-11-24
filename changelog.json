@@ -1,5 +1,12 @@
 [
   {
+    "version": "0.98.3",
+    "date": "2026-11-24",
+    "changes": [
+      "Armour on a slim mannequin shows the same arm pieces as Minecraft (the wide ones)."
+    ]
+  },
+  {
     "version": "0.98.2",
     "date": "2026-11-18",
     "changes": [

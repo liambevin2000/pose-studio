@@ -6,7 +6,7 @@
   'use strict';
 
   // ---- Settings / calibration ---------------------------------------------------------------
-  const PLUGIN_VERSION = '0.98.2'; // set by release.js from changelog.json
+  const PLUGIN_VERSION = '0.98.3'; // set by release.js from changelog.json
   const PORT = 19131;
   const TICK_MS = 50;          // 20 updates/sec max
   const MAX_IN_FLIGHT = 40;    // Minecraft drops requests past ~100 queued commands
@@ -13503,7 +13503,10 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
     const texturePath = d.textures && (d.textures.default || Object.values(d.textures)[0]);
     const texture = await previewTexture(content, `eq_${String(texturePath).split('/').pop()}`, texturePath, geometry.texture_width, geometry.texture_height);
     if (texture && !textures.includes(texture)) textures.push(texture);
-    const visible = attachableVisibility(content, attachable, { slim_arms: mannequin.pose_slim ? 1 : 0, is_enchanted: 0, has_trim: 0 });
+    // slim_arms is 0 even on a slim mannequin: in Minecraft armour never sees a mannequin as slim
+    // (DragonCraft's sets it false; vanilla's reads the arm pivot, which is the wide one), so the
+    // game draws the wide arm pieces and the preview must show those too.
+    const visible = attachableVisibility(content, attachable, { slim_arms: 0, is_enchanted: 0, has_trim: 0 });
     const model = bedrockToBlockbench({ bones: geometry.bones, texture_width: geometry.texture_width, texture_height: geometry.texture_height });
     const byName = new Map(model.bones.map((b) => [b.name.toLowerCase(), b]));
     const anchorOf = (bone) => {
@@ -15175,6 +15178,13 @@ If it showed an error screen instead (a codeword like "Bat"), the reload didn't 
   // CHANGELOG is written by release.js from changelog.json; don't edit it by hand.
   // <changelog>
   const CHANGELOG = [
+    {
+      "version": "0.98.3",
+      "date": "2026-11-24",
+      "changes": [
+        "Armour on a slim mannequin shows the same arm pieces as Minecraft (the wide ones)."
+      ]
+    },
     {
       "version": "0.98.2",
       "date": "2026-11-18",

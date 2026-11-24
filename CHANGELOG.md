@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.98.3 (2026-11-24)
+
+- Armour on a slim mannequin shows the same arm pieces as Minecraft (the wide ones).
+
 ## 0.98.2 (2026-11-18)
 
 - Variant… finds a world's own mobs (Tabaly, Nicheny…) even before Add Entity… has been opened.
